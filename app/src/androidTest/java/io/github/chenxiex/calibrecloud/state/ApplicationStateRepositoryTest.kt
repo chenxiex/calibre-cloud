@@ -169,7 +169,7 @@ class ApplicationStateRepositoryTest {
         val original = localIdentity()
         bind(original)
         val candidate = repository.select(localIdentity().location)
-        val incompatible = original.copy(location = candidate.location, generation = UUID.randomUUID())
+        val incompatible = original.copy(location = requireNotNull(candidate.location), generation = UUID.randomUUID())
 
         expectIllegalArgument { repository.bindValidated(candidate.token, incompatible) }
 

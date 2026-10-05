@@ -2,7 +2,7 @@
 
 用于从不同存储后端上的 Calibre 书库下载元数据与书籍的 Android 应用。
 
-开发环境配置及缓存、SDK 扩展、设备连接方法见 [.github/.devcontainer/README.md](.github/.devcontainer/README.md)。Android 工程的构建与产物说明见 [app/README.md](app/README.md)，实际验证结果见 [第一阶段验证记录](app/verification/phase-1.md)。
+开发环境配置及缓存、SDK 扩展、设备连接方法见 [.github/.devcontainer/README.md](.github/.devcontainer/README.md)。Android 工程的构建与产物说明见 [app/README.md](app/README.md)，实际验证结果见 [第一阶段验证记录](app/verification/phase-1.md) 和 [第二阶段验证记录](app/verification/phase-2.md)。
 
 ## 项目文档
 

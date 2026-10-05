@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks.api
 
+import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.model.CustomColumnId
 import io.github.chenxiex.calibrecloud.model.FileVersion
@@ -37,8 +38,17 @@ sealed interface SnapshotFreshness {
     data class AfterWrite(val writeTaskId: TaskId) : SnapshotFreshness
 }
 
+/** Narrow selection-scoped context; authorizationId identifies an authorization session, never a token. */
+data class CandidateContext(val selectionToken: UUID, val backend: BackendKind, val authorizationId: UUID)
+
 sealed interface TaskRequest {
-    val libraryId: LibraryId
+    val libraryId: LibraryId?
+
+    /** Internal backend registration only; no book identity exists before successful validation. */
+    data class CandidateConfiguration(val context: CandidateContext, val operation: String) : TaskRequest {
+        override val libraryId: LibraryId? = null
+        init { require(operation.matches(Regex("[a-z][a-z0-9_]{0,63}"))) }
+    }
 
     data class MetadataSync(
         override val libraryId: LibraryId,

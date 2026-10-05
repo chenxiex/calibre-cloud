@@ -6,6 +6,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
 import io.github.chenxiex.calibrecloud.model.*
 import io.github.chenxiex.calibrecloud.storage.api.*
+import io.github.chenxiex.calibrecloud.tasks.api.CandidateContext
 import io.github.chenxiex.calibrecloud.storage.cache.ApplicationCopyHandleFactory
 import io.github.chenxiex.calibrecloud.storage.cache.HandleOpenResult
 import kotlinx.coroutines.CoroutineDispatcher
@@ -13,7 +14,13 @@ import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.io.IOException
 
-data class LibrarySelection(val token: UUID, val location: LibraryLocation, val identity: LibraryIdentity?)
+data class LibrarySelection(
+    val token: UUID,
+    val location: LibraryLocation?,
+    val identity: LibraryIdentity?,
+    val backend: BackendKind = requireNotNull(location).backend,
+    val authorizationId: UUID? = null,
+)
 
 /**
  * All public suspend operations dispatch database/file work off the caller's thread.
@@ -28,6 +35,32 @@ class ApplicationStateRepository(
 ) : CompleteCopyQuery {
     suspend fun select(location: LibraryLocation): LibrarySelection = withContext(ioDispatcher) {
         transaction { selectInTransaction(this, location) }
+    }
+
+    /** Starts explicit account/directory discovery before a stable root exists; no fabricated identity. */
+    suspend fun beginCandidate(backend: BackendKind, authorizationId: UUID): CandidateContext = withContext(ioDispatcher) {
+        transaction {
+            val token = UUID.randomUUID()
+            val values = ContentValues().apply {
+                put("singleton", 1); put("token", token.toString()); put("backend", backendCode(backend))
+                put("authority", ""); put("root_id", ""); put("account_id", ""); put("drive_id", "")
+                putNull("library_id"); put("authorization_id", authorizationId.toString())
+            }
+            if (update("current_selection", values, "singleton = 1", null) == 0) insertOrThrow("current_selection", null, values)
+            CandidateContext(token, backend, authorizationId)
+        }
+    }
+
+    /** Compare-and-publish the discovered stable location in the same selection transaction. */
+    suspend fun resolveCandidate(context: CandidateContext, location: LibraryLocation): Boolean = withContext(ioDispatcher) {
+        transaction {
+            val selected = current(this) ?: return@transaction false
+            if (selected.token != context.selectionToken || selected.backend != context.backend ||
+                selected.authorizationId != context.authorizationId || location.backend != context.backend) return@transaction false
+            if (selected.location != null && selected.location != location) return@transaction false
+            update("current_selection", locationValues(location), "singleton = 1", null)
+            true
+        }
     }
 
     suspend fun current(): LibrarySelection? = withContext(ioDispatcher) { current(database.readableDatabase) }
@@ -140,6 +173,7 @@ class ApplicationStateRepository(
             put("singleton", 1)
             put("token", selection.token.toString())
             putNull("library_id")
+            putNull("authorization_id")
         }
         if (db.update("current_selection", values, "singleton = 1", null) == 0) db.insertOrThrow("current_selection", null, values)
         return selection
@@ -147,8 +181,10 @@ class ApplicationStateRepository(
 
     private fun current(db: SQLiteDatabase): LibrarySelection? = db.query("current_selection", null, "singleton = 1", null, null, null, null).use {
         if (!it.moveToFirst()) null else LibrarySelection(
-            UUID.fromString(it.text("token")), it.location(),
+            UUID.fromString(it.text("token")), if (it.text("root_id").isEmpty()) null else it.location(),
             it.optionalText("library_id")?.let { id -> binding(db, LibraryId(UUID.fromString(id))) },
+            when (it.text("backend")) { "local" -> BackendKind.LOCAL; "onedrive" -> BackendKind.ONEDRIVE; else -> error("Unknown backend") },
+            it.optionalText("authorization_id")?.let(UUID::fromString),
         )
     }
 

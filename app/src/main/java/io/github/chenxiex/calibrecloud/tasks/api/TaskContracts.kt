@@ -5,7 +5,7 @@ import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import kotlinx.coroutines.flow.Flow
 import java.util.UUID
 
-/** Allocated transactionally by the future persistent queue, not by wall-clock time. */
+/** Allocated transactionally by the persistent queue, not by wall-clock time. */
 data class QueueSequence(val value: Long) {
     init { require(value >= 0) }
 }
@@ -24,6 +24,7 @@ data class PriorityPromotion(val origin: TaskOrigin, val sequence: QueueSequence
 }
 
 enum class TaskStage(val code: String) {
+    CANDIDATE_ACCESS("candidate_access"),
     METADATA_FETCH("metadata_fetch"), METADATA_IMPORT("metadata_import"),
     FORMAT_TRANSFER("format_transfer"), FORMAT_PUBLISH("format_publish"),
     COVER_TRANSFER("cover_transfer"), COVER_PUBLISH("cover_publish"),
@@ -141,7 +142,7 @@ sealed interface TaskEvent {
 }
 
 /**
- * Explicit durable submission and observation only. No implementation exists in phase one.
+ * Explicit durable submission and observation. Implemented by DurableTaskQueue in phase two.
  * Implementations must atomically persist requests, deduplication, dependencies and queue sequences;
  * only eligible tasks in the active library execute, one at a time without automatic preemption.
  * Waiting work cannot block unrelated eligible work; batches reselect between resource children.

@@ -10,6 +10,8 @@ import io.github.chenxiex.calibrecloud.storage.cache.PrivateCopyReader
 import io.github.chenxiex.calibrecloud.storage.local.AndroidDirectoryPermissions
 import io.github.chenxiex.calibrecloud.storage.local.LocalDirectoryAuthorization
 import io.github.chenxiex.calibrecloud.storage.local.PreferencesLocalDirectoryConfiguration
+import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
+import io.github.chenxiex.calibrecloud.tasks.persistence.TaskCoordinator
 import kotlinx.coroutines.Dispatchers
 
 /** One process-owned state store and reader; lazy construction performs no source or database I/O. */
@@ -18,6 +20,8 @@ class ApplicationDependencies(context: Context) {
     val database by lazy { ApplicationStateDatabase(applicationContext) }
     private val bookFiles by lazy { PrivateBookFiles(applicationContext.filesDir) }
     val state by lazy { ApplicationStateRepository(database, bookFiles, Dispatchers.IO) }
+    val taskQueue by lazy { DurableTaskQueue(database, Dispatchers.IO) }
+    val taskCoordinator by lazy { TaskCoordinator(taskQueue, emptyList()) }
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO) }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }
     val localConfiguration by lazy {
