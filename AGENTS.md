@@ -53,6 +53,8 @@
 
 ## 验证
 
+示例书库位于 [assets/calibre-sample/](assets/calibre-sample/)，根目录包含 `metadata.db`，可用于准备独立测试书库副本；需要写入的验证在副本上执行。
+
 Android 工程的模块开发与验证约束见 [app/AGENTS.md](app/AGENTS.md)，依赖和 Wrapper 维护约束见 [gradle/AGENTS.md](gradle/AGENTS.md)。不存在的任务或尚未执行的命令不得记录为通过。环境初始化、SDK 安装与 ADB 操作遵循开发容器说明及上述写入范围。
 
 - 功能开发只添加保障对应功能路径的必要测试；文档等低影响变更执行相应静态检查即可。修复 bug 时，先添加能够稳定复现的测试，再修复并验证。

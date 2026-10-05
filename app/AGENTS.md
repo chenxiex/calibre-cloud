@@ -9,6 +9,12 @@
 - 单 `:app` 模块按职责分包，在需要注入组件时手工构造应用依赖容器，不引入 DI 框架、KSP、Graph SDK 或额外业务模块。业务持久化使用 Android 原生 SQLite；WorkManager 的传递 Room 依赖不作为业务数据库。
 - 依赖版本与更新规则见 [gradle/AGENTS.md](../gradle/AGENTS.md)。模块启用严格 dependency locking，普通验证不带 `--write-locks`。
 
+## 基础契约导航
+
+- [身份模型约束](src/main/java/io/github/chenxiex/calibrecloud/model/AGENTS.md)：书库、书籍、格式、后端定位和逻辑路径校验。
+- [存储约束](src/main/java/io/github/chenxiex/calibrecloud/storage/AGENTS.md)：完整记录查询、普通读取、句柄生命周期和显式操作边界。
+- [文件提供约束](src/main/java/io/github/chenxiex/calibrecloud/files/AGENTS.md)：私有文件代次、FileProvider 范围和临时只读授权。
+
 ## Manifest 与入口
 
 - debug 使用 `.debug` application ID 后缀和可辨认名称，AndroidTest 使用独立测试包。provider authority 均由 `${applicationId}` 派生；书籍 provider 使用 `${applicationId}.books`，只在完整副本读取契约实现时开放。

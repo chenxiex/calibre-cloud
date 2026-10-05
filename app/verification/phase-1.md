@@ -90,7 +90,7 @@ gradle wrapper --gradle-version 9.3.1 --distribution-type bin --gradle-distribut
 - 最小完整下载记录包含身份、内部文件代次、标题、可空大小、已保存版本与三种源状态。结构化错误不携带异常全文或凭据 URL。
 - `PrivateCopyReader` 仅查询完整记录并在注入的 I/O dispatcher 打开应用文件；缺失不下载、不访问源、不等待队列。`PrivateBookFiles` 只读取 `filesDir/books/<LibraryId>/<fileGeneration>.book`，拒绝链接、目录、空文件及已知长度不符；调用方关闭句柄，取消交付时由读取器关闭未交出的句柄。
 - FileProvider 非导出，authority 按 application ID 派生，XML 只开放 `filesDir/books/`。当前没有外部 Intent 或 URI 授权流程；第三阶段授予临时只读权限并实现 MIME／友好显示名。
-- 显式源同步／加载和精确副本维护只有接口；已读写回只有书籍、动态栏目和固定布尔目标的意图，没有通用源上传／删除能力。契约细节见 [存储说明](../src/main/java/io/github/chenxiex/calibrecloud/storage/README.md)。
+- 显式源同步／加载和精确副本维护只有接口；已读写回只有书籍、动态栏目和固定布尔目标的意图，没有通用源上传／删除能力。契约细节见 [存储开发约束](../src/main/java/io/github/chenxiex/calibrecloud/storage/AGENTS.md)。
 
 ### 实际检查与锁定补齐
 
