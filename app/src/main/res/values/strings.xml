@@ -12,5 +12,6 @@
     <string name="next_page">下一页（第 2 页）</string>
     <string name="previous_page">上一页（第 1 页）</string>
     <string name="onedrive_authorization">OneDrive</string>
-    <string name="onedrive_unavailable">登录尚未接入。配置说明见项目 README 的“OneDrive 应用注册”。</string>
+    <string name="onedrive_unavailable">OneDrive 未配置。请按 README 的“OneDrive 应用注册”说明，在 local.properties 中填写 onedrive.clientId、onedrive.redirectUri 和 onedrive.debugRedirectUri。本地目录授权仍可使用。</string>
+    <string name="onedrive_configured">OneDrive 配置有效，尚未登录。浏览器登录将在后续步骤接入。</string>
 </resources>

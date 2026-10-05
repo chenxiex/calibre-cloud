@@ -10,3 +10,5 @@ local.properties
 .env.*
 !.env.example
 __pycache__/
+
+.oauth-verification/

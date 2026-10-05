@@ -1,6 +1,6 @@
 # Android 工程
 
-当前工程提供本地 SAF 目录授权入口、应用完整副本读取和显式任务基础契约。任务契约说明见 [任务模块](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)。OneDrive 登录、书库访问、任务队列、下载和阅读器尚未实现。
+当前工程提供本地 SAF 目录授权入口、应用完整副本读取和显式任务基础契约。任务契约说明见 [任务模块](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)。按变体生成的 OneDrive OAuth 配置已接入；浏览器登录、书库访问、任务队列、下载和阅读器尚未实现。
 
 ## 本地目录授权
 
@@ -10,14 +10,22 @@
 
 ## 构建
 
-在指定开发容器中，从项目根目录运行：
+使用 JDK 21、Android SDK 36 和 Build Tools 36.0.0；最低支持 Android 11 / API 30。环境与设备连接见 [开发容器说明](../.github/.devcontainer/README.md)。
+
+在项目根目录运行：
 
 ```bash
 ./gradlew --version
 ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
 ```
 
-构建使用 JDK 21、Android SDK 36 和 Build Tools 36.0.0，最低支持 Android 11 / API 30。环境配置与设备连接方法见 [开发容器说明](../.github/.devcontainer/README.md)。依赖版本见 [版本目录](../gradle/libs.versions.toml)，实际解析版本见 [依赖锁](gradle.lockfile)。
+默认资源参数见 [gradle.properties](../gradle.properties)：worker 上限 4、JVM 可用处理器数 4、堆上限 2 GiB。临时降低资源占用：
+
+```bash
+./gradlew :app:assembleDebug --max-workers=1 '-Dorg.gradle.jvmargs=-Xmx2g -XX:ActiveProcessorCount=1 -Dfile.encoding=UTF-8'
+```
+
+依赖版本见 [版本目录](../gradle/libs.versions.toml)，实际解析版本见 [依赖锁](gradle.lockfile)。
 
 ## 构建产物
 
@@ -31,6 +39,24 @@ release 产物未签名。debug 使用独立包名和应用数据目录，可与
 
 ## OneDrive 配置
 
-当前工程尚未读取 OAuth 属性或接入登录，AppAuth 回调接收器处于禁用状态。无注册配置也可构建；后续注册方式见 [OneDrive 应用注册](../README.md#onedrive-应用注册)。
+工程读取根目录被忽略的 `local.properties`，保留 `sdk.dir` 等已有属性。微软注册步骤与无凭据模板见 [OneDrive 应用注册](../README.md#onedrive-应用注册)。三项属性全部填写后才启用配置：
+
+| 属性 | 用途 |
+| --- | --- |
+| `onedrive.clientId` | 两变体共用的开发者注册标识 |
+| `onedrive.redirectUri` | release 完整回调 URI |
+| `onedrive.debugRedirectUri` | debug 完整回调 URI |
+
+正式版和 debug 版推荐使用各自独立的小写自定义 scheme，并与微软注册的 URI 完全一致；不需要 client secret。
+
+缺少任一项时仍可构建和使用本地授权，OneDrive 页面显示配置指引。完整配置非法或回调范围重叠时，按构建错误中指出的属性修正。当前配置有效后显示“尚未登录”，浏览器登录将在后续步骤接入。
+
+从根目录验证配置矩阵：
+
+```bash
+python3 scripts/verify-oauth-config.py
+```
+
+结果与日志保存在被忽略的 `.oauth-verification/` 中。配置校验、回调匹配和授权实现约束见 [授权模块 AGENTS.md](src/main/java/io/github/chenxiex/calibrecloud/auth/AGENTS.md)。
 
 构建结果、产物检查及未完成的验收见 [第一阶段验证记录](verification/phase-1.md)。面向 agent 的模块开发约束见 [AGENTS.md](AGENTS.md)。

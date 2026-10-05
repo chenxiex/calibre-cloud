@@ -34,6 +34,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
 import io.github.chenxiex.calibrecloud.R
+import io.github.chenxiex.calibrecloud.auth.OneDriveOAuthConfiguration
 import io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationState
 import io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus
 import io.github.chenxiex.calibrecloud.storage.local.DirectorySelectionIssue
@@ -113,7 +114,11 @@ private fun AuthorizationPage(state: DirectoryAuthorizationState, busy: Boolean,
                 StaticButton(stringResource(if (busy) R.string.local_checking else R.string.local_select), !busy, onSelect)
             } else {
                 Text(stringResource(R.string.onedrive_authorization), style = MaterialTheme.typography.titleMedium)
-                Text(stringResource(R.string.onedrive_unavailable))
+                Text(stringResource(if (OneDriveOAuthConfiguration.fromBuildConfiguration() == null) {
+                    R.string.onedrive_unavailable
+                } else {
+                    R.string.onedrive_configured
+                }))
             }
         }
         StaticButton(stringResource(if (page == 0) R.string.next_page else R.string.previous_page), true) { page = 1 - page }

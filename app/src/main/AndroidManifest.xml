@@ -27,9 +27,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity
-            android:name="net.openid.appauth.RedirectUriReceiverActivity"
-            android:enabled="false" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.books"

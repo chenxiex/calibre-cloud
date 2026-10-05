@@ -283,3 +283,91 @@ adb -s <已核对设备> shell am instrument -w -r -e class io.github.chenxiex.c
 6. 通过系统应用信息对 Calibre Cloud Debug 执行强行停止后重新打开，确认仍为已授权／书库待验证。
 
 用户反馈后，重新通过 ADB 逐文件核对手动测试副本的 SHA-256，5 个文件均与仓库样本一致。执行 `adb uninstall io.github.chenxiex.calibrecloud.debug` 返回 `Success`；限定包查询确认 debug／测试包均不存在。仅删除本次新建的手动测试副本，未接触正式应用或真实书库。用户手动验收通过，按 `plan.md` 的确认后提交流程提交步骤 04；SD 卡／云端条件场景仍未执行，步骤 05 未开始。
+
+
+## 步骤 05：按变体生成 OneDrive OAuth 配置（2026-10-05）
+
+对应 R08、R31、R33–R35。本步读取约定的三项构建属性，生成变体运行配置及精确回调接收范围；入口区分缺配置与配置有效但尚未登录。完整回调地址检查允许协议返回的 query，拒绝不匹配的 scheme、authority、path 和 fragment；地址检查不替代后续 state／待处理事务验证。本步不启动浏览器、不访问 Graph、不兑换或存储令牌。
+
+### 构建与必要修正
+
+初次执行 JVM 测试、两变体构建和 lint 时，启用 BuildConfig 新增 Java 编译路径，严格依赖锁拒绝缺少锁状态的 `androidJdkImage` 配置。按锁维护约定执行：
+
+```bash
+./gradlew :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease --write-locks
+```
+
+结果 `BUILD SUCCESSFUL`。锁文件只在 `empty` 行新增 `androidJdkImage`，依赖和版本没有变化。
+
+合并产物复核发现仅替换 intent-filter 未清除依赖的另一条宽泛 scheme filter，已改为整体替换 receiver。带 host／无 host 使用两个字面 Manifest 模板；无 host 必须省略 host/path 属性，空属性不能视为缺省。模板选择、placeholders 与 BuildConfig 共用同一 URI 解析结果。
+
+修正后执行不更新锁的验证：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+```
+
+结果 `BUILD SUCCESSFUL`（2m 20s）。JUnit XML 汇总 **42 项测试，0 failures、0 errors、0 skipped**，其中新增的 2 项测试覆盖完整回调地址拒绝与无 host 路径检查。AndroidTest APK 构建成功不代表设备测试通过。本步两个 lint 报告均成功生成；工具提示 SDK XML schema 版本差异，未影响任务结果。
+
+### 用户追加的构建资源限制
+
+用户反馈构建占满 CPU 后，在根 `gradle.properties` 设置 worker 上限 2、关闭项目并行、构建 JVM `ActiveProcessorCount=2`，堆上限保持 2 GiB。终止本次旧矩阵进程后按新设置重新运行，未停止其他项目或 IDE 的 daemon；进程参数已确认包含新的 JVM 限制。矩阵按顺序执行 fixture，不同时启动多组构建。配置解释和进一步降到 1 的临时命令见 [工程构建说明](../README.md#构建)。这些设置不是整个进程树的硬 CPU 百分比或总内存配额。
+
+### 构建矩阵与验收状态
+
+执行 `python3 scripts/verify-oauth-config.py`，结果 **13/13 通过**。每组在被忽略的 `.oauth-verification/` 内使用独立工程副本，均继承当次资源限制（2 个 worker／JVM 处理器），并以固定锁文件构建；原 `local.properties` 的逐字节不变检查通过。完整 JSON 汇总和脱敏 Gradle 日志留在该临时目录，不提交。
+
+| Fixture | 实际结果 |
+| --- | --- |
+| `missing` | 两变体构建成功；运行值为空、接收器禁用且禁用 scheme 独立 |
+| `partial-client`、`partial-callback` | 同上；不打包部分配置 |
+| `host-a`、`host-b` | 两组独立回调各自正确生成 |
+| `no-host` | 两变体构建成功；Manifest 无 host/path 属性，运行配置保留完整单斜杠 URI |
+| `same-scheme-hosts`、`same-scheme-paths` | 接收范围可隔离；生成精确 host/path，无遗留宽泛 filter |
+| `safe-client-string` | 引号和反斜线安全生成，编译后配置与输入一致 |
+| `invalid-scheme`、`credentials` | 完整配置构建失败，指出相应属性 |
+| `overlap`、`no-host-overlap` | 完整配置构建失败，同时指出两个回调属性与范围重叠 |
+
+所有可构建 fixture 的 debug/release 共 18 个 APK 均由 SDK `apkanalyzer manifest print` 核对 application ID、接收器启用状态、唯一 filter、scheme 与适用的 host/path；同时核对 generated BuildConfig 的 client ID、对应完整回调和 merged Manifest。测试注册标识仅为虚构构建输入，未验证微软注册有效性或真实登录。
+
+资源配置使用 `/tmp` 中的临时 Gradle init 探针核对运行时值，再执行完整工程命令，不并行运行矩阵与工程复验：
+
+```bash
+./gradlew -I /tmp/calibre-step05-resource-check.gradle verifyBuildResourceLimits :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+```
+
+探针断言实际 worker 上限为 2、项目并行关闭、`Runtime.availableProcessors()` 为 2，并确认 JVM 参数中存在 `-XX:ActiveProcessorCount=2`。结果 `BUILD SUCCESSFUL`（1m 3s；9 executed、129 up-to-date），复用同一输入的 42 项 JVM 测试结果。两变体 lint 均为 **0 errors、5 warnings**，警告均为固定工具／依赖的版本更新提示；本步不调整既有版本。临时探针只用于核对本次运行参数，不引入生产构建任务。
+
+现有开发者配置下的实际 APK 另核对 API 30、debug `.debug` 与正式包隔离、可调试状态、回调启用状态与唯一 filter、备份关闭、`${applicationId}.books` authority。网络／后台平台权限仍未开放，保留 AndroidX 生成的应用私有 signature 动态接收权限；首次产物探针把此原有权限也当作禁止项，断言失败，修正检查范围后两变体均通过。本地授权入口与配置保存代码未改动，缺 OAuth 配置不关闭本地入口。
+
+| 最终产物 | SHA-256 |
+| --- | --- |
+| debug APK | `f7c775fd5eb7d7f2f07594e2a4ca41c0df330f417ac273aa66c105b86df6e55a` |
+| release 未签名 APK | `9bf389d2997517464d02fc9f89da51eda7f612a736195bd3f0e2224ac7a9ea9c` |
+
+`git diff --check`、Python 脚本编译检查和改动文档的本地链接检查通过；`plan.md`、`local.properties`、矩阵副本及产物仍被忽略，未暂存或提交。
+
+- 用户共同审阅构建矩阵、配置错误和入口说明：**已确认**。用户审阅并调整资源配置及文档后，明确要求提交步骤 05（2026-10-05）。
+- 本步不安装应用或操作测试书库；未执行真实登录或真机回调验证。这些与令牌安全存储属于步骤 06。
+- 完整 AC09、本地／OneDrive 源访问、持久队列、同步、下载与阅读器仍按后续阶段验收，不以本步构建结果视为通过。
+
+
+### 资源上限调整为 4（2026-10-05）
+
+用户要求将 worker 上限与 JVM 可用处理器数提高到 4。根 `gradle.properties` 已设置 `org.gradle.workers.max=4` 和 `-XX:ActiveProcessorCount=4`；`org.gradle.parallel=false` 与 2 GiB 堆上限保留。此为构建资源参数调整，关联 R34 的工程验证，不改变产品行为或步骤 05 验收门槛。
+
+执行临时 init 探针及 `:app:assembleDebug :app:assembleRelease`：
+
+```bash
+./gradlew -I /tmp/calibre-resource-check-4.gradle verifyBuildResourceLimits :app:assembleDebug :app:assembleRelease
+```
+
+探针断言并实际输出 `workers=4, parallel=false, JVM processors=4`，同时核对 JVM 参数中包含 `-XX:ActiveProcessorCount=4`。构建结果 `BUILD SUCCESSFUL`（17s；4 executed、86 up-to-date）；`git diff --check` 通过。上述 13 组 OAuth 矩阵和完整测试／lint 记录使用先前的 2 上限，不将其改记为在 4 上限下重跑；此次只复验资源配置和两变体构建。
+
+`org.gradle.parallel` 是项目间任务并行开关；可设置为 `true` 并由 `org.gradle.workers.max=4` 约束 worker 并发，但这不是整个进程树的线程数上限。当前单 `:app` 模块继续关闭项目并行，不影响模块内部 worker 并发。配置说明已同步到工程 README 与 Gradle 开发约束。
+
+用户随后要求将项目并行选项恢复默认，已删除根 `gradle.properties` 中显式的 `org.gradle.parallel=false`，保留 worker 与 JVM 处理器上限 4，并同步当前配置说明。执行 `./gradlew -I /tmp/calibre-resource-check-4.gradle verifyBuildResourceLimits`，实际输出仍为 `workers=4, parallel=false, JVM processors=4`，`BUILD SUCCESSFUL`（1s）；`git diff --check` 通过。项目并行默认仍为关闭，此次没有改变构建行为，不重复功能测试或构建矩阵。
+
+按用户要求精简工程 README 的构建部分：保留环境参数、常用检查命令、默认资源参数与临时覆盖命令，删除 parallel 说明和扩展解释。只调整文档，未改变构建配置或产品行为；README 本地链接检查、parallel 文本移除检查和 `git diff --check` 通过，未重复构建或功能测试。
+
+按用户要求拆分 OneDrive 文档：工程 README 保留配置属性、注册链接、缺配置／错误处理、当前登录能力和验证命令；构建生成、回调接收范围、完整地址校验、协议参数、隐私及矩阵隔离约束移入授权模块 `AGENTS.md`。只调整文档，R08 等实现与验收范围不变；改动文档的本地链接检查和 `git diff --check` 通过，未重复构建或功能测试。
