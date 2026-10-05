@@ -463,3 +463,27 @@ adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.auth.Encrypt
 上述真实账号结果来自用户操作与确认；未采集账号、密码、令牌或完整回调 URL。Activity 重建后的真实浏览器往返未收到单独操作记录，不补写为实测通过；现有进程重启验收与自动状态恢复测试保持各自证据范围。阶段结论遵循用户共同验收；源后端、持久任务、同步、下载、阅读器和已读写回仍未实现，AC01–AC09 完整功能验收不因此关闭。步骤 04 条件补验保持原记录。
 
 保存用户验收结果后，ADB 检查确认设备上只有应用 debug 测试包；执行 `adb uninstall io.github.chenxiex.calibrecloud.debug` 返回 `Success`，再次检查确认 debug 与 AndroidTest 包均不存在。此次没有安装或卸载正式应用。用户共同验收后仅更新验证记录与临时计划，不改生产代码，沿用本步已通过的构建、测试和 lint；执行文档本地链接检查、提交范围检查和 `git diff --check`。
+
+## 国际化规格补充与静态复核（2026-10-05）
+
+对应新增 R36、AC10，以及 R01–R02 的首版语言范围。按用户指示补充“首版仅支持中文、预留多语言翻译接口、避免硬编码可翻译的用户可见文案”，同步 questions.md 的 Q30。本次只修改规格、决策追踪和本检查记录，未修改生产代码。
+
+### 当前实现结论
+
+已实现的本地目录授权和 OneDrive 登录入口符合文案资源化要求，未发现可翻译的界面文案硬编码在生产 Kotlin 或布局中的情况。现有 Android 资源键及 `stringResource` 已提供翻译入口，后续可通过同名的 `values-<locale>` 资源增加语言，无需另建翻译接口或修改业务判断。
+
+| 检查项 | 证据与结论 |
+| --- | --- |
+| 默认中文与资源引用 | [strings.xml](../src/main/res/values/strings.xml) 有 29 个默认字符串；没有其它语言的 strings.xml。中文提示位于无语言限定的 `values/`，具备默认资源回退条件 |
+| 界面标题、状态、错误与按钮 | [MainActivity.kt](../src/main/java/io/github/chenxiex/calibrecloud/ui/MainActivity.kt) 的所有文案入口使用 `stringResource`；`StaticButton` 只展示调用方传入的资源文案，没有固定文字拼接 |
+| 业务状态与错误映射 | 本地授权返回 `DirectoryAuthorizationStatus`／`DirectorySelectionIssue`，OneDrive 返回 `LoginStatus`／`LoginIssue`，UI 将其映射到资源 ID；未发现用译文判断状态或直接显示原始异常的路径 |
+| 应用名称 | [构建脚本](../build.gradle.kts) 按变体以 `resValue` 生成 `app_name` 品牌资源；Manifest 使用 `@string/app_name`，首页通过 `stringResource` 获取，属于资源化展示 |
+| 内部字符串 | 协议字段、持久化键、格式标识、内部异常和诊断日志不属于应用自有界面文案；格式标识使用 `Locale.ROOT` 规范化，不随显示语言变化 |
+
+### 实际检查与验收边界
+
+- 执行 `rg -n --glob '*.kt' '[\p{Han}]' app/src/main/java`，无匹配；另外搜索并人工检查文字展示调用、资源引用、Manifest 和 Gradle 生成资源，不将“没有中文字符”单独视为资源化证明。只检查当前 app 源码，不检查 `.oauth-verification/` 中的工程副本。
+- 执行临时 Python 静态检查：解析默认 strings.xml，确认 29 个资源无重复键、无空值；合并构建生成的 `app_name`，核对生产 Kotlin／Java／XML 引用的全部 30 个资源键均有定义，29 个默认字符串均有引用。检查通过。
+- 修改文档的本地链接检查和 `git diff --check` 通过。本次没有运行 Gradle 构建、lint、自动功能测试或真机语言切换测试；仅作静态结论，不记录为新的运行时验收通过。
+
+完整图书馆、任务通知、阅读器兜底名称及动态日期／数量／文件大小展示尚未实现，文案参数与数量资源在这些路径的使用仍需随实现补验。默认中文回退已核对资源配置，未新增其它语言译文或进行设备语言切换实测；AC10 的完整首版验收保持未完成，不改变前六步已有验收结论。系统文件选择器与浏览器的文案由系统／第三方控制，不作为应用自有中文文案的资源化检查对象。
