@@ -1,0 +1,4 @@
+{
+    "name": "Calibre Cloud Android",
+    "image": "ghcr.io/chenxiex/calibre-cloud/devcontainer:latest"
+}

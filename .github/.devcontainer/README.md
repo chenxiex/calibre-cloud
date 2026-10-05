@@ -16,6 +16,8 @@
 | `sqlite3`、`jq`、`curl` | Debian 仓库版本 | 检查 Calibre 的 `metadata.db` 和 API 响应 |
 | Python 3、`rsync`、`ripgrep`、`shellcheck`、`zip`、`unzip` | Debian 仓库版本 | 初始化缓存、搜索和脚本检查 |
 
+基础镜像已提供 `vscode` 用户、sudo，以及 `ca-certificates`、`curl`、`git`、`jq`、`rsync`、`zip`、`unzip`，Dockerfile 仅安装额外依赖，参考[基础镜像内容清单](https://github.com/devcontainers/images/blob/main/src/base-debian/history/2.2.1.md)。构建结束前切换为 `vscode`，由该用户创建缓存目录，无需额外修改目录所有者。
+
 镜像使用 [Debian trixie 提供的 OpenJDK 21](https://packages.debian.org/trixie/openjdk-21-jdk-headless)。[AGP 9.1.1 官方兼容表](https://developer.android.com/build/releases/agp-9-1-0-release-notes)要求 Gradle 至少 9.3.1、JDK 至少 17 和 Build Tools 至少 36.0.0；JDK 21 满足最低要求，也在 [Gradle 支持范围](https://docs.gradle.org/current/userguide/compatibility.html#java_runtime)内。AGP、Kotlin、Compose 和应用库的实际版本仍由项目 Gradle 配置决定。Compose 编译器插件应与 Kotlin 版本匹配，参考 [Compose 配置说明](https://developer.android.com/develop/ui/compose/setup-compose-dependencies-and-compiler)。
 
 运行 Gradle 的 JDK 与应用的 Java/Kotlin 编译目标分别配置。后续应用工程应显式设置所需的 Java 兼容级别及 Kotlin JVM target，参考 [Android 构建中的 Java 版本说明](https://developer.android.com/build/jdks)。
@@ -24,7 +26,7 @@ Command-line Tools 和 Gradle 的归档使用固定下载地址并校验 SHA-256
 
 ## 持久缓存
 
-工作区通过 bind mount 挂载到 `/workspaces/calibre-cloud`；项目源码、项目级 `.gradle` 目录和构建产物留在工作区。四个 named volume 分别保存以下内容：
+工作区由 [Dev Containers 自动挂载](https://code.visualstudio.com/remote/advancedcontainers/change-default-source-mount)，无需写死容器路径；项目源码、项目级 `.gradle` 目录和构建产物留在工作区。四个 named volume 分别保存以下内容：
 
 | Volume 名称 | 容器挂载位置 | 保存内容 |
 | --- | --- | --- |
@@ -45,7 +47,13 @@ Gradle 的已校验 ZIP 会复制到默认 Wrapper 缓存位置。对于 `https:
 
 ## 后续使用
 
-宿主机需要 Docker 和支持 Dev Containers 的编辑器。用 VS Code 打开仓库，执行 **Dev Containers: Reopen in Container**，会构建镜像并初始化 volume。构建上下文仅为 `.devcontainer`，通过 `.dockerignore` 只纳入 Dockerfile 和所需的缓存脚本。
+宿主机需要 Docker 和支持 Dev Containers 的编辑器。`.github/.devcontainer` 中的配置用于构建开发镜像；可通过 Dev Containers CLI 显式选择此配置：
+
+```bash
+devcontainer build --workspace-folder . --config .github/.devcontainer/devcontainer.json
+```
+
+编辑器使用仓库根目录 `.devcontainer/devcontainer.json` 中的 `image` 配置连接预构建镜像。构建上下文默认是配置所在的 `.github/.devcontainer`，通过 `.dockerignore` 只纳入 Dockerfile 和所需的初始化脚本。工作区挂载、`remoteUser` 和 UID 映射使用[基础镜像元数据及 Dev Containers 默认行为](https://github.com/devcontainers/spec/blob/main/docs/specs/devcontainerjson-reference.md)。构建时将两个初始化脚本复制到镜像的 `/usr/local/share/calibre-devcontainer/`，`postCreateCommand` 使用 `/usr/local/share/calibre-devcontainer/post-create.sh`，不依赖工作区中的配置目录位置。修改脚本后需重新构建镜像。
 
 容器固定使用 `linux/amd64`，因为本配置中的 Google Linux SDK 原生工具使用 x86-64。ARM 宿主机需要容器运行时支持 amd64 模拟。配置使用非 root 用户开发，自动等待缓存初始化结束后再连接编辑器。
 
