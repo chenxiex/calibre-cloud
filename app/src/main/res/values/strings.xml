@@ -1,0 +1,7 @@
+<resources>
+    <string name="library_unconfigured">书库未配置</string>
+    <string name="local_authorization">本地书库</string>
+    <string name="local_unavailable">目录授权入口将在后续步骤接入。</string>
+    <string name="onedrive_authorization">OneDrive</string>
+    <string name="onedrive_unavailable">登录尚未接入。配置说明见项目 README 的“OneDrive 应用注册”。</string>
+</resources>
