@@ -1,0 +1,84 @@
+package io.github.chenxiex.calibrecloud.storage.api
+
+import io.github.chenxiex.calibrecloud.model.BookKey
+import io.github.chenxiex.calibrecloud.model.CopyKey
+import io.github.chenxiex.calibrecloud.model.CustomColumnId
+import io.github.chenxiex.calibrecloud.model.FileVersion
+import io.github.chenxiex.calibrecloud.model.FormatResource
+import io.github.chenxiex.calibrecloud.model.LibraryId
+import java.io.Closeable
+import java.io.InputStream
+import java.util.UUID
+
+/** Safe diagnostic correlation token; arbitrary exception text and URLs cannot be carried here. */
+data class DiagnosticId(val value: UUID)
+
+enum class StorageErrorKind {
+    NO_NETWORK, LOGIN_REQUIRED, AUTHORIZATION_EXPIRED, SOURCE_MISSING,
+    INCOMPATIBLE_DATABASE, VERSION_CONFLICT, INSUFFICIENT_SPACE,
+    CORRUPT_CONTENT, UNSUPPORTED_OPERATION, LOCAL_IO,
+}
+
+data class StorageError(val kind: StorageErrorKind, val diagnosticId: DiagnosticId? = null)
+
+enum class SourceAvailability { UNCONFIRMED, AVAILABLE, CONFIRMED_MISSING }
+
+/** Internal immutable file generation, relative to filesDir/books, never an arbitrary path. */
+data class CompleteCopyLocation(val libraryId: LibraryId, val fileGeneration: UUID)
+
+/** Only validated, atomically published complete copies enter this query contract. */
+data class DownloadedCopy(
+    val key: CopyKey,
+    val location: CompleteCopyLocation,
+    val title: String,
+    val sizeBytes: Long?,
+    val savedVersion: FileVersion,
+    val sourceAvailability: SourceAvailability,
+) {
+    init {
+        require(location.libraryId == key.book.libraryId)
+        require(sizeBytes == null || sizeBytes > 0)
+    }
+}
+
+fun interface CompleteCopyQuery {
+    suspend fun find(key: CopyKey): DownloadedCopy?
+}
+
+/** Owns an already-open application copy. Caller closes it; subsequent stream I/O stays off the UI thread. */
+interface ApplicationCopyHandle : Closeable {
+    val input: InputStream
+    val sizeBytes: Long
+}
+
+sealed interface CopyReadResult {
+    data class Available(val handle: ApplicationCopyHandle, val version: FileVersion) : CopyReadResult
+    data object Missing : CopyReadResult
+    data class Failed(val error: StorageError) : CopyReadResult
+}
+
+/** Local copies only: no source fallback, queue waiting, download flag or network dependency. */
+fun interface CopyReader {
+    suspend fun read(key: CopyKey): CopyReadResult
+}
+
+sealed interface StorageOperationResult {
+    data object Completed : StorageOperationResult
+    data class Failed(val error: StorageError) : StorageOperationResult
+}
+
+/** Invoked only by future task handlers; explicit loading is separate from ordinary copy reads. */
+interface SourceSynchronization {
+    suspend fun synchronizeMetadata(libraryId: LibraryId): StorageOperationResult
+    suspend fun loadFormat(resource: FormatResource): StorageOperationResult
+    suspend fun loadCover(book: BookKey): StorageOperationResult
+}
+
+/** Removing an exact copy cannot mean deleting its source or another format. */
+interface CopyMaintenance {
+    suspend fun removeCopy(key: CopyKey): StorageOperationResult
+    suspend fun clearMetadata(libraryId: LibraryId): StorageOperationResult
+}
+
+/** Sole business write intent. Safe prepare/commit and write-refetch protocols remain unimplemented. */
+data class ReadStatusIntent(val book: BookKey, val column: CustomColumnId, val target: Boolean)

@@ -79,3 +79,76 @@ gradle wrapper --gradle-version 9.3.1 --distribution-type bin --gradle-distribut
 - 展示实现、自动检查及隔离结果后，用户指示“commit吧”，确认提交步骤 01；后续功能及真机验收不因此视为通过。
 - 本步未执行 ADB、安装或真机操作。SAF、OneDrive 浏览器登录、阅读器、后台恢复和墨水屏交互的对应真机验收仍未完成。
 - AC01–AC09 完整功能验收保持未完成；本记录只证明已实现的工程与静态入口路径。
+
+## 步骤 02：身份与完整副本读取边界
+
+执行日期：2026-10-05。覆盖 R03–R06、R07 的应用副本边界、R28 的 provider 范围、R31–R33；AC01／AC02 仅覆盖契约与局部读取路径。实现、自动检查和步骤 02 平台测试运行已完成；用户在审阅运行时验收结果后指示“提交”，确认提交本步。
+
+### 实现范围
+
+- 源位置与内部书库身份分离；书籍键包含书库、源数字 ID 和 UUID，格式规范化后进入副本键。后端定位、文件版本、自定义栏目身份及安全逻辑相对路径分别建模。
+- 最小完整下载记录包含身份、内部文件代次、标题、可空大小、已保存版本与三种源状态。结构化错误不携带异常全文或凭据 URL。
+- `PrivateCopyReader` 仅查询完整记录并在注入的 I/O dispatcher 打开应用文件；缺失不下载、不访问源、不等待队列。`PrivateBookFiles` 只读取 `filesDir/books/<LibraryId>/<fileGeneration>.book`，拒绝链接、目录、空文件及已知长度不符；调用方关闭句柄，取消交付时由读取器关闭未交出的句柄。
+- FileProvider 非导出，authority 按 application ID 派生，XML 只开放 `filesDir/books/`。当前没有外部 Intent 或 URI 授权流程；第三阶段授予临时只读权限并实现 MIME／友好显示名。
+- 显式源同步／加载和精确副本维护只有接口；已读写回只有书籍、动态栏目和固定布尔目标的意图，没有通用源上传／删除能力。契约细节见 [存储说明](../src/main/java/io/github/chenxiex/calibrecloud/storage/README.md)。
+
+### 实际检查与锁定补齐
+
+首轮运行计划中的 `:app:testDebugUnitTest :app:assembleDebugAndroidTest :app:lintDebug`，并附加受 Manifest 影响的 release 构建／lint。因步骤 01 没有实际 JVM 测试，`debugUnitTestAnnotationProcessorClasspath` 尚无锁状态，严格锁定拒绝解析。随后执行：
+
+```bash
+./gradlew :app:resolveLockedDependencies :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease --write-locks
+```
+
+结果：`BUILD SUCCESSFUL in 40s`。仅增加实际 JVM 测试空 annotation processor 配置，以及 JVM／AndroidTest Compose 编译器配置的锁定归属；没有新增依赖模块、改变版本或关闭严格锁定。清理格式构造与 fixture 可空文件父目录的编译告警后，不带 `--write-locks` 复验成功（34s）。
+
+复核句柄生命周期时，先添加 `cancellationBeforeHandleDeliveryClosesTheUndeliveredCopy`，运行 `./gradlew :app:testDebugUnitTest` 稳定复现取消交付造成未关闭句柄的问题（13 项测试，1 项失败）。修正读取器的取消清理后执行最终复验：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :app:assembleRelease :app:lintRelease
+```
+
+最终结果：`BUILD SUCCESSFUL in 34s`；13 项 JVM 测试全部通过（身份校验 3 项、副本读取 10 项），0 failures／0 errors。覆盖完整副本读取与关闭、I/O dispatcher、缺失不调用句柄工厂、暂存不可见、跨书库／数字 ID 重用／格式隔离、查询返回错误身份拒绝、空文件／长度不符／目录拒绝、文件和父目录链接拒绝、权限／I/O 错误映射、源缺失仍打开旧副本，以及取消交付时关闭句柄。独立源 fixture 的访问计数在副本读取后仍为 0，源内容保持不变；普通读取器没有源／网络依赖。
+
+debug／release lint 均为 **0 errors、5 warnings**，仍全部是既有依赖升级提示，没有新增功能告警。保存锁校验和后，在最终不更新锁的构建后执行 `sha256sum -c`：应用与 settings 锁均为 `OK`；应用锁最终 SHA-256 为 `eb6f6d9ba16d9fe1719b6872bc94eb96435933a637724bc4768269ffd24c7bf5`。
+
+### APK 与平台验证
+
+对最终 debug／release／AndroidTest APK 执行 `apkanalyzer manifest print`：
+
+| 产物 | 包标识 | 书籍 provider authority |
+| --- | --- | --- |
+| debug | `io.github.chenxiex.calibrecloud.debug` | `io.github.chenxiex.calibrecloud.debug.books` |
+| release unsigned | `io.github.chenxiex.calibrecloud` | `io.github.chenxiex.calibrecloud.books` |
+| AndroidTest | `io.github.chenxiex.calibrecloud.debug.test` | 使用目标 debug 应用的 provider |
+
+两个应用 APK 的 FileProvider 均为 `exported=false`、`grantUriPermissions=true`。执行 `apkanalyzer resources xml --file res/xml/book_paths.xml app/build/outputs/apk/debug/app-debug.apk`，确认打包 XML 只有 `files-path name="books" path="books/"`，没有父目录或其它路径配置。
+
+已编译 5 项 Android provider 测试：完整副本 URI／字节读取；父目录、数据库、暂存、凭据、封面、普通 cache 和相似前缀目录拒绝；URI／文件路径穿越拒绝；符号链接逃逸拒绝；debug authority 和非导出配置核对。
+
+首次开发检查时 `adb devices -l` 列表为空，仅完成平台测试编译。用户随后连接生产设备并授权步骤 02 运行时验收，于 2026-10-05 补充执行以下真机验证。
+
+设备属性：manufacturer `QUALCOMM`、model `PA6`，Android 14／API 34；设备型号采用实际 ADB 属性，不根据规格中的目标名称推断。安装前核对实际 APK 为独立 debug／测试包，instrumentation 目标为 `io.github.chenxiex.calibrecloud.debug`；通过限定包名前缀的 `pm list packages` 确认两个待安装包均不存在。初次预检误将不存在包时 `pm path` 的退出码 1 视为命令失败，未执行安装；随后使用包列表预检，未覆盖任何已有安装或数据。
+
+本次 APK SHA-256：
+
+| 产物 | SHA-256 |
+| --- | --- |
+| debug | `3764a74b3a2284e91692bb7608f4071536db751f9115b4ba51ee73f0ec3a0d38` |
+| AndroidTest | `dc7f57a1ddb1ce760177ae84ea3b968add03dfd47e6958674469c6e9613f567f` |
+
+在明确选定的已连接设备上执行 `adb install`，不使用替换安装选项。两个包均返回 `Success`。执行的 instrumentation 参数为：
+
+```bash
+adb -s <已核对设备> shell am instrument -w -r -e class io.github.chenxiex.calibrecloud.files.BookFileProviderTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+结果：**OK (5 tests)**，5 个用例状态码均为 0，runner 报告测试执行时间 0.118s。完整副本读取、私有目录拒绝、路径穿越拒绝、符号链接逃逸拒绝及 debug provider 隔离均在实际 Android 系统上通过；该时间仅为测试运行时间，不作为产品性能指标。
+
+生产数据保护范围：仅在本次新安装 debug 应用的私有沙箱内创建随机唯一名称的合成文本 fixture，包括测试数据库／暂存／凭据路径中的假文件；不选择或读取真实书库，不读取正式应用数据，不访问共享存储，不获取存储授权，不更改设备设置，也不采集全设备日志。未使用 Calibre 样本或真实凭据，本次测试不代表真实后端或外部阅读器验收。
+
+测试后依次执行 `adb uninstall io.github.chenxiex.calibrecloud.debug.test` 和 `adb uninstall io.github.chenxiex.calibrecloud.debug`，均返回 `Success`；再次查询限定包名前缀的包列表，确认 debug／测试包均不存在，测试沙箱随卸载移除。没有安装或卸载正式包。外部阅读器打开、显示名和临时授权验收仍属第三阶段。
+
+### 静态检查与验收边界
+
+`git diff --check` 及新增文本空白检查通过；相邻文档链接目标存在。`plan.md` 仍被 `.git/info/exclude` 忽略，没有暂存或提交。本步没有源复制、Graph 请求、持久队列、持久下载清单、真实书库复用／替换识别或源写回；步骤 02 的 5 项平台测试运行已通过；用户已确认提交步骤 02；AC01／AC02 完整功能验收仍待后续阶段实现，本次不开展步骤 03。

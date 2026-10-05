@@ -27,6 +27,15 @@
         <activity
             android:name="net.openid.appauth.RedirectUriReceiverActivity"
             android:enabled="false" />
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.books"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/book_paths" />
+        </provider>
         <!-- No worker is registered or initialized before the persistent queue exists. -->
         <provider
             android:name="androidx.startup.InitializationProvider"

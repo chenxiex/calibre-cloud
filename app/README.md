@@ -1,6 +1,6 @@
 # Android 工程
 
-当前工程包含单个 `:app` 模块和静态未配置页面。SAF 授权、OneDrive 登录、书库访问、任务队列、下载和阅读器尚未实现。
+当前工程包含单个 `:app` 模块、静态未配置页面，以及身份与完整应用副本读取基础契约。SAF 授权、OneDrive 登录、书库访问、任务队列、下载和阅读器尚未实现。
 
 ## 构建
 
@@ -8,7 +8,7 @@
 
 ```bash
 ./gradlew --version
-./gradlew :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
 ```
 
 构建使用 JDK 21、Android SDK 36 和 Build Tools 36.0.0，最低支持 Android 11 / API 30。环境配置与设备连接方法见 [开发容器说明](../.github/.devcontainer/README.md)。依赖版本见 [版本目录](../gradle/libs.versions.toml)，实际解析版本见 [依赖锁](gradle.lockfile)。
@@ -21,7 +21,7 @@
 | debug | `io.github.chenxiex.calibrecloud.debug` | Calibre Cloud Debug | `build/outputs/apk/debug/app-debug.apk` |
 | debug AndroidTest | `io.github.chenxiex.calibrecloud.debug.test` | 测试包 | `build/outputs/apk/androidTest/debug/app-debug-androidTest.apk` |
 
-release 产物未签名。debug 使用独立包名和应用数据目录，可与正式版共存。当前已配置测试 runner 和依赖，但没有测试用例；生成测试 APK 不代表功能测试通过。
+release 产物未签名。debug 使用独立包名和应用数据目录，可与正式版共存。当前包含身份／副本读取 JVM 测试和 FileProvider 平台测试；生成测试 APK 不代表设备测试通过。FileProvider 仅开放完整书籍副本专用目录，当前没有外部阅读器打开入口。基础契约说明见 [存储说明](src/main/java/io/github/chenxiex/calibrecloud/storage/README.md)。
 
 ## OneDrive 配置
 
