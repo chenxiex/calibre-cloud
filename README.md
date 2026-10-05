@@ -1,5 +1,30 @@
 # Calibre Cloud
 
-用于从 OneDrive 上的 Calibre 书库下载元数据与书籍的 Android 应用。计划使用 Kotlin、Jetpack Compose、AppAuth-Android、OkHttp、Android 原生 SQLite、WorkManager 和 FileProvider。
+用于从不同存储后端上的 Calibre 书库下载元数据与书籍的 Android 应用。
 
 开发环境配置及缓存、SDK 扩展、设备连接方法见 [.github/.devcontainer/README.md](.github/.devcontainer/README.md)。目前仅提供开发环境，尚未创建 Android 应用工程。
+
+## 项目文档
+
+- [spec.md](spec.md)：已通过用户验收的首版需求、模块契约、状态与验收条件，是后续开发的唯一需求与验收基线。
+- [AGENTS.md](AGENTS.md)：轻量 SDD 流程、协作、文件写入和验证约定。
+- [questions.md](questions.md)：当前已确认结论，以及后续需要填写的阻塞问题。
+
+## OneDrive 应用注册
+
+首版只支持全球服务的个人 OneDrive 账号。开发者及 fork 维护者使用自己的微软应用注册；本地后端不需要这些配置。以下属性是后续 Android 工程必须实现的配置契约，当前仓库还没有构建脚本读取它们。
+
+1. 在 Azure 门户的 Microsoft Entra ID／[Entra 管理中心](https://entra.microsoft.com/)进入“应用注册 → 新注册”，选择“仅个人 Microsoft 账号”，注册后记录“应用程序（客户端）ID”。需要具备所选租户的应用注册权限，具体步骤见[微软注册说明](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app)。
+2. 为正式版和 debug 版选择各自独立、属于自己的回调 scheme，例如 `org.example.calibrecloud:/oauth2redirect` 与 `org.example.calibrecloud.debug:/oauth2redirect`。将示例前缀换成自己的值，在“身份验证 → 添加平台 → 移动和桌面应用”中登记两个自定义重定向 URI。AppAuth 采用这一原生客户端配置，回调值须与构建配置完全一致；不使用 MSAL 的 Android 包名／签名哈希方式代替。见[微软回调平台说明](https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-redirect-uri)。
+3. 在“API 权限”添加 Microsoft Graph 的委托权限 `Files.ReadWrite`，供目录访问和已读写回使用；不用应用程序权限或 `Files.ReadWrite.All` 扩大范围。应用授权请求使用 `openid`、`offline_access` 和 `https://graph.microsoft.com/Files.ReadWrite`。文件写入权限参见[Graph 权限说明](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0)，刷新令牌范围参见[授权码流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。
+4. 在项目根目录的 `local.properties` 中添加以下属性，保留已有的 SDK 配置。该文件已被 Git 忽略；示例 client ID 必须换成注册结果。
+
+    ```properties
+    onedrive.clientId=00000000-0000-0000-0000-000000000000
+    onedrive.redirectUri=org.example.calibrecloud:/oauth2redirect
+    onedrive.debugRedirectUri=org.example.calibrecloud.debug:/oauth2redirect
+    ```
+
+5. 后续工程按构建变体读取相应 URI，同时配置 AppAuth 回调处理；登录端点使用个人账号范围 `consumers`，采用授权码与 PKCE。Android 原生客户端不配置或打包 client secret；client ID 是注册标识，登录令牌由设备上的应用管理。见[微软原生授权流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。工程实现后，在独立 debug 包中验证登录回调、目录选择和专门测试书库的写回。
+
+三项属性未配置时，工程须仍可构建并使用本地后端，OneDrive 入口显示配置指引。正式版与 debug 版必须分别匹配已注册回调，避免测试包接收正式版的授权回调；构建和 ADB 方法仍见开发容器文档。
