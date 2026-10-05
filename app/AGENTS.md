@@ -13,6 +13,7 @@
 
 - [身份模型约束](src/main/java/io/github/chenxiex/calibrecloud/model/AGENTS.md)：书库、书籍、格式、后端定位和逻辑路径校验。
 - [存储约束](src/main/java/io/github/chenxiex/calibrecloud/storage/AGENTS.md)：完整记录查询、普通读取、句柄生命周期和显式操作边界。
+- [任务约束](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)：固定请求、来源优先级、依赖、新鲜度及提交／刷新证据。
 - [文件提供约束](src/main/java/io/github/chenxiex/calibrecloud/files/AGENTS.md)：私有文件代次、FileProvider 范围和临时只读授权。
 
 ## Manifest 与入口

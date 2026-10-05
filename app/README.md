@@ -1,6 +1,6 @@
 # Android 工程
 
-当前工程提供静态未配置页面。SAF 授权、OneDrive 登录、书库访问、任务队列、下载和阅读器尚未实现。
+当前工程提供静态未配置页面、应用完整副本读取和显式任务基础契约。任务契约说明见 [任务模块](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)。SAF 授权、OneDrive 登录、书库访问、任务队列、下载和阅读器尚未实现。
 
 ## 构建
 
