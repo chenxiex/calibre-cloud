@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / ".oauth-verification"
 ANDROID = "{http://schemas.android.com/apk/res/android}"
-RECEIVER = "net.openid.appauth.RedirectUriReceiverActivity"
+RECEIVER = "io.github.chenxiex.calibrecloud.auth.OneDriveCallbackActivity"
 CLIENT = "onedrive.clientId"
 RELEASE = "onedrive.redirectUri"
 DEBUG = "onedrive.debugRedirectUri"
@@ -135,7 +135,9 @@ def check_manifest(xml, variant, values, configured):
     require(manifest.get("package") == package, f"{variant}: incorrect application ID")
     application = manifest.find("application")
     receivers = [item for item in application.findall("activity") if item.get(ANDROID + "name") == RECEIVER]
-    require(len(receivers) == 1, f"{variant}: expected one AppAuth callback receiver")
+    require(len(receivers) == 1, f"{variant}: expected one variant callback receiver")
+    require(not any(item.get(ANDROID + "name") == "net.openid.appauth.RedirectUriReceiverActivity"
+                    for item in application.findall("activity")), f"{variant}: broad dependency receiver remains")
     receiver = receivers[0]
     require(receiver.get(ANDROID + "enabled", "true") == str(configured).lower(), f"{variant}: callback enablement mismatch")
     data = receiver.findall("intent-filter/data")

@@ -12,7 +12,7 @@
 
 ## OneDrive 应用注册
 
-首版只支持全球服务的个人 OneDrive 账号。开发者及 fork 维护者使用自己的微软应用注册；本地后端不需要这些配置。Android 工程已按变体读取以下属性并生成回调配置；浏览器登录尚未接入。详细校验和构建矩阵见 [工程配置说明](app/README.md#onedrive-配置)。
+首版只支持全球服务的个人 OneDrive 账号。开发者及 fork 维护者使用自己的微软应用注册；本地后端不需要这些配置。Android 工程已按变体读取以下属性并生成回调配置；已接入个人账号浏览器授权，真实登录验收状态见验证记录。详细校验和构建矩阵见 [工程配置说明](app/README.md#onedrive-配置)。
 
 1. 在 Azure 门户的 Microsoft Entra ID／[Entra 管理中心](https://entra.microsoft.com/)进入“应用注册 → 新注册”，选择“仅个人 Microsoft 账号”，注册后记录“应用程序（客户端）ID”。需要具备所选租户的应用注册权限，具体步骤见[微软注册说明](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app)。
 2. 为正式版和 debug 版选择各自独立、属于自己的回调 scheme，例如 `org.example.calibrecloud://auth/oauth2redirect` 与 `org.example.calibrecloud.debug://auth/oauth2redirect`。将示例前缀换成自己的值，在“身份验证 → 添加平台 → 移动和桌面应用”中登记两个自定义重定向 URI。本项目使用 AppAuth，因此选择“移动和桌面应用程序”，而不是要求包名／签名哈希的“Android”平台。注册值须与构建配置完全一致。示例采用门户提示要求的 `customScheme://` 格式，其中 `auth` 是 URI 的 host，`/oauth2redirect` 是路径，不需要部署网站；标准允许的无 host 单斜杠格式 `scheme:/oauth2redirect` 会被当前门户输入校验拒绝，不用于这里的注册示例。见[微软回调平台说明](https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-redirect-uri)。
@@ -25,6 +25,6 @@
     onedrive.debugRedirectUri=org.example.calibrecloud.debug://auth/oauth2redirect
     ```
 
-5. 工程按构建变体读取相应 URI，同时配置 AppAuth 回调接收范围；后续浏览器登录使用的端点使用个人账号范围 `consumers`，采用授权码与 PKCE。Android 原生客户端不配置或打包 client secret；client ID 是注册标识，登录令牌由设备上的应用管理。见[微软原生授权流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。后续在独立 debug 包中验证真实登录回调、目录选择和专门测试书库的写回。
+5. 工程按构建变体读取相应 URI，同时配置应用回调接收范围；浏览器登录端点使用个人账号范围 `consumers`，采用授权码与 PKCE。Android 原生客户端不配置或打包 client secret；client ID 是注册标识，登录令牌由设备上的应用管理。见[微软原生授权流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。后续在独立 debug 包中验证真实登录回调、目录选择和专门测试书库的写回。
 
 三项属性未配置时，工程仍可构建并使用本地后端，OneDrive 入口显示配置指引。正式版与 debug 版必须分别匹配已注册回调，避免测试包接收正式版的授权回调；构建和 ADB 方法仍见开发容器文档。

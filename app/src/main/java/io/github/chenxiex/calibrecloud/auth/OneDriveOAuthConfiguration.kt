@@ -4,7 +4,7 @@ import io.github.chenxiex.calibrecloud.BuildConfig
 import java.net.URI
 
 /**
- * Validated variant configuration. Step 05 prepares protocol inputs without starting authorization.
+ * Validated variant configuration shared by the browser coordinator and callback receiver.
  * The browser coordinator must additionally validate pending state before exchanging a code.
  */
 class OneDriveOAuthConfiguration internal constructor(

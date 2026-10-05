@@ -12,18 +12,21 @@
 
 ## 回调接收与地址验证
 
-- `app/oauth-manifests/` 提供带 host 和无 host 的字面模板，由变体 sourceSet 选择；必须整体替换 AppAuth receiver，避免遗留宽泛 filter。无 host 时省略 host/path 属性，不生成空属性。
+- `app/oauth-manifests/` 提供带 host 和无 host 的字面模板，由变体 sourceSet 选择；使用应用 OneDriveCallbackActivity，并移除依赖的 AppAuth receiver，避免遗留宽泛 filter。无 host 时省略 host/path 属性，不生成空属性。
 - 带 host 时按 scheme、host 和精确 path 匹配；无 host 的 `scheme:/oauth2redirect` 须正确支持，但 Android 忽略其路径 filter，因此同 scheme 的任意另一变体接收范围都会重叠，必须拒绝。同 scheme 仅在双方都有 host 且 host 或精确 path 不同的情况下允许。规则依据见 [Android data 元素](https://developer.android.com/guide/topics/manifest/data-element)。
 - 完整回调校验由 `OneDriveOAuthConfiguration.acceptsCallback` 承担，包含无 host 的路径检查；OAuth 返回的 query 留待协议流程处理。后续协调器处理结果前还必须核对待处理事务、state 与重复交付，不能把地址匹配视为已授权。
 
 ## 授权阶段与隐私
 
-- 当前只准备全球个人账号 `consumers` 端点、授权码、S256 PKCE 与 `openid`、`offline_access`、`https://graph.microsoft.com/Files.ReadWrite` 范围，不启动浏览器，不请求 Graph，不存储 token，也不构造假登录状态。
-- 后续用 AppAuth 生成随机 PKCE verifier 和 state、执行兑换与刷新，并实现令牌安全存储；遵循 [AppAuth](https://github.com/openid/AppAuth-Android) 与 [微软授权码流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。
+- 全球个人账号 `consumers` 端点、授权码、S256 PKCE 与 `openid`、`offline_access`、`https://graph.microsoft.com/Files.ReadWrite` 范围由 AppAuth 构建；使用 AppAuth BrowserSelector 选择系统浏览器，并以 ACTION_VIEW 打开请求。应用接收原始回调，通过门禁后用 AppAuth 解析、兑换和显式刷新，不访问 Graph。
+- OneDriveAuthorizationViewModel 保留单个协调器并串行调用；不会在重绘／恢复首页时重新登录或刷新。浏览器返回未完成时提供显式取消，十分钟过期；兑换／刷新最多一分钟，显示分类错误和重试入口。页面使用静态文字、显式分页和无动画控件。
+- 待处理 AuthorizationRequest（含 state 与 PKCE verifier）和 AuthState 共存于加密 envelope。使用 elapsedRealtime 与系统 boot count 约束有效期，进程重建可恢复、设备重启作废。门禁检查完整地址、唯一 state 和唯一 code/error；无待处理或重复结果不兑换。兑换前原子保存消费与 interrupted 标志，进程中断后要求重新登录，不重兑旧代码。
+- EncryptedAuthStateStore 使用 Android Keystore 不可导出 AES-256-GCM 密钥、随机 96-bit IV、认证标签和应用／存储域 AAD；AtomicFile 写入 noBackupFilesDir/onedrive-auth/state.bin，所有磁盘 I/O 运行于 IO dispatcher。恢复失败只清理授权存储，不修改本地目录配置或书籍副本；恢复时校验配置身份，防止复用旧注册。
+- 日志仅包含随机操作 ID、阶段和固定错误分类；debug 输出调试阶段，release 仅输出失败。不得传递原始异常／响应给日志或界面，不启用 AppAuth 内容调试日志。协议实现依据 [AppAuth](https://github.com/openid/AppAuth-Android) 与 [微软授权码流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。
 - 凭据不可进入普通配置、书籍 provider、日志或备份；错误不能包含原始 OAuth 响应、完整回调 query 或属性值。
 
 ## 配置验证
 
 - 根 `scripts/verify-oauth-config.py` 在被忽略的 `.oauth-verification/` 内创建独立工程副本，只用虚构注册标识，不覆盖用户配置；只继承 SDK 定位，不复制用户 OAuth 属性，不更新依赖锁。
 - 核对两变体的 generated BuildConfig、merged Manifest 和 APK，覆盖缺配置、部分配置、合法的独立回调、非法 URI、重叠范围和安全字符串生成；结果与脱敏日志留在临时目录，不提交副本或产物。
-- 真实浏览器、回调及令牌恢复仍须后续真机验收，配置矩阵不能证明微软注册或真实登录有效。
+- 真实浏览器、回调及进程重启后的令牌恢复须步骤 06 真机验收，配置矩阵不能证明微软注册或真实登录有效。

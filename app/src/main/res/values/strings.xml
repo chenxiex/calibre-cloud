@@ -13,5 +13,19 @@
     <string name="previous_page">上一页（第 1 页）</string>
     <string name="onedrive_authorization">OneDrive</string>
     <string name="onedrive_unavailable">OneDrive 未配置。请按 README 的“OneDrive 应用注册”说明，在 local.properties 中填写 onedrive.clientId、onedrive.redirectUri 和 onedrive.debugRedirectUri。本地目录授权仍可使用。</string>
-    <string name="onedrive_configured">OneDrive 配置有效，尚未登录。浏览器登录将在后续步骤接入。</string>
+    <string name="onedrive_configured">OneDrive 配置有效，尚未登录。</string>
+    <string name="onedrive_browser">正在浏览器中登录。返回后可取消；十分钟后请求失效。</string>
+    <string name="onedrive_exchanging">正在验证授权（最多一分钟）。</string>
+    <string name="onedrive_authorized">个人 OneDrive 已授权。尚未选择或验证书库。</string>
+    <string name="onedrive_relogin">需要重新登录。</string>
+    <string name="onedrive_canceled">登录已取消，可重试。</string>
+    <string name="onedrive_network">无法连接授权服务，请检查网络后重试。</string>
+    <string name="onedrive_no_browser">没有可用的系统浏览器，请安装或启用浏览器后重试。</string>
+    <string name="onedrive_server">授权服务未完成请求，请重试。</string>
+    <string name="onedrive_callback">回调无效、已处理或不属于当前登录。可取消后重试。</string>
+    <string name="onedrive_storage">私有授权状态不可用，请重新登录。书籍副本与本地配置保留。</string>
+    <string name="onedrive_expired">登录请求已过期，请重试。</string>
+    <string name="onedrive_login">登录／重新登录</string>
+    <string name="onedrive_cancel">取消登录</string>
+    <string name="onedrive_refresh">刷新授权</string>
 </resources>

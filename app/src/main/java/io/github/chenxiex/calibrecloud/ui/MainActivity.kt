@@ -26,6 +26,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -35,6 +36,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.auth.OneDriveOAuthConfiguration
+import io.github.chenxiex.calibrecloud.auth.LoginStatus
+import io.github.chenxiex.calibrecloud.auth.LoginIssue
 import io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationState
 import io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus
 import io.github.chenxiex.calibrecloud.storage.local.DirectorySelectionIssue
@@ -43,6 +46,11 @@ class MainActivity : ComponentActivity() {
     private val authorizationModel by lazy {
         ViewModelProvider(this, LocalDirectoryAuthorizationViewModel.factory(applicationContext))[
             LocalDirectoryAuthorizationViewModel::class.java,
+        ]
+    }
+    private val oneDriveModel by lazy {
+        ViewModelProvider(this, OneDriveAuthorizationViewModel.factory(applicationContext))[
+            OneDriveAuthorizationViewModel::class.java,
         ]
     }
     private var pickerOpen by mutableStateOf(false)
@@ -57,10 +65,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pickerOpen = savedInstanceState?.getBoolean("picker_open") ?: false
+        intent.data?.toString()?.let { oneDriveModel.callback(it); intent.data = null }
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen) {
+                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, oneDriveModel,
+                    { oneDriveModel.login { startActivity(it) } }) {
                     pickerOpen = true
                     picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
                         Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
@@ -71,8 +81,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.data?.toString()?.let { oneDriveModel.callback(it) }
+        intent.data = null
+    }
+
     override fun onResume() {
         super.onResume()
+        oneDriveModel.restore()
         if (pickerOpen) return
         authorizationModel.refresh()
     }
@@ -84,9 +101,15 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun AuthorizationPage(state: DirectoryAuthorizationState, busy: Boolean, onSelect: () -> Unit) {
+private fun AuthorizationPage(
+    state: DirectoryAuthorizationState,
+    busy: Boolean,
+    oneDrive: OneDriveAuthorizationViewModel,
+    onLogin: () -> Unit,
+    onSelect: () -> Unit,
+) {
     // Split authorization entries into explicit pages without scrolling or animated controls.
-    var page by remember { mutableIntStateOf(0) }
+    var page by rememberSaveable { mutableIntStateOf(0) }
     Column(
         modifier = Modifier.fillMaxSize().background(Color.White)
             .windowInsetsPadding(WindowInsets.safeDrawing).padding(16.dp),
@@ -114,11 +137,37 @@ private fun AuthorizationPage(state: DirectoryAuthorizationState, busy: Boolean,
                 StaticButton(stringResource(if (busy) R.string.local_checking else R.string.local_select), !busy, onSelect)
             } else {
                 Text(stringResource(R.string.onedrive_authorization), style = MaterialTheme.typography.titleMedium)
-                Text(stringResource(if (OneDriveOAuthConfiguration.fromBuildConfiguration() == null) {
-                    R.string.onedrive_unavailable
+                if (OneDriveOAuthConfiguration.fromBuildConfiguration() == null) {
+                    Text(stringResource(R.string.onedrive_unavailable))
                 } else {
-                    R.string.onedrive_configured
-                }))
+                    Text(stringResource(when (oneDrive.status) {
+                        LoginStatus.UNSIGNED -> R.string.onedrive_configured
+                        LoginStatus.BROWSER -> R.string.onedrive_browser
+                        LoginStatus.EXCHANGING -> R.string.onedrive_exchanging
+                        LoginStatus.AUTHORIZED -> R.string.onedrive_authorized
+                        LoginStatus.RELOGIN -> R.string.onedrive_relogin
+                    }))
+                    oneDrive.issue?.let { Text(stringResource(when (it) {
+                        LoginIssue.CANCELED -> R.string.onedrive_canceled
+                        LoginIssue.NETWORK -> R.string.onedrive_network
+                        LoginIssue.NO_BROWSER -> R.string.onedrive_no_browser
+                        LoginIssue.SERVER -> R.string.onedrive_server
+                        LoginIssue.CALLBACK -> R.string.onedrive_callback
+                        LoginIssue.STORAGE -> R.string.onedrive_storage
+                        LoginIssue.RELOGIN -> R.string.onedrive_relogin
+                        LoginIssue.EXPIRED -> R.string.onedrive_expired
+                    })) }
+                    Spacer(Modifier.height(16.dp))
+                    if (oneDrive.status == LoginStatus.BROWSER) {
+                        StaticButton(stringResource(R.string.onedrive_cancel), !oneDrive.busy) { oneDrive.cancel() }
+                    } else {
+                        StaticButton(stringResource(R.string.onedrive_login), !oneDrive.busy, onLogin)
+                        if (oneDrive.status == LoginStatus.AUTHORIZED) {
+                            Spacer(Modifier.height(8.dp))
+                            StaticButton(stringResource(R.string.onedrive_refresh), !oneDrive.busy) { oneDrive.refresh() }
+                        }
+                    }
+                }
             }
         }
         StaticButton(stringResource(if (page == 0) R.string.next_page else R.string.previous_page), true) { page = 1 - page }

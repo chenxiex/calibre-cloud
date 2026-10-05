@@ -371,3 +371,95 @@ adb -s <已核对设备> shell am instrument -w -r -e class io.github.chenxiex.c
 按用户要求精简工程 README 的构建部分：保留环境参数、常用检查命令、默认资源参数与临时覆盖命令，删除 parallel 说明和扩展解释。只调整文档，未改变构建配置或产品行为；README 本地链接检查、parallel 文本移除检查和 `git diff --check` 通过，未重复构建或功能测试。
 
 按用户要求拆分 OneDrive 文档：工程 README 保留配置属性、注册链接、缺配置／错误处理、当前登录能力和验证命令；构建生成、回调接收范围、完整地址校验、协议参数、隐私及矩阵隔离约束移入授权模块 `AGENTS.md`。只调整文档，R08 等实现与验收范围不变；改动文档的本地链接检查和 `git diff --check` 通过，未重复构建或功能测试。
+
+## 步骤 06：个人 OneDrive 授权与阶段联验（2026-10-05）
+
+对应 R04、R08、R20、R31–R35。实现系统浏览器个人账号授权、完整回调／state／期限门禁、AppAuth 授权码兑换和显式刷新、Keystore AES-GCM 私有状态存储，以及静态登录状态与取消／重试入口。授权请求使用 `consumers`、授权码及 S256 PKCE，范围为 `openid`、`offline_access`、`https://graph.microsoft.com/Files.ReadWrite`；没有 Graph 文件请求、书库选择或源文件访问。实现细节见 [授权模块约束](../src/main/java/io/github/chenxiex/calibrecloud/auth/AGENTS.md)。
+
+### 自动构建与测试
+
+执行不更新依赖锁的命令：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+```
+
+最终结果 `BUILD SUCCESSFUL`（1m 26s），**48 项 JVM 测试，0 failures、0 errors、0 skipped**，包含新增 6 项回调门禁测试。debug、未签名 release 和 AndroidTest APK 均生成；两变体 lint 均为 0 errors、9 warnings，另有 1 项 informational 提示。5 项 warnings 是既有固定工具／依赖更新提示，4 项是新增 URI 调用的 KTX 风格建议；informational 为整型 Compose 状态装箱建议，不影响构建。本次未修改依赖版本或锁文件。实现期间新增刷新测试使用了 AppAuth 不存在的常量，AndroidTest 编译失败；改为协议字面值 `refresh_token` 后最终命令通过，不将失败命令记为通过。
+
+最终 APK SHA-256：
+
+| 产物 | SHA-256 |
+| --- | --- |
+| debug | `046a89a6055ffc28db0b8a493398f60f595726c5bf1299d5a3598a462b7659a4` |
+| release 未签名 | `763340f06c2f286b1cd3ae1e163e7fa5cb20d5d616f3480a7709d838eab5604c` |
+
+使用 SDK `apkanalyzer manifest print` 核对三个实际 APK 的 application ID：正式包 `io.github.chenxiex.calibrecloud`，debug 包 `.debug`，测试包 `.debug.test`。核对 debug 可调试、release 不可调试，书籍 provider authority 隔离且不导出、备份关闭。网络权限仅新增 OAuth 必需的 INTERNET，未开放后台／启动权限。原 AppAuth 导出 receiver 已移除，变体回调仅由应用 receiver 接收，完整地址和事务仍由协调器校验。
+
+### 受影响配置路径回归
+
+使用 `scripts/verify-oauth-config.py` 的原有 fixture 和检查函数，仅选择本次受影响的 `missing`、`host-a`、`no-host`，依序执行两变体构建、generated BuildConfig、merged Manifest 和 APK 检查：**3/3 通过**。原配置逐字节不变检查通过；确认新 receiver 没有遗留依赖的宽泛 receiver。其余 10 组配置规则未改动，不将步骤 05 的 13/13 记录改记为本次全部重跑。此次 `.oauth-verification/summary.json` 保存的是这三组回归结果。
+
+实际执行入口：
+
+```python
+import importlib.util
+spec = importlib.util.spec_from_file_location("oauth", "scripts/verify-oauth-config.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+selected = [item for item in module.fixtures() if item[0] in {"missing", "host-a", "no-host"}]
+module.fixtures = lambda: selected
+raise SystemExit(module.main())
+```
+
+### 设备自动测试与入口探测
+
+设备：PA6，Android 14 / API 34，使用 ADB 已连接设备；安装前从实际 APK 核对独立 debug 和测试 ID。没有安装正式包，没有读取或修改真实／示例源书库。授权平台不访问源文件，此次无需书库数据 fixture；加密测试使用独立测试 namespace，协议测试使用注入的浏览器／令牌结果。
+
+```bash
+adb install app/build/outputs/apk/debug/app-debug.apk
+adb install app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.auth.EncryptedAuthStateStoreTest,io.github.chenxiex.calibrecloud.auth.OneDriveAuthorizationTest,io.github.chenxiex.calibrecloud.files.BookFileProviderTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+结果 **OK (21 tests)**（2.304s）：5 项真实 Keystore／AES-GCM／密文恢复与 provider 拒绝测试、11 项授权协调器测试、5 项原有书籍 provider 隔离测试。涵盖有效／错误／重复回调、取消、服务器／网络／invalid_grant 分类、无浏览器后恢复、PKCE pending 恢复、兑换前持久消费和中断恢复、凭据损坏只清除授权状态。模拟令牌结果不证明真实微软登录成功。
+
+通过 ADB 和 UI hierarchy 探测实际入口：本地未选择状态及目录选择入口可见；第二页可启动设备浏览器 `com.Hanovn.HanovnBrowser/.DefaultBrowserActivity`。未操作账号或 consent 页面。浏览器返回后仍有静态登录状态与显式取消入口；强制停止 debug 应用并启动后，在第二页恢复了加密保存的 pending 请求（连续两次进程重启），取消后出现取消说明及重新登录入口。使用实际配置的回调地址附加虚构 code/state，系统解析到 debug receiver；没有待处理请求时拒绝回调并显示可重试提示，没有兑换。UI 探针首次使用了错误的相对 Activity 类名，修正为 namespace 下完整类名；另一次 hierarchy 暂时返回 null root，重新抓取后确认实际恢复状态，不将这两次探针失败当作产品验收通过。
+
+抽查 `OneDriveAuth`／`AppAuth` 日志：39 条应用授权事件仅含随机操作 ID、固定阶段或错误分类，没有测试 access/refresh token、授权码、PKCE verifier 或完整 URL。密文在 noBackupFilesDir，设备测试确认真实密文路径无法由书籍 provider 提供；备份／迁移禁用和排除规则保持有效。
+
+### 自动验证结束时的未完成项
+
+以下为用户手工验收前的状态，后续结论以文末用户验收记录为准。
+
+- 真实个人测试账号的登录成功、Microsoft consent、实际授权码兑换／刷新，以及已授权令牌的进程重启恢复；本次只证明浏览器启动与 pending 请求恢复。
+- 真实断网／无兼容浏览器条件下的恢复，Activity 重建后的真实浏览器往返，以及用户在目标墨水屏上的共同验收。注入故障测试不能替代这些验收。
+- 步骤 04 的 SD 卡／云端提供方条件补验继续保留原状态；本步未重复本地授权外部选择和授权撤销操作。
+- 本步用户共同验收与提交未完成，第一阶段尚未关闭；持久队列、同步、下载、书库 UI、阅读器、写回及 AC01–AC09 完整验收仍属于后续阶段。
+
+补充联验：安装已核对包标识的 `missing` fixture debug APK（覆盖的仍仅为独立 debug 测试沙箱），确认第一页本地目录选择入口可用，第二页显示未配置指引且不提供登录按钮。没有执行系统目录选择或访问任何源书库。此项证明缺 OAuth 配置不会关闭本地入口，不替代步骤 04 的真实持久授权验收。
+
+记录结果后执行 `adb uninstall io.github.chenxiex.calibrecloud.debug.test` 和 `adb uninstall io.github.chenxiex.calibrecloud.debug`，均返回 `Success`；随后 `pm list packages` 确认两个测试包均不存在。临时设备 UI hierarchy 文件已删除。脱敏测试输出、日志及探针留在 `/tmp`，配置 fixture 留在被忽略的 `.oauth-verification/`，未加入版本控制。改动文档的本地链接检查、Python 源码编译检查与 `git diff --check` 通过；未暂存或提交，未改变用户的 local.properties。
+
+### 用户手工验收准备（2026-10-05）
+
+用户要求重新安装 debug 包并提供真机操作指引。执行 `./gradlew :app:assembleDebug`，`BUILD SUCCESSFUL`（1s，39 项 up-to-date）；APK SHA-256 与上文最终 debug 产物一致。重新通过 apkanalyzer 核对 `.debug` application ID、可调试状态、独立 `.debug.books` provider 和启用的 OAuth receiver，生成配置为完整启用；这不证明微软注册匹配或账号授权成功。
+
+通过 ADB 在当前 PA6 设备执行 `install -r`，返回 `Success`，并启动 `io.github.chenxiex.calibrecloud.debug/io.github.chenxiex.calibrecloud.ui.MainActivity`。只安装应用 debug APK，未安装正式包或 AndroidTest 包。当前按用户要求保留 debug 应用用于手工验收；账号登录、恢复及故障操作待用户完成并回报，尚未更新为通过。验收记录完成后再卸载测试应用。
+
+
+### 用户真机验收结论（2026-10-05）
+
+用户反馈上述操作指引的全部六项结果符合预期，并明确确认：“无浏览器场景未测试；暂不测试，不阻塞提交。”本步共同验收通过，按用户确认提交步骤 06；无浏览器场景保留为未执行的非阻塞补验项，不将注入故障测试记为该场景真机通过。
+
+| 用户操作 | 用户确认结果 |
+| --- | --- |
+| 个人微软测试账号浏览器登录、授权并返回 debug 应用 | 显示“个人 OneDrive 已授权” |
+| 显式刷新授权 | 仍显示已授权 |
+| 强行停止后重新启动、进入第二页 | 恢复已授权状态，无需重新登录 |
+| 浏览器返回后显式取消 | 显示取消说明，可以重新登录 |
+| 断网刷新、恢复网络后重试 | 网络错误与重试结果符合预期 |
+| 墨水屏文字／按钮／分页、滚动和加载动画观察 | 符合预期 |
+
+上述真实账号结果来自用户操作与确认；未采集账号、密码、令牌或完整回调 URL。Activity 重建后的真实浏览器往返未收到单独操作记录，不补写为实测通过；现有进程重启验收与自动状态恢复测试保持各自证据范围。阶段结论遵循用户共同验收；源后端、持久任务、同步、下载、阅读器和已读写回仍未实现，AC01–AC09 完整功能验收不因此关闭。步骤 04 条件补验保持原记录。
+
+保存用户验收结果后，ADB 检查确认设备上只有应用 debug 测试包；执行 `adb uninstall io.github.chenxiex.calibrecloud.debug` 返回 `Success`，再次检查确认 debug 与 AndroidTest 包均不存在。此次没有安装或卸载正式应用。用户共同验收后仅更新验证记录与临时计划，不改生产代码，沿用本步已通过的构建、测试和 lint；执行文档本地链接检查、提交范围检查和 `git diff --check`。
