@@ -190,3 +190,96 @@ debug APK 构建成功；debug lint 为 **0 errors、5 warnings**，均为既有
 ### 文档归属修正
 
 用户指出任务契约不应写入 README 后，已将任务契约正文迁移至 `tasks/AGENTS.md`，删除本步新增的 `tasks/README.md`，同步修正模块导航、验证记录和临时计划中的引用。根 AGENTS.md 的文档归属约定已合并简化：开发约束和实现边界进入对应 AGENTS.md，API 详细语义进入代码注释，验证结果进入验证记录；不新增计划冲突约束。此次仅修改文档，执行 `git diff --check`、相关文档链接／空白检查及旧任务 README 引用检查，均通过；没有重复运行构建或功能测试，随后用户确认步骤 03 验收并授权提交。
+
+## 步骤 04：本地 SAF 目录授权入口
+
+执行日期：2026-10-05。覆盖 R04、R07、R20、R31–R35 的本地平台授权路径。实现、自动检查与 ADB 真机功能验证已完成；用户于 2026-10-05 确认全部手动步骤通过，完成墨水屏实体显示／手动操作验收，按计划提交步骤 04；未开展步骤 05。
+
+### 实现范围
+
+- Activity Result 发起 `ACTION_OPEN_DOCUMENT_TREE`，请求读写、持久和前缀授权；URI 与真实结果 flags 交给 `storage/local`。只接受已识别的系统本地／SD 卡 tree provider，未知和云端提供方明确拒绝。Manifest 只新增本地 provider authority 的包可见性查询，没有存储或网络权限。
+- 持久权限只取实际返回的读写 flags；缺持久／读取授权拒绝保存。私有 SharedPreferences 保存位置，恢复时核对 OS 持久授权，区别未选择、读写、只读、失效与不支持提供方。新配置保存成功后才释放旧授权；取消与失败保持原选择，失败清理新授权，不误释放同 URI 的授权。
+- 代码复核发现 Activity 自有协调器可能在保存期间重建后留下旧 UI 快照，实施中改为保留 ViewModel，并串行执行授权操作与结果交付，忙时不重复恢复；没有依赖 Activity 生命周期取消已经提交的授权操作。为这条路径增加共享 ViewModelStore、独立 Main／I/O scheduler 的必要测试。
+- 配置／授权 I/O 在后台执行；入口用黑白文字和边框、无 ripple 的控件与显式两页切换，无滚动或应用过渡／加载动画。页面明确“目录已授权，书库待验证”，不读取、枚举、复制或写入源文件，不导入元数据，不建立 LibraryId，不发起队列／同步。
+- 提供方规则、权限 flags 与私有配置细节见 [本地授权开发约束](../src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md)，使用入口见 [模块 README](../README.md#本地目录授权)。授权 flags 不是源目录仍存在或 R15 安全提交能力的证据，真实文件能力探测留待后续后端实现。
+
+### 自动检查
+
+最终生产代码执行：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+```
+
+结果：`BUILD SUCCESSFUL in 35s`。随后补齐 3 项 ViewModel 测试，仅执行受影响检查：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:lintDebug
+```
+
+结果：`BUILD SUCCESSFUL in 30s`。最终 JVM **40 项通过，0 failures／0 errors**：既有 25 项、本地授权 12 项、ViewModel 3 项。新增覆盖取消、实际 flags 转交、持久授权缺失／不可读／失败、只读恢复、撤销和未知提供方、配置保存失败清理、保存与释放顺序、同 URI 重试、释放异常和后台 dispatcher；ViewModel 覆盖重建复用及 pending 结果、忙时跳过恢复、多个选择按序交付及所有结果结束前保持 busy。适配器只有授权元数据与配置 API，没有源文件访问。
+
+最终 debug／release lint 均为 **0 errors、5 warnings**，全部是既有依赖升级提示。本步 `commit()` 必须返回持久保存结果且在后台执行，局部注明理由并抑制 `ApplySharedPref`／`UseKtx` 建议；不能用无提交结果的 `apply()` 替代。应用与 settings 依赖锁逐字节对照 HEAD 无变化，没有新增依赖或修改版本。
+
+执行 `apkanalyzer manifest print` 核对最终 debug、release unsigned 和 AndroidTest APK：独立包标识与 instrumentation 目标正确；FileProvider 的 authority 分别派生自对应 application ID，非导出；AppAuth 回调仍禁用；备份仍禁用且普通配置所在 sharedpref 域已排除备份和迁移。没有新增网络、广泛存储或后台权限。
+
+| 最终产物 | application ID | SHA-256 |
+| --- | --- | --- |
+| debug | `io.github.chenxiex.calibrecloud.debug` | `03e89ea24c0d0ac5c4216916a4c93acfb32846bd639bf91c2d410c1457d3ad2a` |
+| release unsigned | `io.github.chenxiex.calibrecloud` | `75c37681dabf653aead97d1be06c98af75b6b0d1226330f23b5121bd364261a1` |
+| AndroidTest | `io.github.chenxiex.calibrecloud.debug.test` | `db9726cead1d001723b28da61d367c42d7a6ca74b15ccb0c4f5ef538dcd6f0c3` |
+
+### 真机操作与结果
+
+设备沿用步骤 02 已核对的 PA6，Android 14／API 34。`adb devices -l` 显示单一已授权连接；安装前核对实际 APK application ID，并查询限定包名前缀，确认 debug／测试包不存在。只安装独立 debug 和测试包，均返回 `Success`。迭代中仅替换本次自己安装的 debug／测试包，保留本次测试配置，没有接触正式包或其数据。
+
+限定检查 `com.android.externalstorage` 包：本地 authority 为 `com.android.externalstorage.documents`，包来自系统 `priv-app`，flags 含 `SYSTEM`，符合首轮规则。将 `assets/calibre-sample/` 的全部 5 个文件推送到 Download 下新建的专用步骤 04 测试目录，操作前逐文件 SHA-256 与仓库样本一致；未选择真实书库。
+
+通过 ADB 点击真实系统文件选择器中的专用测试目录、“使用此文件夹”及“允许”，应用显示“目录已授权（读写），书库待验证。尚未导入书籍。”。之后在最终 ViewModel 版本完成：
+
+| 路径 | 实际结果 |
+| --- | --- |
+| 重新打开选择器后取消 | 恢复原读写授权；私有配置内容逐字节不变 |
+| `am force-stop` 后重新启动 | 恢复原持久目录授权，不再次要求选择，不导入或同步 |
+| 显式下一页／上一页 | OneDrive 占位页与本地页切换成功；应用节点没有 scrollable 标记 |
+| Activity 重建 | 以下 Android 测试核对配置、实际持久授权和页面均保持 |
+| 撤销本次 debug 持久授权后重建 | 页面显示“目录授权已失效，请重新选择。”；保留原配置位置 |
+
+系统选择器返回键可能先返回父目录，首次脚本未完成取消就检查应用状态，未通过该脚本断言；调整为确认退出选择器后再检查，最终取消路径通过。UIAutomator 在个别切换时返回 `null root node`，最终重新读取应用页面及独立 instrumentation 检查均成功；不将中间未取得页面的调用记为通过。
+
+执行本步专项 Android 测试（必须先经真实选择器授权测试目录，测试会撤销该授权）：
+
+```bash
+adb -s <已核对设备> shell am instrument -w -r -e class io.github.chenxiex.calibrecloud.storage.local.LocalDirectoryAuthorizationDeviceTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+最终结果：**OK (1 test)**，用例状态码 0，runner 时间 3.378s。验证系统本地 tree URI 识别；云端、file、非 tree 和附加 document 路径拒绝；缺 persistable flag 拒绝；实际读写持久授权及私有配置在 Activity 重建后保持；释放真实持久授权后显示重新授权入口。runner 时间不是产品响应指标。JVM 可控 scheduler 测试另覆盖操作仍 pending 时重建的交付，不把已完成后的设备重建测试冒称覆盖全部并发时机。
+
+全部授权、取消、重启、重建、撤销操作后，再逐文件检查专用书库的 5 个 SHA-256，均与原样本一致。应用没有源文件读写；校验由 ADB 对测试副本执行。未采集全设备日志、未记录用户 URI、凭据或真实书库内容。检查应用入口截图：文字、按钮与失效提示可见；物理墨水显示的残影、手动点击可用性仍须用户确认。
+
+记录后依次卸载 debug 测试包和应用包，均返回 `Success`；查询限定包名前缀，确认两包均不存在。仅清理本次新建的专用测试书库副本和 UIAutomator 临时文件，不改动仓库样本、真实书库或正式应用。
+
+### 静态检查与未完成验收
+
+`git diff --check`、本步文档链接和新文本空白检查通过。`plan.md` 仍被忽略，不暂存、不提交；步骤 04 用户验收已通过，按计划提交本步。
+
+- 用户共同验收及墨水屏实体显示／手动操作：**通过**。用户确认全部手动步骤通过；验收后 ADB 复核专用副本的 5 个文件未改变，完成卸载清理。
+- SD 卡目录与云端提供方真实选择器场景：**未执行**。`sm list-volumes public` 未列出已挂载 public volume；未为本步新增硬件或安装云端提供方。自动拒绝测试不替代真实云端入口操作，条件场景后续补验，不作为本步提交门槛。
+- 真实本地文件读写能力、目录移除检查、Calibre 书库验证、元数据导入、队列、书籍复制／下载、阅读器及 AC03 完整验收：**后续阶段**。本步授权成功不代表这些功能通过。
+
+### 用户手动验收（2026-10-05）
+
+用户要求安装 debug 包并进行墨水屏实体显示／手动操作验收。重新确认 PA6 的 ADB 连接，核对 APK 为可调试的独立包 `io.github.chenxiex.calibrecloud.debug`，SHA-256 与上表最终 debug 产物一致。限定包列表确认 debug 包不存在后，执行不带替换参数的 `adb install`，返回 `Success`；执行 `am start` 打开主 Activity。此次仅安装应用包，没有安装 AndroidTest 包。
+
+在设备 Download 下新建专用 `calibre-cloud-step04-manual-20261005` 目录，推送仓库样本的 5 个文件；逐文件 SHA-256 与仓库样本一致。此目录仅用于本次手动验收，用户选择该副本，不选择真实书库。
+
+手动检查如下；用户完成后明确反馈“全部步骤通过”，以下 6 项均按用户实际操作结果记为通过：
+
+1. 首页确认“未选择目录”，文字和按钮无截断／重叠，灰度下清晰，记录残影是否影响阅读。
+2. 点击“选择／重新授权目录”，取消系统选择器并返回应用，确认仍未选择；系统返回键可能先返回父目录，需要完全退出选择器。
+3. 再打开选择器，进入设备本地存储的 `Download/calibre-cloud-step04-manual-20261005`，点击“使用此文件夹”并允许，确认显示“目录已授权（读写），书库待验证。尚未导入书籍。”。
+4. 授权后重选并取消，确认原授权状态保留；观察按钮点击和页面变化是否可辨认。
+5. 点击下一页查看 OneDrive 占位页，再点击上一页返回本地页；确认无需滑动，按钮与文字可读，无应用过渡、ripple 或加载旋转动画。系统选择器动画不纳入应用保证。
+6. 通过系统应用信息对 Calibre Cloud Debug 执行强行停止后重新打开，确认仍为已授权／书库待验证。
+
+用户反馈后，重新通过 ADB 逐文件核对手动测试副本的 SHA-256，5 个文件均与仓库样本一致。执行 `adb uninstall io.github.chenxiex.calibrecloud.debug` 返回 `Success`；限定包查询确认 debug／测试包均不存在。仅删除本次新建的手动测试副本，未接触正式应用或真实书库。用户手动验收通过，按 `plan.md` 的确认后提交流程提交步骤 04；SD 卡／云端条件场景仍未执行，步骤 05 未开始。

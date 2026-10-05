@@ -1,7 +1,16 @@
 <resources>
-    <string name="library_unconfigured">书库未配置</string>
     <string name="local_authorization">本地书库</string>
-    <string name="local_unavailable">目录授权入口将在后续步骤接入。</string>
+    <string name="local_unselected">未选择目录。仅支持设备本地存储或 SD 卡。</string>
+    <string name="local_authorized">目录已授权（读写），书库待验证。尚未导入书籍。</string>
+    <string name="local_read_only">目录已授权（只读），书库待验证。不可写，请重新授权。</string>
+    <string name="local_reauthorize">目录授权已失效，请重新选择。</string>
+    <string name="local_unsupported">不支持此提供方。请选择系统本地存储或 SD 卡目录。</string>
+    <string name="local_persistence_failed">无法保留读取授权，请重新选择。原选择保持不变。</string>
+    <string name="local_configuration_failed">目录配置保存失败，请重试。原选择保持不变。</string>
+    <string name="local_checking">正在检查目录授权</string>
+    <string name="local_select">选择／重新授权目录</string>
+    <string name="next_page">下一页（第 2 页）</string>
+    <string name="previous_page">上一页（第 1 页）</string>
     <string name="onedrive_authorization">OneDrive</string>
     <string name="onedrive_unavailable">登录尚未接入。配置说明见项目 README 的“OneDrive 应用注册”。</string>
 </resources>
