@@ -1,0 +1,44 @@
+{
+    "name": "Calibre Cloud Android",
+    "build": {
+        "dockerfile": "Dockerfile",
+        "context": ".",
+        "options": ["--platform=linux/amd64"]
+    },
+    "runArgs": ["--platform=linux/amd64"],
+    "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/calibre-cloud,type=bind",
+    "workspaceFolder": "/workspaces/calibre-cloud",
+    "containerUser": "vscode",
+    "remoteUser": "vscode",
+    "updateRemoteUserUID": true,
+    "init": true,
+    "mounts": [
+        "source=calibre-cloud-${devcontainerId}-gradle,target=/home/vscode/.gradle,type=volume",
+        "source=calibre-cloud-${devcontainerId}-sdk,target=/home/vscode/.local/share/android-sdk,type=volume",
+        "source=calibre-cloud-${devcontainerId}-android,target=/home/vscode/.android,type=volume",
+        "source=calibre-cloud-${devcontainerId}-cache,target=/home/vscode/.cache,type=volume"
+    ],
+    "postCreateCommand": ["bash", ".devcontainer/scripts/post-create.sh"],
+    "waitFor": "postCreateCommand",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "mathiasfrohlich.Kotlin",
+                "redhat.java",
+                "vscjava.vscode-gradle"
+            ],
+            "settings": {
+                "editor.tabSize": 4,
+                "editor.insertSpaces": true,
+                "java.import.gradle.java.home": "/usr/lib/jvm/java-21-openjdk-amd64",
+                "java.configuration.runtimes": [
+                    {
+                        "name": "JavaSE-21",
+                        "path": "/usr/lib/jvm/java-21-openjdk-amd64",
+                        "default": true
+                    }
+                ]
+            }
+        }
+    }
+}

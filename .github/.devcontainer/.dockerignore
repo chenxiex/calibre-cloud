@@ -1,0 +1,4 @@
+*
+!Dockerfile
+!scripts/
+!scripts/seed-gradle-wrapper.py
