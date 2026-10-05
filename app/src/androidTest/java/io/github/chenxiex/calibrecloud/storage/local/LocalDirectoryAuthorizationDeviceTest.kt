@@ -28,7 +28,7 @@ class LocalDirectoryAuthorizationDeviceTest {
     fun realPersistedGrantSurvivesRecreationAndRevocationIsVisible() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val permissions = AndroidDirectoryPermissions(context)
-        val configuration = PreferencesLocalDirectoryConfiguration(context)
+        val configuration = (context.applicationContext as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies.localConfiguration
         val uri = configuration.load()
         assertNotNull("First authorize the dedicated test library in the system picker", uri)
         uri!!
@@ -43,7 +43,7 @@ class LocalDirectoryAuthorizationDeviceTest {
         awaitText(context.getString(R.string.local_authorized))
         compose.activityRule.scenario.recreate()
         compose.waitForIdle()
-        assertEquals(uri, PreferencesLocalDirectoryConfiguration(context).load())
+        assertEquals(uri, configuration.load())
         assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.restore().status)
         awaitText(context.getString(R.string.local_authorized))
         permissions.release(uri)

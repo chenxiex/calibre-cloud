@@ -7,7 +7,6 @@ import android.annotation.SuppressLint
 import androidx.core.net.toUri
 import android.provider.DocumentsContract
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
-import kotlinx.coroutines.Dispatchers
 
 /** Known AOSP local/SD storage provider only; unknown OEM and cloud providers require evidence. */
 class AndroidDirectoryPermissions(private val context: Context) : DirectoryPermissionAccess {
@@ -77,11 +76,6 @@ class PreferencesLocalDirectoryConfiguration(context: Context) : LocalDirectoryC
     }
 }
 
-fun createLocalDirectoryAuthorization(context: Context): LocalDirectoryAuthorization {
-    val applicationContext = context.applicationContext
-    return LocalDirectoryAuthorization(
-        AndroidDirectoryPermissions(applicationContext),
-        PreferencesLocalDirectoryConfiguration(applicationContext),
-        Dispatchers.IO,
-    )
-}
+/** Uses the process-owned database/configuration and authorization coordinator. */
+fun createLocalDirectoryAuthorization(context: Context): LocalDirectoryAuthorization =
+    (context.applicationContext as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies.localAuthorization

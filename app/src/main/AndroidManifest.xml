@@ -16,6 +16,7 @@
         <provider android:authorities="com.android.externalstorage.documents" />
     </queries>
     <application
+        android:name=".CalibreCloudApplication"
         android:allowBackup="false"
         android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"

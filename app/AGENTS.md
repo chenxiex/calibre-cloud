@@ -16,6 +16,8 @@
 - [任务约束](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)：固定请求、来源优先级、依赖、新鲜度及提交／刷新证据。
 - [文件提供约束](src/main/java/io/github/chenxiex/calibrecloud/files/AGENTS.md)：私有文件代次、FileProvider 范围和临时只读授权。
 
+- [应用状态约束](src/main/java/io/github/chenxiex/calibrecloud/state/AGENTS.md)：原生 SQLite、候选配置、身份绑定、最小清单及事务。
+
 ## Manifest 与入口
 
 - debug 使用 `.debug` application ID 后缀和可辨认名称，AndroidTest 使用独立测试包。provider authority 均由 `${applicationId}` 派生；书籍 provider 使用 `${applicationId}.books`，只在完整副本读取契约实现时开放。
@@ -31,4 +33,4 @@
 - 工程与构建配置变更按受影响路径执行 debug/release 构建和 lint；生成依赖锁后再运行不更新锁的构建，核对锁文件未变化。
 - 检查实际 APK 的最低系统、包标识、可调试状态及导出组件；OAuth 未接入时核对回调禁用。release 仅生成未签名产物，不使用正式签名。
 - ADB 安装前先从 APK 核对 debug application ID，只使用测试书库副本；记录结果后卸载 debug 与测试包，不覆盖正式应用或访问正式数据。
-- 实际命令、结果和未完成的验收写入 [verification/phase-1.md](verification/phase-1.md)。构建或自动测试不能替代对应阶段的真机验收。
+- 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md) 与 [第二阶段记录](verification/phase-2.md)。构建或自动测试不能替代对应阶段的真机验收。

@@ -1,10 +1,12 @@
 # Android 工程
 
-当前工程提供本地 SAF 目录授权入口、应用完整副本读取和显式任务基础契约。任务契约说明见 [任务模块](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)。OneDrive 已接入个人账号浏览器授权和私有加密状态保存；真实登录验收状态见验证记录。书库访问、任务队列、下载和阅读器尚未实现。
+当前工程提供本地 SAF 目录授权入口、应用状态数据库、最小下载清单持久查询、应用完整副本读取和显式任务基础契约。任务契约说明见 [任务模块](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)。OneDrive 已接入个人账号浏览器授权和私有加密状态保存；真实登录验收状态见验证记录。书库访问、任务队列、下载和阅读器尚未实现。
 
 ## 本地目录授权
 
 点击“选择／重新授权目录”，在系统文件选择器中选择设备本地存储或 SD 卡目录。当前支持系统本地存储提供方；云端和未知提供方会被拒绝。取消重选保留原选择，重启后恢复持久授权；只读或失效时提示重新授权。
+
+目录选择成功后保存当前候选位置与选择代号；取消保留原配置，重选保留旧书库绑定和副本。最小清单和副本读取已接入同一个应用状态库，但尚无实际下载或清单界面。
 
 “目录已授权，书库待验证”只表示平台权限已保存；当前不检查或读取 Calibre 数据库，不导入书籍。通过“上一页／下一页”查看授权入口。
 
@@ -61,4 +63,4 @@ python3 scripts/verify-oauth-config.py
 
 结果与日志保存在被忽略的 `.oauth-verification/` 中。配置校验、回调匹配和授权实现约束见 [授权模块 AGENTS.md](src/main/java/io/github/chenxiex/calibrecloud/auth/AGENTS.md)。
 
-构建结果、产物检查及未完成的验收见 [第一阶段验证记录](verification/phase-1.md)。面向 agent 的模块开发约束见 [AGENTS.md](AGENTS.md)。
+构建结果、产物检查及未完成的验收见 [第一阶段验证记录](verification/phase-1.md)。应用状态与最小清单的实现及验证见 [第二阶段验证记录](verification/phase-2.md) 和 [状态库约束](src/main/java/io/github/chenxiex/calibrecloud/state/AGENTS.md)。面向 agent 的模块开发约束见 [AGENTS.md](AGENTS.md)。

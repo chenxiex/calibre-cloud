@@ -1,0 +1,233 @@
+package io.github.chenxiex.calibrecloud.state
+
+import android.content.ContentValues
+import android.database.Cursor
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
+import io.github.chenxiex.calibrecloud.model.*
+import io.github.chenxiex.calibrecloud.storage.api.*
+import io.github.chenxiex.calibrecloud.storage.cache.ApplicationCopyHandleFactory
+import io.github.chenxiex.calibrecloud.storage.cache.HandleOpenResult
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.withContext
+import java.util.UUID
+import java.io.IOException
+
+data class LibrarySelection(val token: UUID, val location: LibraryLocation, val identity: LibraryIdentity?)
+
+/**
+ * All public suspend operations dispatch database/file work off the caller's thread.
+ * Selection tokens revoke old UI intents and candidate requests: future schedulers must compare them
+ * before publishing, and run library tasks only for current().identity. Selecting never validates a source.
+ * Binding is reserved for a successful importer; a location alone cannot restore an active identity.
+ */
+class ApplicationStateRepository(
+    private val database: ApplicationStateDatabase,
+    private val files: ApplicationCopyHandleFactory,
+    private val ioDispatcher: CoroutineDispatcher,
+) : CompleteCopyQuery {
+    suspend fun select(location: LibraryLocation): LibrarySelection = withContext(ioDispatcher) {
+        transaction { selectInTransaction(this, location) }
+    }
+
+    suspend fun current(): LibrarySelection? = withContext(ioDispatcher) { current(database.readableDatabase) }
+
+    suspend fun binding(id: LibraryId): LibraryIdentity? = withContext(ioDispatcher) {
+        binding(database.readableDatabase, id)
+    }
+
+    /** Historical incarnations at this stable location; the importer must verify compatibility before reuse. */
+    suspend fun bindingsAt(location: LibraryLocation): List<LibraryIdentity> = withContext(ioDispatcher) {
+        val values = locationValues(location)
+        database.readableDatabase.query(
+            "library_bindings", null,
+            "backend = ? AND authority = ? AND root_id = ? AND account_id = ? AND drive_id = ?",
+            arrayOf("backend", "authority", "root_id", "account_id", "drive_id").map { values.getAsString(it) }.toTypedArray(),
+            null, null, "library_id",
+        ).use { cursor -> buildList {
+            while (cursor.moveToNext()) add(LibraryIdentity(
+                LibraryId(UUID.fromString(cursor.text("library_id"))), cursor.location(), UUID.fromString(cursor.text("generation")),
+            ))
+        } }
+    }
+
+    /** Reuse is explicit after validation. Stale validation returns false without changing any state. */
+    suspend fun bindValidated(selectionToken: UUID, identity: LibraryIdentity): Boolean = withContext(ioDispatcher) {
+        transaction {
+            val selection = current(this) ?: return@transaction false
+            if (selection.token != selectionToken) return@transaction false
+            require(selection.location == identity.location)
+            val existing = binding(this, identity.id)
+            require(existing == null || existing == identity) { "Library identity cannot be rebound" }
+            if (existing == null) {
+                insertOrThrow("library_bindings", null, locationValues(identity.location).apply {
+                    put("library_id", identity.id.value.toString())
+                    put("generation", identity.generation.toString())
+                })
+            }
+            update("current_selection", ContentValues().apply { put("library_id", identity.id.value.toString()) }, "singleton = 1", null)
+            true
+        }
+    }
+
+    /**
+     * Complete-only publication gate, not a downloader. The producer must validate format contents and
+     * publish an immutable file under books before calling this method. Opening here checks the private
+     * path, nonempty bytes and any known length. Failed publication leaves the old manifest intact.
+     * File transfer, cleanup and live-handle coordination will share a publication protocol in step 06.
+     */
+    suspend fun publishComplete(copy: DownloadedCopy) = withContext(ioDispatcher) {
+        transaction {
+            val identity = requireNotNull(binding(this, copy.key.book.libraryId))
+            require(identity.location.backend == copy.savedVersion.backend)
+            val opened = files.open(copy.location, copy.sizeBytes)
+            require(opened is HandleOpenResult.Opened) { "Complete private file is required" }
+            opened.handle.use { }
+            // UPDATE avoids REPLACE deleting rows that future task/recovery tables may reference.
+            val values = copyValues(copy)
+            val args = keyArgs(copy.key)
+            if (update("downloaded_copies", values, KEY_WHERE, args) == 0) {
+                insertOrThrow("downloaded_copies", null, values)
+            }
+        }
+    }
+
+    override suspend fun find(key: CopyKey): DownloadedCopy? = withContext(ioDispatcher) {
+        try {
+            database.readableDatabase.query("downloaded_copies", null, KEY_WHERE, keyArgs(key), null, null, null).use {
+                if (it.moveToFirst()) it.copy() else null
+            }
+        } catch (_: SQLiteException) {
+            // Preserve PrivateCopyReader's structured LOCAL_IO result without exposing SQL or source tokens.
+            throw IOException("Application manifest query failed")
+        }
+    }
+
+    /** Bounded local manifest pagination, independent of the full metadata index and source access. */
+    suspend fun listCopies(libraryId: LibraryId, limit: Int, offset: Int): List<DownloadedCopy> = withContext(ioDispatcher) {
+        require(limit in 1..200 && offset >= 0)
+        database.readableDatabase.query(
+            "downloaded_copies", null, "library_id = ?", arrayOf(libraryId.value.toString()), null, null,
+            "source_id, source_uuid, format", "$offset,$limit",
+        ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.copy()) } }
+    }
+
+    // Called only by the local authorization adapter, itself confined to its I/O dispatcher.
+    internal fun localTreeUri(): String? = database.readableDatabase.rawQuery("SELECT tree_uri FROM local_authorization WHERE singleton = 1", null).use {
+        if (it.moveToFirst()) it.getString(0) else null
+    }
+
+    internal fun saveLocalSelection(treeUri: String, location: LibraryLocation.Local) {
+        transaction {
+            execSQL("INSERT INTO local_authorization(singleton, tree_uri) VALUES(1, ?) ON CONFLICT(singleton) DO UPDATE SET tree_uri = excluded.tree_uri", arrayOf(treeUri))
+            selectInTransaction(this, location)
+        }
+    }
+
+    /** One-time bridge from phase 1 preferences; never overwrites a newer current selection. */
+    internal fun importLocalAuthorization(treeUri: String, location: LibraryLocation.Local) {
+        transaction {
+            if (localTreeUri() == null) {
+                execSQL("INSERT INTO local_authorization(singleton, tree_uri) VALUES(1, ?)", arrayOf(treeUri))
+                if (current(this) == null) selectInTransaction(this, location)
+            }
+        }
+    }
+
+    private fun selectInTransaction(db: SQLiteDatabase, location: LibraryLocation): LibrarySelection {
+        val selection = LibrarySelection(UUID.randomUUID(), location, null)
+        val values = locationValues(location).apply {
+            put("singleton", 1)
+            put("token", selection.token.toString())
+            putNull("library_id")
+        }
+        if (db.update("current_selection", values, "singleton = 1", null) == 0) db.insertOrThrow("current_selection", null, values)
+        return selection
+    }
+
+    private fun current(db: SQLiteDatabase): LibrarySelection? = db.query("current_selection", null, "singleton = 1", null, null, null, null).use {
+        if (!it.moveToFirst()) null else LibrarySelection(
+            UUID.fromString(it.text("token")), it.location(),
+            it.optionalText("library_id")?.let { id -> binding(db, LibraryId(UUID.fromString(id))) },
+        )
+    }
+
+    private fun binding(db: SQLiteDatabase, id: LibraryId): LibraryIdentity? = db.query(
+        "library_bindings", null, "library_id = ?", arrayOf(id.value.toString()), null, null, null,
+    ).use { if (!it.moveToFirst()) null else LibraryIdentity(id, it.location(), UUID.fromString(it.text("generation"))) }
+
+    private fun <T> transaction(action: SQLiteDatabase.() -> T): T {
+        val db = database.writableDatabase
+        db.beginTransaction()
+        try {
+            val result = db.action()
+            db.setTransactionSuccessful()
+            return result
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    private fun locationValues(location: LibraryLocation) = ContentValues().apply {
+        put("backend", backendCode(location.backend))
+        put("authority", (location as? LibraryLocation.Local)?.authority ?: "")
+        put("root_id", when (location) {
+            is LibraryLocation.Local -> location.treeDocumentId
+            is LibraryLocation.OneDrive -> location.rootItemId
+        })
+        put("account_id", (location as? LibraryLocation.OneDrive)?.accountId ?: "")
+        put("drive_id", (location as? LibraryLocation.OneDrive)?.driveId ?: "")
+    }
+
+    private fun Cursor.location(): LibraryLocation = when (text("backend")) {
+        "local" -> LibraryLocation.Local(text("authority"), text("root_id"))
+        "onedrive" -> LibraryLocation.OneDrive(text("account_id"), text("drive_id"), text("root_id"))
+        else -> error("Unknown location backend")
+    }
+
+    private fun copyValues(copy: DownloadedCopy) = ContentValues().apply {
+        put("library_id", copy.key.book.libraryId.value.toString())
+        put("source_id", copy.key.book.sourceId)
+        put("source_uuid", copy.key.book.sourceUuid.toString())
+        put("format", copy.key.format.value)
+        put("file_generation", copy.location.fileGeneration.toString())
+        put("title", copy.title)
+        if (copy.sizeBytes == null) putNull("size_bytes") else put("size_bytes", copy.sizeBytes)
+        put("version_backend", backendCode(copy.savedVersion.backend))
+        put("version_token", copy.savedVersion.token)
+        put("source_availability", when (copy.sourceAvailability) {
+            SourceAvailability.UNCONFIRMED -> "unconfirmed"
+            SourceAvailability.AVAILABLE -> "available"
+            SourceAvailability.CONFIRMED_MISSING -> "missing"
+        })
+    }
+
+    private fun Cursor.copy(): DownloadedCopy {
+        val library = LibraryId(UUID.fromString(text("library_id")))
+        return DownloadedCopy(
+            CopyKey(BookKey(library, getLong(getColumnIndexOrThrow("source_id")), UUID.fromString(text("source_uuid"))), BookFormat.parse(text("format"))),
+            CompleteCopyLocation(library, UUID.fromString(text("file_generation"))), text("title"),
+            getColumnIndexOrThrow("size_bytes").let { if (isNull(it)) null else getLong(it) },
+            FileVersion(when (text("version_backend")) {
+                "local" -> BackendKind.LOCAL
+                "onedrive" -> BackendKind.ONEDRIVE
+                else -> error("Unknown version backend")
+            }, text("version_token")),
+            when (text("source_availability")) {
+                "unconfirmed" -> SourceAvailability.UNCONFIRMED
+                "available" -> SourceAvailability.AVAILABLE
+                "missing" -> SourceAvailability.CONFIRMED_MISSING
+                else -> error("Unknown source availability")
+            },
+        )
+    }
+
+    private fun Cursor.text(name: String): String = getString(getColumnIndexOrThrow(name))
+    private fun Cursor.optionalText(name: String): String? = getColumnIndexOrThrow(name).let { if (isNull(it)) null else getString(it) }
+    private fun backendCode(backend: BackendKind) = when (backend) { BackendKind.LOCAL -> "local"; BackendKind.ONEDRIVE -> "onedrive" }
+    private fun keyArgs(key: CopyKey) = arrayOf(key.book.libraryId.value.toString(), key.book.sourceId.toString(), key.book.sourceUuid.toString(), key.format.value)
+
+    companion object {
+        private const val KEY_WHERE = "library_id = ? AND source_id = ? AND source_uuid = ? AND format = ?"
+    }
+}
