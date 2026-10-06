@@ -158,3 +158,81 @@ adb shell pm list packages io.github.chenxiex.calibrecloud.debug
 - 步骤 02 实现、基线检查与必要真实 SQLite 平台验证完成，**用户共同验收通过**：用户审阅本步交付后于 2026-10-06 明确要求“提交”，授权提交步骤 02。验收范围为调度／依赖／写后刷新顺序、真实持久状态、候选上下文与阶段恢复证据；下列后续验收仍保持未完成。
 - 后台、设备重启、通知及任务 UI 留步骤 09；首次本地／OneDrive 真实源访问、配置发现及版本核验分别随步骤 03／04 接入。真实写回与 write-refetch 联动仍留第四阶段；本步不关闭这些验收。
 - 没有继续步骤 03，没有创建生产假后端、假写回完成或本地已读覆盖。
+
+## 步骤 03：本地 SAF 文件后端与一致快照（2026-10-06）
+
+对应 R04–R07、R09、R31–R35。本步实现与必要自动／PA6 内部存储验证完成，用户于 2026-10-06 共同验收通过并明确要求提交；未开始步骤 04。
+
+### 实现与边界
+
+本地后端通过受支持系统提供方的 tree URI、document ID 和只读流逐级解析根内文件，拒绝危险逻辑路径、树外定位、同名歧义和不支持提供方。实际持久读权限与提供方写入 flags 分开；可读取或 flags 可写都不证明第四阶段安全提交能力。书籍与封面可通过后端解析和只读获取，尚未接入副本传输或封面缓存。
+
+版本为完整内容 SHA-256，不依赖 provider 时间字段或书籍修改时间。快照检查非空 WAL／rollback journal、SHM 和多库 journal，复制并 fsync 私有暂存，再完整重读源、复查定位与日志、比较内容哈希，在私有文件上以 `OPEN_READONLY` 执行 `integrity_check`。无法确认一致性时明确拒绝；不对源执行 checkpoint、迁移、修复或写入。这是保守变化检测，不保证任意并发写入下的原子快照；已知存在日志的书库须由源端先安全关闭／整合再显式重试。依据见 [SQLite 数据库及事务日志边界](https://www.sqlite.org/howtocorrupt.html) 和 [Android SAF 授权与能力](https://developer.android.com/training/data-storage/shared/documents-files)。
+
+成功文件按任务 ID 和不可变尝试代次保存于私有 `filesDir/snapshots/local`，失败只清理本次暂存，保留旧成功快照，不进入书籍 provider。候选处理器使用当前选择代号，复制块及发布前检查控制／重选；恢复重新获取源，不凭暂存或 Running 判成功。取消使旧代号失效，再次验证取得新上下文。完成不分配 LibraryId、不导入、不发 `CacheChanged`。静态入口显示排队／执行／暂停／错误与“有效 SQLite 快照，待导入；尚未验证 Calibre 结构”，提供显式加载及当前阶段控制；页面恢复仅查私有状态，不隐式打开源。
+
+实现契约见 [本地后端](../src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md) 与 [任务模块](../src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)，操作说明见 [本地入口](../README.md#本地目录授权)。没有新增产品决策、权限、Manifest、数据库 schema、依赖或锁文件变更。
+
+### 自动检查
+
+最终运行：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+```
+
+结果 `BUILD SUCCESSFUL`（38s）；JVM **56 tests、0 failures、0 errors、0 skipped**，其中新增后端 8 项覆盖安全解析、明确缺失／越界／撤权错误、内容版本、旧快照保留、读取中断、读取期间变化、日志及控制异常清理。lint **0 errors、9 warnings、1 hint**，与步骤 02 数量相同；新增 `UseKtx` 提示已修正。未影响 release 特有行为，本步没有执行 release 构建／lint，不引用历史产物作为本步通过证据。
+
+过程中首轮因 Kotlin typealias 无法限定 sealed 子类型导致 handler 编译失败，改为直接引用 `LocalSourceResult.Available/Failed` 后通过。一次 lint 分析发生 Kotlin FIR/UAST 内部异常；随后完整重跑通过，没有屏蔽 lint 项、更新依赖或锁文件。初次平台 SQLite fixture 断言“目录中不存在事务日志”失败；修正 fixture 为显式 DELETE journal 模式，并核对校验前后已有文件及字节完全不变，生产行为未为测试修改。后续定向 5 项平台检查通过，最终下列 6 项也全部通过。失败尝试不计为通过。
+
+实际 debug Manifest 已用 `apkanalyzer manifest print` 核对：包为 `io.github.chenxiex.calibrecloud.debug`、可调试、书籍 provider 非导出且 authority 为独立 `.debug.books`；AndroidTest 独立包标识经 `apkanalyzer manifest application-id` 核对。
+
+| 最终产物 | SHA-256 |
+| --- | --- |
+| debug APK | `f2a88e9a2b4ada8a6a24f92f392fadc441257378d64004f5714d2ba5e8af5d5d` |
+| AndroidTest APK | `520f65736c6a7e7631fca68e0026568967b12cd834743d33a2d4717ad62cae88` |
+
+### PA6 内部存储与平台验证
+
+设备 PA6、Android 14 / API 34。将仓库样本复制至本次专用目录 `/sdcard/Documents/calibre-cloud-step03-20261006`，没有操作已有书库或正式应用数据。安装已核对的独立 debug／AndroidTest 包后，通过真实系统选择器进入该专用目录并确认授权；不通过注入 grant 代替系统 SAF。
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.storage.local.LocalSourceBackendDeviceTest,io.github.chenxiex.calibrecloud.tasks.LocalSnapshotTaskHandlerTest,io.github.chenxiex.calibrecloud.storage.local.LocalSnapshotIntegrityTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+最终 **OK (6 tests)**（30.35s）：1 项真实 SAF 设备测试、4 项真实持久队列／生产候选处理器集成、1 项真实私有 SQLite 检查。
+
+| 路径 | 实际结果 |
+| --- | --- |
+| 真实 SAF 文件访问 | 根内数据库、样本 EPUB 和封面只读取得；不存在文件返回 SOURCE_MISSING；私有快照 SQLite 完整性通过，内容版本与前后源一致 |
+| 真实读取取消／撤权 | 实际 SAF 复制期间取消回调传播，暂存清理且旧快照存在；撤销持久权限后返回 AUTHORIZATION_EXPIRED，私有旧快照保留，授权组件显示需重新授权 |
+| 候选完成 | 真实 SQLite 队列与生产 handler 完成；不绑定身份、不发 CacheChanged，源读两次；该集成部分注入文档，不宣称其为 SAF 提供方证据 |
+| 取消／重选隔离 | 在确定性读取阻塞处发出取消或重新选择；流关闭、暂存清理、旧任务终态取消，旧 context 不能提交，新 context 可完成且不污染当前配置 |
+| 重开与恢复 | 保存 Running/checkpoint 后重开应用状态库，恢复重新读取已变化源，不信任旧 checkpoint；成功后清空 checkpoint，仍不激活书库 |
+| 私有 SQLite | 有效数据库通过、损坏候选拒绝且不删除；完整文件列表及所有字节在校验前后不变 |
+
+另外实际操作首页“验证／加载快照”，观察成功“待导入”文字；强行停止后重新打开，状态恢复且私有快照文件清单没有新增，证明此次恢复没有重新取得快照。向专用测试副本添加非空测试 `metadata.db-wal` 后再次加载，观察一致性冲突提示和重试按钮；旧成功快照文件清单不变。移除该测试日志并点击重试，首次即时采样仍处于真实执行阶段，未把它记为成功；随后持久记录核对三项实际候选任务均为 Completed，确认该重试最终完成。撤权后重新打开首页，观察需重新授权及旧“待导入”状态，加载按钮禁用。UI 节点检查无可滚动应用节点，文字／按钮位于可见页；这是本次静态入口观察，不替代用户对全部墨水屏交互的共同验收。
+
+操作前后分别枚举测试源所有文件计算 SHA-256；移除临时日志后用 `cmp` 核对，两份清单完全一致。真实 SAF 设备测试亦核对源数据库内容版本，应用没有修改源文件。日志与临时采样仅保存在 `/tmp`，未加入版本控制。
+
+记录后卸载并清理：
+
+```bash
+adb uninstall io.github.chenxiex.calibrecloud.debug.test
+adb uninstall io.github.chenxiex.calibrecloud.debug
+adb shell pm list packages io.github.chenxiex.calibrecloud.debug
+adb shell rm -r /sdcard/Documents/calibre-cloud-step03-20261006
+adb shell rm -f /sdcard/window-step03.xml
+```
+
+两次卸载均为 `Success`，包列表无匹配；只删除本次创建的测试目录和 UI 采样文件。
+
+### 当前验收状态
+
+- 步骤 03 实现、必要基线与 PA6 内部存储 SAF 验证完成；**用户共同验收通过**：用户于 2026-10-06 审阅交付后明确要求“提交”，授权提交本步。验收范围为本地只读源访问、一致快照、候选任务控制／隔离／恢复及实际 PA6 内部存储证据；下列条件补验保持未完成。`plan.md` 保持忽略，不加入提交；没有开始步骤 04。
+- SD 卡／其它已支持本地存储卷在本次没有提供专用 fixture，保持条件补验未完成；未知 OEM 和云提供方仍不支持。大规模真实书库响应与较长任务的人工暂停／继续交互没有本步代表性样本证据。
+- Calibre 结构、动态栏目、完整索引与原子书库激活留步骤 05；副本完整传输、封面发布、缓存清理、后台恢复及阅读器分别留后续步骤；第四阶段安全写回能力未实现。本步不关闭完整 AC01／AC03、后台或源提交验收。
+
+交付静态检查：`git diff --check`、全部本步修改／新增文档的本地链接与空白检查通过；书籍 provider 路径仍仅为 `books/`。暂存区为空，`plan.md` 经 `git check-ignore` 确认为忽略，依赖及锁文件未改。

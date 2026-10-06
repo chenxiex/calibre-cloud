@@ -22,7 +22,7 @@ sealed interface StageOutcome {
 data class RecoveryDecision(val stage: TaskStage, val checkpoint: RecoveryCheckpoint?)
 
 /**
- * Handler registration is internal to the dependency container. No production handlers exist yet.
+ * Handler registration is internal to the dependency container; only implemented source operations are registered.
  * recovery MUST inspect latest source/version and staging evidence before approving continuation.
  * A stage cooperatively checks execution.checkControl() while working, closes resources on exit,
  * and never publishes after cancellation. Source commit has neither pause nor cancel capability.

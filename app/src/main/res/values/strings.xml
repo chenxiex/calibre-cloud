@@ -28,4 +28,23 @@
     <string name="onedrive_login">登录／重新登录</string>
     <string name="onedrive_cancel">取消登录</string>
     <string name="onedrive_refresh">刷新授权</string>
+    <string name="local_snapshot_pending">尚未加载数据库快照</string>
+    <string name="local_snapshot_acquire">验证／加载快照</string>
+    <string name="local_snapshot_queued">快照任务已排队，等待显式执行</string>
+    <string name="local_snapshot_running">正在只读获取并检查数据库快照</string>
+    <string name="local_snapshot_waiting">快照任务正在等待条件，可重新执行</string>
+    <string name="local_snapshot_paused">快照任务已暂停</string>
+    <string name="local_snapshot_ready">已取得有效 SQLite 快照，待导入；尚未验证 Calibre 结构</string>
+    <string name="local_snapshot_cancelled">快照任务已取消</string>
+    <string name="local_snapshot_missing">所选目录或 metadata.db 不存在</string>
+    <string name="local_snapshot_conflict">源发生变化或存在事务日志，暂不能取得一致快照</string>
+    <string name="local_snapshot_corrupt">数据库快照损坏或无法读取</string>
+    <string name="local_snapshot_space">应用存储空间不足</string>
+    <string name="local_snapshot_io">读取失败，请重试或重新选择目录</string>
+    <string name="local_snapshot_rejected">当前选择已失效，请重新验证</string>
+    <string name="local_snapshot_pause">暂停</string>
+    <string name="local_snapshot_resume">继续</string>
+    <string name="local_snapshot_retry">重试</string>
+    <string name="local_snapshot_cancel">取消快照任务</string>
+    <string name="local_snapshot_run">执行排队任务</string>
 </resources>

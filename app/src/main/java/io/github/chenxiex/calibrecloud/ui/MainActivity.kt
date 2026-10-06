@@ -23,6 +23,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import io.github.chenxiex.calibrecloud.tasks.api.TaskState
+import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
+import io.github.chenxiex.calibrecloud.tasks.api.TaskError
+import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
+import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +59,9 @@ class MainActivity : ComponentActivity() {
             OneDriveAuthorizationViewModel::class.java,
         ]
     }
+    private val snapshotModel by lazy {
+        ViewModelProvider(this, LocalSnapshotViewModel.factory(applicationContext))[LocalSnapshotViewModel::class.java]
+    }
     private var pickerOpen by mutableStateOf(false)
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pickerOpen = false
@@ -69,7 +78,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, oneDriveModel,
+                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel,
                     { oneDriveModel.login { startActivity(it) } }) {
                     pickerOpen = true
                     picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
@@ -104,10 +113,12 @@ class MainActivity : ComponentActivity() {
 private fun AuthorizationPage(
     state: DirectoryAuthorizationState,
     busy: Boolean,
+    snapshot: LocalSnapshotViewModel,
     oneDrive: OneDriveAuthorizationViewModel,
     onLogin: () -> Unit,
     onSelect: () -> Unit,
 ) {
+    LaunchedEffect(state, busy) { if (!busy) snapshot.restore() }
     // Split authorization entries into explicit pages without scrolling or animated controls.
     var page by rememberSaveable { mutableIntStateOf(0) }
     Column(
@@ -135,6 +146,9 @@ private fun AuthorizationPage(
                 }
                 Spacer(Modifier.height(16.dp))
                 StaticButton(stringResource(if (busy) R.string.local_checking else R.string.local_select), !busy, onSelect)
+                Spacer(Modifier.height(12.dp))
+                LocalSnapshotControls(snapshot, !busy && state.status in setOf(
+                    DirectoryAuthorizationStatus.AUTHORIZED, DirectoryAuthorizationStatus.READ_ONLY))
             } else {
                 Text(stringResource(R.string.onedrive_authorization), style = MaterialTheme.typography.titleMedium)
                 if (OneDriveOAuthConfiguration.fromBuildConfiguration() == null) {
@@ -181,5 +195,45 @@ private fun StaticButton(label: String, enabled: Boolean, onClick: () -> Unit) {
         enabled = enabled, onClick = onClick,
     ).padding(horizontal = 16.dp, vertical = 12.dp)) {
         Text(label)
+    }
+}
+
+@Composable
+private fun LocalSnapshotControls(model: LocalSnapshotViewModel, authorized: Boolean) {
+    val record = model.record
+    val taskState = record?.state
+    val active = taskState != null && taskState !is TaskState.Finished
+    val status = when (taskState) {
+        TaskState.Queued -> R.string.local_snapshot_queued
+        is TaskState.Running -> R.string.local_snapshot_running
+        is TaskState.Waiting -> R.string.local_snapshot_waiting
+        is TaskState.Paused -> R.string.local_snapshot_paused
+        is TaskState.Finished -> when (val result = taskState.result) {
+            TaskResult.Completed -> R.string.local_snapshot_ready
+            is TaskResult.Cancelled -> R.string.local_snapshot_cancelled
+            is TaskResult.Failed -> when ((result.failure.error as? TaskError.Source)?.error?.kind) {
+                StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.local_reauthorize
+                StorageErrorKind.SOURCE_MISSING -> R.string.local_snapshot_missing
+                StorageErrorKind.VERSION_CONFLICT -> R.string.local_snapshot_conflict
+                StorageErrorKind.CORRUPT_CONTENT, StorageErrorKind.INCOMPATIBLE_DATABASE -> R.string.local_snapshot_corrupt
+                StorageErrorKind.INSUFFICIENT_SPACE -> R.string.local_snapshot_space
+                StorageErrorKind.UNSUPPORTED_OPERATION -> R.string.local_unsupported
+                else -> R.string.local_snapshot_io
+            }
+            else -> R.string.local_snapshot_io
+        }
+        null -> if (model.rejected) R.string.local_snapshot_rejected else R.string.local_snapshot_pending
+    }
+    Text(stringResource(status))
+    Spacer(Modifier.height(8.dp))
+    StaticButton(stringResource(R.string.local_snapshot_acquire), authorized && !active && !model.submitting) { model.acquire() }
+    record?.controls?.let { controls ->
+        if (controls.canPause) StaticButton(stringResource(R.string.local_snapshot_pause), true) { model.control(TaskControl.PAUSE) }
+        if (controls.canResume) StaticButton(stringResource(R.string.local_snapshot_resume), true) { model.control(TaskControl.RESUME) }
+        if (controls.canRetry) StaticButton(stringResource(R.string.local_snapshot_retry), authorized) { model.control(TaskControl.RETRY) }
+        if (controls.canCancel) StaticButton(stringResource(R.string.local_snapshot_cancel), true) { model.control(TaskControl.CANCEL) }
+        if (taskState == TaskState.Queued || taskState is TaskState.Waiting) {
+            StaticButton(stringResource(R.string.local_snapshot_run), authorized && !model.submitting) { model.acquire() }
+        }
     }
 }
