@@ -114,6 +114,7 @@ internal object TaskCodec {
             "format" to value.resource.format.value, "source" to locator(value.resource.source),
             "expected_version" to value.expectedVersion?.let(::version),
         )
+        is TaskRequest.FormatCheck -> obj("tag" to "format_check", "book" to book(value.key.book), "format" to value.key.format.value)
         is TaskRequest.CoverLoad -> obj("tag" to "cover_load", "book" to book(value.book))
         is TaskRequest.ReadStatusWrite -> obj(
             "tag" to "read_status_write", "library" to value.libraryId.value.toString(),
@@ -150,6 +151,7 @@ internal object TaskCodec {
             ),
             json.optionalObject("expected_version")?.let(::readVersion),
         )
+        "format_check" -> TaskRequest.FormatCheck(io.github.chenxiex.calibrecloud.model.CopyKey(readBook(json.getJSONObject("book")), BookFormat.parse(json.getString("format"))))
         "cover_load" -> TaskRequest.CoverLoad(readBook(json.getJSONObject("book")))
         "read_status_write" -> TaskRequest.ReadStatusWrite(
             libraryId(json.getString("library")),
@@ -169,11 +171,13 @@ internal object TaskCodec {
     )
 
     private fun locator(value: SourceFileLocator): JSONObject = when (value) {
+        is SourceFileLocator.Relative -> obj("tag" to "relative", "backend" to backendCode(value.backend), "path" to value.path.value)
         is SourceFileLocator.Local -> obj("tag" to "local", "document" to value.documentId)
         is SourceFileLocator.OneDrive -> obj("tag" to "onedrive", "drive" to value.driveId, "item" to value.itemId)
     }
 
     private fun readLocator(json: JSONObject): SourceFileLocator = when (json.getString("tag")) {
+        "relative" -> SourceFileLocator.Relative(readBackend(json.getString("backend")), io.github.chenxiex.calibrecloud.model.RelativeSourcePath(json.getString("path")))
         "local" -> SourceFileLocator.Local(json.getString("document"))
         "onedrive" -> SourceFileLocator.OneDrive(json.getString("drive"), json.getString("item"))
         else -> invalidTag()

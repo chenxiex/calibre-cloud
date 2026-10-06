@@ -4,6 +4,10 @@ import android.content.Context
 import android.database.DatabaseErrorHandler
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
+import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.net.Uri
 import androidx.core.net.toUri
 import android.provider.DocumentsContract
@@ -43,6 +47,29 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
         requireWithinRoot(treeUri, documentId)
         return resolver.openInputStream(DocumentsContract.buildDocumentUriUsingTree(treeUri.toUri(), documentId))
             ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
+    }
+
+    override fun openRange(treeUri: String, documentId: String, offset: Long): InputStream? {
+        require(offset > 0)
+        root(treeUri)
+        requireWithinRoot(treeUri, documentId)
+        val descriptor = resolver.openFileDescriptor(DocumentsContract.buildDocumentUriUsingTree(treeUri.toUri(), documentId), "r")
+            ?: return null
+        try {
+            val length = Os.lseek(descriptor.fileDescriptor, 0, OsConstants.SEEK_END)
+            if (offset >= length || Os.lseek(descriptor.fileDescriptor, offset, OsConstants.SEEK_SET) != offset) {
+                descriptor.close()
+                return null
+            }
+            return ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+        } catch (error: ErrnoException) {
+            descriptor.close()
+            if (error.errno == OsConstants.ESPIPE || error.errno == OsConstants.EINVAL) return null
+            throw java.io.IOException(error)
+        } catch (error: Throwable) {
+            descriptor.close()
+            throw error
+        }
     }
 
     private fun requireWithinRoot(treeUri: String, documentId: String) {

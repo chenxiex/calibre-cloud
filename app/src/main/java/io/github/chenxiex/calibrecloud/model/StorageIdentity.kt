@@ -72,6 +72,9 @@ data class CustomColumnId(val sourceId: Long, val lookupName: String) {
 sealed interface SourceFileLocator {
     val backend: BackendKind
 
+    /** Frozen imported logical path; resolved inside the bound root by the executing backend. */
+    data class Relative(override val backend: BackendKind, val path: RelativeSourcePath) : SourceFileLocator
+
     data class Local(val documentId: String) : SourceFileLocator {
         override val backend = BackendKind.LOCAL
         init { requireOpaque(documentId) }

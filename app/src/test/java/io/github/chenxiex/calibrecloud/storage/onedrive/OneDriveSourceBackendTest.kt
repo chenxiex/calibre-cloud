@@ -1,5 +1,7 @@
 package io.github.chenxiex.calibrecloud.storage.onedrive
 
+import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.FileVersion
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
@@ -404,6 +406,80 @@ class OneDriveSourceBackendTest {
         fixture.onRequest = { fixture.response(it, 429, headers = mapOf("Retry-After" to retryDate)) }
         val limited = backend.discover() as OneDriveSourceResult.Failed
         assertTrue(limited.retryDelayMillis!! in 110_000L..120_000L)
+    }
+
+    @Test fun rangeUsesActualDownloadUrlAndReturnsOnlyValidatedSuffix() = runTest {
+        val fixture = Fixture()
+        fixture.onRequest = { request ->
+            if (request.url.host == "download.example") fixture.response(request, 206, "base", mapOf("Content-Range" to "bytes 4-7/8")) else null
+        }
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val stream = (backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, fixture.tag)) as OneDriveSourceResult.Available).value!!
+        assertEquals("base", stream.use { it.readBytes().decodeToString() })
+        val content = fixture.requests.single { it.url.host == "download.example" }
+        assertEquals("bytes=4-", content.header("Range"))
+        assertEquals("identity", content.header("Accept-Encoding"))
+        assertNull(content.header("Authorization"))
+        assertNull(fixture.requests.single { it.url.encodedPath.endsWith("/content") }.header("Range"))
+    }
+
+    @Test fun ignoredRangeAndUnsatisfiableRangeCloseResponseAndRequireFullRestart() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        for (status in listOf(200, 416)) {
+            var closed = false
+            fixture.onRequest = { request ->
+                if (request.url.host != "download.example") null else {
+                    val source = object : ForwardingSource(Buffer().writeUtf8("database")) {
+                        override fun close() { closed = true; super.close() }
+                    }.buffer()
+                    fixture.response(request, status).newBuilder().body(object : ResponseBody() {
+                        override fun contentType() = null
+                        override fun contentLength() = 8L
+                        override fun source() = source
+                    }).build()
+                }
+            }
+            assertNull((backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, fixture.tag)) as OneDriveSourceResult.Available).value)
+            assertTrue(closed)
+        }
+    }
+
+    @Test fun rangeRefusesChangedVersionWrongBoundsAndWrongTotal() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        assertEquals(StorageErrorKind.VERSION_CONFLICT, failure(backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, "old"))))
+        assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/content") })
+        for ((header, expected) in listOf(
+            "bytes 0-7/8" to StorageErrorKind.CORRUPT_CONTENT,
+            "bytes 4-6/8" to StorageErrorKind.CORRUPT_CONTENT,
+            "bytes 4-7/9" to StorageErrorKind.VERSION_CONFLICT,
+            "bytes 4-7/*" to StorageErrorKind.CORRUPT_CONTENT,
+        )) {
+            fixture.onRequest = { request -> if (request.url.host == "download.example") fixture.response(request, 206, "base", mapOf("Content-Range" to header)) else null }
+            assertEquals(expected, failure(backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, fixture.tag))))
+        }
+    }
+
+    @Test fun unknownLengthRangeStreamDetectsTruncationAndExcessBytes() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        for (bytes in listOf("ba", "base-extra")) {
+            fixture.onRequest = { request -> if (request.url.host != "download.example") null else {
+                fixture.response(request, 206, headers = mapOf("Content-Range" to "bytes 4-7/8")).newBuilder().body(object : ResponseBody() {
+                    override fun contentType() = null
+                    override fun contentLength() = -1L
+                    override fun source() = Buffer().writeUtf8(bytes)
+                }).build()
+            } }
+            val stream = (backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, fixture.tag)) as OneDriveSourceResult.Available).value!!
+            try {
+                stream.use { it.readBytes() }
+                throw AssertionError("invalid suffix accepted")
+            } catch (failure: OneDriveSourceException) {
+                assertEquals(StorageErrorKind.CORRUPT_CONTENT, failure.kind)
+            }
+        }
     }
 
     private fun assertPreserved(snapshot: OneDriveDatabaseSnapshot) {

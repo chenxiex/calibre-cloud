@@ -32,6 +32,8 @@ interface TaskHandler {
     fun controls(stage: TaskStage): TaskControls
     suspend fun recover(entry: QueueEntry, execution: TaskExecution): RecoveryDecision
     suspend fun execute(entry: QueueEntry, execution: TaskExecution): StageOutcome
+    /** Serial safe-boundary cleanup; never deletes published cache or source data. */
+    suspend fun stopped(entry: QueueEntry) {}
 }
 
 private class BoundaryControl(val command: TaskControl) : RuntimeException()
@@ -78,8 +80,19 @@ class TaskCoordinator(
         return queue.submit(submission)
     }
 
+    /** Private-state recovery only. Never waits for an active executor or touches source storage. */
+    suspend fun restorePending() {
+        if (!queue.executionLock.tryLock()) return
+        try { queue.recover() } finally { queue.executionLock.unlock() }
+    }
+
     /** Explicit foreground driver; returns when no currently executable work remains. */
     suspend fun drain() = queue.executionLock.withLock {
+        queue.list().filter { it.record.state is TaskState.Finished &&
+            (it.record.state as TaskState.Finished).result is TaskResult.Cancelled && it.checkpoint != null }.forEach { entry ->
+            handlers.singleOrNull { it.supports(entry.record.submission.request) }?.stopped(entry)
+            queue.update(entry.record.id) { it.copy(checkpoint = null) }
+        }
         queue.recover()
         val deferred = mutableSetOf<TaskId>()
         while (true) {
@@ -175,6 +188,7 @@ class TaskCoordinator(
                 }
             }
         } catch (control: BoundaryControl) {
+            handler.stopped(requireNotNull(queue.get(initial.record.id)))
             queue.update(initial.record.id) { entry ->
                 val state = if (control.command == TaskControl.PAUSE) TaskState.Paused(entry.stage)
                     else TaskState.Finished(TaskResult.Cancelled(entry.record.commit))
@@ -221,6 +235,7 @@ class TaskCoordinator(
         is TaskRequest.CandidateConfiguration -> listOf(TaskStage.CANDIDATE_ACCESS)
         is TaskRequest.MetadataSync -> listOf(TaskStage.METADATA_FETCH, TaskStage.METADATA_IMPORT)
         is TaskRequest.FormatCopy -> listOf(TaskStage.FORMAT_TRANSFER, TaskStage.FORMAT_PUBLISH)
+        is TaskRequest.FormatCheck -> listOf(TaskStage.FORMAT_CHECK)
         is TaskRequest.CoverLoad -> listOf(TaskStage.COVER_TRANSFER, TaskStage.COVER_PUBLISH)
         is TaskRequest.ReadStatusWrite -> listOf(TaskStage.WRITE_SNAPSHOT, TaskStage.WRITE_PREPARE, TaskStage.WRITE_COMMIT,
             TaskStage.WRITE_REFETCH, TaskStage.WRITE_IMPORT, TaskStage.RECOVERY_CHECK)

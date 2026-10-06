@@ -71,6 +71,11 @@ sealed interface TaskRequest {
         init { require(expectedVersion == null || expectedVersion.backend == resource.source.backend) }
     }
 
+    /** Explicit single downloaded-format version check; never downloads an absent copy. */
+    data class FormatCheck(val key: io.github.chenxiex.calibrecloud.model.CopyKey) : TaskRequest {
+        override val libraryId: LibraryId get() = key.book.libraryId
+    }
+
     data class CoverLoad(val book: BookKey) : TaskRequest {
         override val libraryId: LibraryId get() = book.libraryId
     }

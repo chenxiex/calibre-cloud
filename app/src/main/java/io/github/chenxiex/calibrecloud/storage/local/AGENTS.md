@@ -25,6 +25,7 @@ JVM 测试使用授权元数据与配置适配器。`LocalDirectoryAuthorization
 ## 显式源读取与快照
 
 - `AndroidLocalDocumentAccess` 仅支持已识别的系统 external-storage 提供方，每次访问复核实际持久读取授权。只使用 tree 内 document URI 和只读流，不转换源绝对路径，不提供源写入 API。按显示名逐级解析并复核外部存储文档 ID 根范围，拒绝重复名称、目录冒充文件及树外定位。
+- 单格式副本续传通过只读文件描述符探测 `lseek`，定位成功后仅提供断点之后的流；不可寻址提供方返回不支持范围读取，由任务层重新完整传输，不用读取并跳过前缀伪装续传。
 - 内容版本使用完整流 SHA-256，不依赖提供方的时间／大小字段。文件可写标志仅表达提供方能力，不代表已授权写回或安全提交能力。
 - `LocalSourceBackend.acquireSnapshot` 为每次候选任务创建独立私有暂存和不可变文件代次；复制 hash 必须与第二次完整源读取一致，并复查 `metadata.db` 文档 ID 和事务日志。非空 WAL／rollback journal、SHM 及 master journal 无一致快照获取路径时拒绝同步；空 WAL／journal 实际读流确认。此协议不宣称任意并发写入安全。
 - `AndroidSnapshotValidator` 只对私有副本执行 `OPEN_READONLY` 和 SQLite `integrity_check`；禁用默认损坏文件删除处理，不进行修复、迁移、checkpoint 或源库升级。校验和发布前再次检查队列控制，取消或失败只清理本次暂存，保留之前成功快照。

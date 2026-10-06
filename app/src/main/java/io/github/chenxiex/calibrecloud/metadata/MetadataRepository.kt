@@ -99,6 +99,7 @@ class MetadataRepository(
                         put("title", book.title); put("added_at", book.addedAt)
                     }) }
                     db.update("current_selection", ContentValues().apply { put("library_id", key[0]) }, "singleton = 1", null)
+                    DurableTaskQueue.enqueueDownloadedChecks(db, identity.id)
                     if (taskId != null) DurableTaskQueue.completePublication(db, taskId)
                     db.setTransactionSuccessful()
                     identity

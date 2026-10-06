@@ -11,6 +11,9 @@ import io.github.chenxiex.calibrecloud.storage.cache.ApplicationCopyHandleFactor
 import io.github.chenxiex.calibrecloud.storage.cache.HandleOpenResult
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
 import java.util.UUID
 import java.io.IOException
 
@@ -33,6 +36,8 @@ class ApplicationStateRepository(
     private val files: ApplicationCopyHandleFactory,
     private val ioDispatcher: CoroutineDispatcher,
 ) : CompleteCopyQuery {
+    /** Shared with ordinary reads to keep query/open atomic relative to manifest replacement. */
+    val copyAccess = Mutex()
     suspend fun select(location: LibraryLocation): LibrarySelection = withContext(ioDispatcher) {
         transaction { selectInTransaction(this, location) }
     }
@@ -137,22 +142,53 @@ class ApplicationStateRepository(
      * Complete-only publication gate, not a downloader. The producer must validate format contents and
      * publish an immutable file under books before calling this method. Opening here checks the private
      * path, nonempty bytes and any known length. Failed publication leaves the old manifest intact.
-     * File transfer, cleanup and live-handle coordination will share a publication protocol in step 06.
+     * Query/open and replacement share copyAccess; the factory retires old generations after live handles close.
+     * A supplied task ID also requires the current binding/control gate and commits terminal state atomically.
      */
-    suspend fun publishComplete(copy: DownloadedCopy) = withContext(ioDispatcher) {
-        transaction {
+    suspend fun publishComplete(copy: DownloadedCopy, taskId: UUID? = null): Boolean = withContext(ioDispatcher) { copyAccess.withLock {
+        val previous = find(copy.key)
+        val published = transaction {
             val identity = requireNotNull(binding(this, copy.key.book.libraryId))
             require(identity.location.backend == copy.savedVersion.backend)
+            if (taskId != null) {
+                if (current(this)?.identity != identity) return@transaction false
+                val allowed = rawQuery("SELECT control FROM queued_tasks WHERE task_id = ?", arrayOf(taskId.toString())).use {
+                    it.moveToFirst() && it.isNull(0)
+                }
+                if (!allowed) return@transaction false
+            }
             val opened = files.open(copy.location, copy.sizeBytes)
             require(opened is HandleOpenResult.Opened) { "Complete private file is required" }
             opened.handle.use { }
-            // UPDATE avoids REPLACE deleting rows that future task/recovery tables may reference.
             val values = copyValues(copy)
             val args = keyArgs(copy.key)
-            if (update("downloaded_copies", values, KEY_WHERE, args) == 0) {
-                insertOrThrow("downloaded_copies", null, values)
-            }
+            if (update("downloaded_copies", values, KEY_WHERE, args) == 0) insertOrThrow("downloaded_copies", null, values)
+            if (taskId != null) DurableTaskQueue.completePublication(this, taskId)
+            true
         }
+        if (published && previous != null && previous.location != copy.location) files.retire(previous.location)
+        published
+    } }
+
+    /** Removes crash-orphan generations while serializing query/open and preserving live handles. */
+    suspend fun collectUnreferenced(libraryId: LibraryId) = withContext(ioDispatcher) { copyAccess.withLock {
+        val retained = mutableSetOf<CompleteCopyLocation>()
+        var offset = 0
+        while (true) {
+            val page = listCopies(libraryId, 200, offset)
+            retained.addAll(page.map { it.location })
+            if (page.size < 200) break
+            offset += page.size
+        }
+        files.collectUnreferenced(libraryId, retained)
+    } }
+
+    /** Only an explicit source check changes this field; transport/auth failures never call it. */
+    suspend fun confirmSource(key: CopyKey, availability: SourceAvailability) = withContext(ioDispatcher) {
+        require(availability != SourceAvailability.UNCONFIRMED)
+        database.writableDatabase.update("downloaded_copies", ContentValues().apply {
+            put("source_availability", if (availability == SourceAvailability.AVAILABLE) "available" else "missing")
+        }, KEY_WHERE, keyArgs(key))
     }
 
     override suspend fun find(key: CopyKey): DownloadedCopy? = withContext(ioDispatcher) {

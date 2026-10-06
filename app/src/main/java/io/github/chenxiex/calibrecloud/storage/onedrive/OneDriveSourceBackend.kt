@@ -39,7 +39,7 @@ sealed interface OneDriveSourceResult<out T> {
 data class OneDriveItem(val id: String, val name: String, val directory: Boolean, val parentId: String?, val cTag: String?, val sizeBytes: Long?)
 data class OneDriveIdentity(val accountId: String, val driveId: String, val root: OneDriveItem)
 data class OneDriveDirectoryPage(val items: List<OneDriveItem>, val nextPageUrl: String?, val parentName: String? = null)
-data class OneDriveSourceFile(val locator: SourceFileLocator.OneDrive, val version: FileVersion)
+data class OneDriveSourceFile(val locator: SourceFileLocator.OneDrive, val version: FileVersion, val sizeBytes: Long? = null)
 data class OneDriveDatabaseSnapshot(val file: File, val version: FileVersion)
 
 /** Safe failure only: exception messages never contain HTTP bodies, tokens or download URLs. */
@@ -110,13 +110,72 @@ class OneDriveSourceBackend(
     suspend fun resolve(location: LibraryLocation.OneDrive, path: RelativeSourcePath): OneDriveSourceResult<OneDriveSourceFile> = operation {
         verifyIdentity(location)
         val item = resolveItem(location, path)
-        OneDriveSourceFile(SourceFileLocator.OneDrive(location.driveId, item.id), versionOf(item))
+        OneDriveSourceFile(SourceFileLocator.OneDrive(location.driveId, item.id), versionOf(item), item.sizeBytes)
     }
 
     /** Caller owns the response stream and closes it; stream reads remain off the UI thread. */
     suspend fun openRead(location: LibraryLocation.OneDrive, path: RelativeSourcePath): OneDriveSourceResult<InputStream> = operation {
         verifyIdentity(location)
         openContent(location, resolveItem(location, path).id)
+    }
+
+    /** Requests only the suffix from a freshly resolved, unauthenticated content URL. */
+    suspend fun openRange(location: LibraryLocation.OneDrive, path: RelativeSourcePath, offset: Long, expectedVersion: FileVersion): OneDriveSourceResult<InputStream?> = operation {
+        require(offset > 0 && expectedVersion.backend == BackendKind.ONEDRIVE)
+        verifyIdentity(location)
+        val item = resolveItem(location, path)
+        if (versionOf(item) != expectedVersion) conflict()
+        val length = item.sizeBytes ?: return@operation null
+        if (offset >= length) return@operation null
+        val response = contentResponse(location, item.id, offset)
+        try {
+            // Providers can ignore Range. Never append a full response to the retained prefix.
+            if (response.code == 200 || response.code == 416) {
+                response.close()
+                return@operation null
+            }
+            checkResponse(response)
+            if (response.code != 206) unsupported("range_status")
+            val match = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+)").matchEntire(response.header("Content-Range") ?: "")
+                ?: throw OneDriveSourceException(StorageErrorKind.CORRUPT_CONTENT, reason = "range_header")
+            val start = match.groupValues[1].toLongOrNull()
+            val end = match.groupValues[2].toLongOrNull()
+            val total = match.groupValues[3].toLongOrNull()
+            if (total != length) conflict()
+            if (start != offset || end != length - 1) throw OneDriveSourceException(StorageErrorKind.CORRUPT_CONTENT, reason = "range_bounds")
+            if (response.header("Content-Encoding")?.let { it != "identity" } == true) unsupported("range_encoding")
+            val body = response.body ?: unsupported()
+            val suffixLength = length - offset
+            if (body.contentLength() >= 0 && body.contentLength() != suffixLength) {
+                throw OneDriveSourceException(StorageErrorKind.CORRUPT_CONTENT, reason = "range_length")
+            }
+            return@operation object : FilterInputStream(body.byteStream()) {
+                private var remaining = suffixLength
+                override fun read(): Int {
+                    val value = `in`.read()
+                    account(if (value < 0) -1 else 1)
+                    return value
+                }
+                override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                    if (length == 0) return 0
+                    val count = `in`.read(buffer, offset, length)
+                    account(count)
+                    return count
+                }
+                private fun account(count: Int) {
+                    if (count < 0) {
+                        if (remaining != 0L) throw OneDriveSourceException(StorageErrorKind.CORRUPT_CONTENT, reason = "range_truncated")
+                    } else {
+                        remaining -= count
+                        if (remaining < 0) throw OneDriveSourceException(StorageErrorKind.CORRUPT_CONTENT, reason = "range_overflow")
+                    }
+                }
+                override fun close() { response.close() }
+            }
+        } catch (error: Throwable) {
+            response.close()
+            throw error
+        }
     }
 
     suspend fun version(location: LibraryLocation.OneDrive, path: RelativeSourcePath): OneDriveSourceResult<FileVersion> = operation {
@@ -330,6 +389,20 @@ class OneDriveSourceBackend(
     }
 
     private suspend fun openContent(location: LibraryLocation.OneDrive, itemId: String): InputStream {
+        val response = contentResponse(location, itemId)
+        try {
+            checkResponse(response)
+            return object : FilterInputStream(response.body?.byteStream() ?: unsupported()) {
+                override fun close() { response.close() }
+            }
+        } catch (error: Throwable) {
+            response.close()
+            throw error
+        }
+    }
+
+    private suspend fun contentResponse(location: LibraryLocation.OneDrive, itemId: String, offset: Long? = null): Response {
+        // Graph /content resolves the URL; Range belongs to the redirected content request only.
         var response = graph(url("drives", location.driveId, "items", itemId, "content"))
         try {
             var hops = 0
@@ -339,13 +412,12 @@ class OneDriveSourceBackend(
                 if (!target.isHttps || target.username.isNotEmpty() || target.password.isNotEmpty()) unsupported()
                 response.close()
                 currentCoroutineContext().ensureActive()
-                response = contentClient.newCall(Request.Builder().url(target).build()).execute()
+                val request = Request.Builder().url(target).apply {
+                    if (offset != null) header("Range", "bytes=$offset-").header("Accept-Encoding", "identity")
+                }.build()
+                response = contentClient.newCall(request).execute()
             }
-            checkResponse(response)
-            val owned = response
-            return object : FilterInputStream(owned.body?.byteStream() ?: unsupported()) {
-                override fun close() { owned.close() }
-            }
+            return response
         } catch (error: Throwable) {
             response.close()
             throw error

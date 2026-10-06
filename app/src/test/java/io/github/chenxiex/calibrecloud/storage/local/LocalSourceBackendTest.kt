@@ -1,5 +1,7 @@
 package io.github.chenxiex.calibrecloud.storage.local
 
+import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.FileVersion
 import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import java.io.ByteArrayInputStream
@@ -25,6 +27,8 @@ class LocalSourceBackendTest {
         var outside = false
         var reads = 0
         var onOpen: (Int) -> InputStream = { ByteArrayInputStream("database".toByteArray()) }
+        var range: (String, Long) -> InputStream? = { _, _ -> null }
+        override fun openRange(treeUri: String, documentId: String, offset: Long): InputStream? = range(documentId, offset)
         var log: ByteArray? = null
         val root = LocalDocument("root", "library", true, false)
         override fun root(treeUri: String): LocalDocument {
@@ -134,6 +138,31 @@ class LocalSourceBackendTest {
         } catch (_: IllegalStateException) {
             assertTrue(directory.walkTopDown().none { it.isFile })
         }
+    }
+
+    @Test fun rangeResolvesWithinRootAndDoesNotReadThePrefix() = runTest {
+        val documents = Documents()
+        val backend = LocalSourceBackend(documents, temporary.newFolder(), SnapshotValidator { true }, StandardTestDispatcher(testScheduler))
+        documents.range = { id, offset ->
+            assertEquals("book", id)
+            assertEquals(4L, offset)
+            ByteArrayInputStream("base".toByteArray())
+        }
+        val result = backend.openRange("tree", RelativeSourcePath("Author/Book.epub"), 4, FileVersion(BackendKind.LOCAL, "fixture")) as LocalSourceResult.Available
+        assertEquals("base", result.value!!.use { it.readBytes().decodeToString() })
+        assertEquals(0, documents.reads)
+        documents.outside = true
+        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.openRange("tree", RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.LOCAL, "fixture"))))
+        documents.denied = true
+        assertEquals(StorageErrorKind.AUTHORIZATION_EXPIRED, failure(backend.openRange("tree", RelativeSourcePath("Author/Book.epub"), 4, FileVersion(BackendKind.LOCAL, "fixture"))))
+    }
+
+    @Test fun nonSeekableProviderRequestsFullRestartWithoutScanningPrefix() = runTest {
+        val documents = Documents()
+        val backend = LocalSourceBackend(documents, temporary.newFolder(), SnapshotValidator { true }, StandardTestDispatcher(testScheduler))
+        val result = backend.openRange("tree", RelativeSourcePath("Author/Book.epub"), 4, FileVersion(BackendKind.LOCAL, "fixture")) as LocalSourceResult.Available
+        org.junit.Assert.assertNull(result.value)
+        assertEquals(0, documents.reads)
     }
 
     private fun failure(result: LocalSourceResult<*>) = (result as LocalSourceResult.Failed).error.kind

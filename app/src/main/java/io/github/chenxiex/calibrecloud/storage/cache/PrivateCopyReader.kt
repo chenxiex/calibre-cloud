@@ -9,6 +9,8 @@ import io.github.chenxiex.calibrecloud.storage.api.CopyReader
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.IOException
@@ -21,6 +23,8 @@ sealed interface HandleOpenResult {
 
 fun interface ApplicationCopyHandleFactory {
     fun open(location: CompleteCopyLocation, expectedSize: Long?): HandleOpenResult
+    fun retire(location: CompleteCopyLocation) {}
+    fun collectUnreferenced(libraryId: io.github.chenxiex.calibrecloud.model.LibraryId, retained: Set<CompleteCopyLocation>) {}
 }
 
 /** Both backends reuse this reader. The query implementation supplies only published complete records. */
@@ -28,16 +32,17 @@ class PrivateCopyReader(
     private val copies: CompleteCopyQuery,
     private val handles: ApplicationCopyHandleFactory,
     private val ioDispatcher: CoroutineDispatcher,
+    private val copyAccess: Mutex = Mutex(),
 ) : CopyReader {
     override suspend fun read(key: CopyKey): CopyReadResult {
         var acquired: ApplicationCopyHandle? = null
         var delivered = false
         try {
-            val result = withContext(ioDispatcher) {
+            val result = withContext(ioDispatcher) { copyAccess.withLock {
                 try {
-                    val copy = copies.find(key) ?: return@withContext CopyReadResult.Missing
+                    val copy = copies.find(key) ?: return@withLock CopyReadResult.Missing
                     if (copy.key != key) {
-                        return@withContext CopyReadResult.Failed(StorageError(StorageErrorKind.CORRUPT_CONTENT))
+                        return@withLock CopyReadResult.Failed(StorageError(StorageErrorKind.CORRUPT_CONTENT))
                     }
                     when (val opened = handles.open(copy.location, copy.sizeBytes)) {
                         is HandleOpenResult.Opened -> {
@@ -52,7 +57,7 @@ class PrivateCopyReader(
                 } catch (_: IOException) {
                     CopyReadResult.Failed(StorageError(StorageErrorKind.LOCAL_IO))
                 }
-            }
+            } }
             delivered = true
             return result
         } finally {

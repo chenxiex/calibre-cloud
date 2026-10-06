@@ -26,6 +26,7 @@ data class PriorityPromotion(val origin: TaskOrigin, val sequence: QueueSequence
 enum class TaskStage(val code: String) {
     CANDIDATE_ACCESS("candidate_access"),
     METADATA_FETCH("metadata_fetch"), METADATA_IMPORT("metadata_import"),
+    FORMAT_CHECK("format_check"),
     FORMAT_TRANSFER("format_transfer"), FORMAT_PUBLISH("format_publish"),
     COVER_TRANSFER("cover_transfer"), COVER_PUBLISH("cover_publish"),
     WRITE_SNAPSHOT("write_snapshot"), WRITE_PREPARE("write_prepare"), WRITE_COMMIT("write_commit"),

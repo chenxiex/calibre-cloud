@@ -29,6 +29,8 @@ interface LocalDocumentAccess {
     fun children(treeUri: String, parentId: String): List<LocalDocument>
     fun isWithinRoot(treeUri: String, documentId: String): Boolean
     fun openRead(treeUri: String, documentId: String): InputStream
+    /** Must seek directly, without reading/skipping the prefix. null for non-seekable providers. */
+    fun openRange(treeUri: String, documentId: String, offset: Long): InputStream? = null
 }
 
 class LocalSourceException(val kind: StorageErrorKind) : IOException()
@@ -74,9 +76,20 @@ class LocalSourceBackend(
         openSource(treeUri, resolveDocument(treeUri, path).id)
     }
 
-    suspend fun version(treeUri: String, path: RelativeSourcePath): LocalSourceResult<FileVersion> = operation {
+    /** The executor verifies the complete content version before and after this positioned read. */
+    suspend fun openRange(treeUri: String, path: RelativeSourcePath, offset: Long, expectedVersion: FileVersion): LocalSourceResult<InputStream?> = operation {
+        require(offset > 0 && expectedVersion.backend == BackendKind.LOCAL)
         val document = resolveDocument(treeUri, path)
-        fileVersion(hash(openSource(treeUri, document.id)))
+        try {
+            documents.openRange(treeUri, document.id, offset)
+        } catch (_: java.io.FileNotFoundException) {
+            throw LocalSourceException(StorageErrorKind.SOURCE_MISSING)
+        }
+    }
+
+    suspend fun version(treeUri: String, path: RelativeSourcePath, checkControl: suspend () -> Unit = {}): LocalSourceResult<FileVersion> = operation {
+        val document = resolveDocument(treeUri, path)
+        fileVersion(hash(openSource(treeUri, document.id), checkControl))
     }
 
     suspend fun acquireSnapshot(

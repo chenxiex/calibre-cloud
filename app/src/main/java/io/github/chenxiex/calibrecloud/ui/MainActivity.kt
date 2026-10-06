@@ -77,6 +77,9 @@ class MainActivity : ComponentActivity() {
     private val metadataModel by lazy {
         ViewModelProvider(this, MetadataViewModel.factory(applicationContext))[MetadataViewModel::class.java]
     }
+    private val downloadModel by lazy {
+        ViewModelProvider(this, DownloadViewModel.factory(applicationContext))[DownloadViewModel::class.java]
+    }
     private var pickerOpen by mutableStateOf(false)
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pickerOpen = false
@@ -93,7 +96,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel,
+                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel,
                     { oneDriveModel.login { startActivity(it) } }) {
                     pickerOpen = true
                     picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
@@ -116,6 +119,7 @@ class MainActivity : ComponentActivity() {
         oneDriveModel.restore()
         oneDriveLibraryModel.restore()
         metadataModel.restore()
+        downloadModel.restore()
         if (pickerOpen) return
         authorizationModel.refresh()
     }
@@ -134,6 +138,7 @@ private fun AuthorizationPage(
     oneDrive: OneDriveAuthorizationViewModel,
     library: OneDriveLibraryViewModel,
     metadata: MetadataViewModel,
+    downloads: DownloadViewModel,
     onLogin: () -> Unit,
     onSelect: () -> Unit,
 ) {
@@ -147,6 +152,7 @@ private fun AuthorizationPage(
     var page by rememberSaveable { mutableIntStateOf(0) }
     LaunchedEffect(page, state, busy, snapshot.record, library.record, library.rootChosen, library.submitting) {
         metadata.restore()
+        downloads.restore()
     }
     Column(
         modifier = Modifier.fillMaxSize().background(Color.White)
@@ -215,21 +221,25 @@ private fun AuthorizationPage(
                 OneDriveTaskControls(library, oneDrive.status == LoginStatus.AUTHORIZED && !oneDrive.busy)
             } else if (page == 4) {
                 MetadataSummary(metadata)
-            } else {
+            } else if (page == 5) {
                 MetadataColumnControls(metadata)
+            } else if (page == 6) {
+                DownloadControls(downloads)
+            } else {
+                DownloadList(downloads)
             }
         }
-        Text(stringResource(R.string.authorization_page_number, page + 1, 6))
+        Text(stringResource(R.string.authorization_page_number, page + 1, 8))
         Row {
             StaticButton(stringResource(R.string.page_previous), page > 0) { page-- }
             Spacer(Modifier.width(8.dp))
-            StaticButton(stringResource(R.string.page_next), page < 5) { page++ }
+            StaticButton(stringResource(R.string.page_next), page < 7) { page++ }
         }
     }
 }
 
 @Composable
-private fun StaticButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+internal fun StaticButton(label: String, enabled: Boolean, onClick: () -> Unit) {
     Box(Modifier.border(1.dp, Color.Black).clickable(
         interactionSource = remember { MutableInteractionSource() }, indication = null,
         enabled = enabled, onClick = onClick,

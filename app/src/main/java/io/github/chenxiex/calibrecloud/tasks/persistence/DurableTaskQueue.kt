@@ -299,7 +299,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 require(it.isNull(1))
                 TaskCodec.decode(it.getString(0))
             }
-            require(record.submission.request is TaskRequest.CandidateConfiguration)
+            require(record.submission.request is TaskRequest.CandidateConfiguration || record.submission.request is TaskRequest.FormatCopy)
             require(record.state is TaskState.Running)
             val completed = record.copy(state = TaskState.Finished(TaskResult.Completed), controls = noControls)
             db.update("queued_tasks", ContentValues().apply {
@@ -308,12 +308,44 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             }, "task_id = ?", args)
         }
 
+        /** Called in the import transaction; checks survive process death before the next dispatch. */
+        internal fun enqueueDownloadedChecks(db: SQLiteDatabase, libraryId: io.github.chenxiex.calibrecloud.model.LibraryId) {
+            db.rawQuery("SELECT source_id, source_uuid, format FROM downloaded_copies WHERE library_id = ? ORDER BY source_id, source_uuid, format",
+                arrayOf(libraryId.value.toString())).use { c ->
+                while (c.moveToNext()) enqueueAutomatic(db, TaskRequest.FormatCheck(io.github.chenxiex.calibrecloud.model.CopyKey(
+                    io.github.chenxiex.calibrecloud.model.BookKey(libraryId, c.getLong(0), UUID.fromString(c.getString(1))),
+                    io.github.chenxiex.calibrecloud.model.BookFormat.parse(c.getString(2)))))
+            }
+        }
+
+        internal fun enqueueAutomatic(db: SQLiteDatabase, request: TaskRequest) {
+            val submission = TaskSubmission(request, TaskOrigin.DOWNLOADED_FORMAT_UPDATE)
+            val exists = db.rawQuery("SELECT record FROM queued_tasks", null).use { c ->
+                var found = false
+                while (c.moveToNext()) {
+                    val record = TaskCodec.decode(c.getString(0))
+                    if (record.state !is TaskState.Finished && record.submission.key == submission.key) found = true
+                }
+                found
+            }
+            if (exists) return
+            val next = db.rawQuery("SELECT next_value FROM queue_sequence WHERE singleton = 1", null).use { it.moveToFirst(); it.getLong(0) }
+            check(next < Long.MAX_VALUE)
+            db.execSQL("UPDATE queue_sequence SET next_value = ? WHERE singleton = 1", arrayOf(next + 1))
+            val record = TaskRecord(TaskId(UUID.randomUUID()), submission, SchedulingPosition(TaskPriority.LOW, QueueSequence(next)),
+                state = TaskState.Queued, controls = queuedControls)
+            db.insertOrThrow("queued_tasks", null, ContentValues().apply {
+                put("task_id", record.id.value.toString()); put("record", TaskCodec.encode(record)); put("stage", initialStage(request).code)
+            })
+        }
+
         internal val queuedControls = TaskControls(false, true, false, false)
         internal val noControls = TaskControls(false, false, false, false)
         fun initialStage(request: TaskRequest): TaskStage = when (request) {
             is TaskRequest.CandidateConfiguration -> TaskStage.CANDIDATE_ACCESS
             is TaskRequest.MetadataSync -> TaskStage.METADATA_FETCH
             is TaskRequest.FormatCopy -> TaskStage.FORMAT_TRANSFER
+            is TaskRequest.FormatCheck -> TaskStage.FORMAT_CHECK
             is TaskRequest.CoverLoad -> TaskStage.COVER_TRANSFER
             is TaskRequest.ReadStatusWrite -> TaskStage.WRITE_SNAPSHOT
         }

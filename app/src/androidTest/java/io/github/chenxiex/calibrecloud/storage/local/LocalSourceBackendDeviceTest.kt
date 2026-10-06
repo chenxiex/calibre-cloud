@@ -20,6 +20,26 @@ import org.junit.runner.RunWith
 /** Run separately after the system picker grants the dedicated repository-sample test copy. Revokes it. */
 @RunWith(AndroidJUnit4::class)
 class LocalSourceBackendDeviceTest {
+    /** Requires a granted dedicated sample; does not revoke the grant or modify source data. */
+    @Test
+    fun realSafRangeMatchesFullSourceSuffix() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
+        val tree = withContext(Dispatchers.IO) { dependencies.localConfiguration.load() }
+        assertNotNull("Authorize a dedicated sample copy through the system picker first", tree)
+        val path = RelativeSourcePath("metadata.db")
+        val backend = dependencies.localBackend
+        val before = (backend.version(tree!!, path) as LocalSourceResult.Available).value
+        val complete = (backend.openRead(tree, path) as LocalSourceResult.Available).value
+        val bytes = withContext(Dispatchers.IO) { complete.use { it.readBytes() } }
+        assertTrue(bytes.size > 4096)
+        val suffix = (backend.openRange(tree, path, 4096, before) as LocalSourceResult.Available).value
+        assertNotNull("The supported system external-storage provider should support direct seek", suffix)
+        val actual = withContext(Dispatchers.IO) { suffix!!.use { it.readBytes() } }
+        assertArrayEquals(bytes.copyOfRange(4096, bytes.size), actual)
+        assertEquals(before, (backend.version(tree, path) as LocalSourceResult.Available).value)
+    }
+
     @Test
     fun realSafSnapshotSourceReadsCancellationAndRevocation() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

@@ -7,6 +7,7 @@
 - 源文件按 `RelativeSourcePath` 逐层解析，检查每层 parentReference 的 drive 和立即父 ID；稳定定位为 drive/item ID，版本只使用文件 cTag，不能用 eTag 或书籍时间替代。
 - Graph 401 最多刷新授权一次；403 表示授权失效。429／5xx 将 Retry-After 交回任务调度器，缺失时使用 30 秒有限重试间隔；后端不阻塞睡眠。调度器决定重试次数上限，不以网络／授权失败认定源删除。
 - 下载重定向只接受 HTTPS，由单独无授权 client 处理，最多五跳。生产保持默认独立 contentClient；注入 contentClient 和 GraphJsonDecoder 仅用于可信网络测试。不得保存／打印响应体、token、预签名下载 URL，不能把它们作为 reader URI。
+- 单格式副本续传重新解析源身份、cTag 和长度，只向新取得的实际内容 URL 发送 `Range` 与 `Accept-Encoding: identity`，不向 Graph `/content` 发送 Range、不携带 Graph 授权。仅接受匹配断点及总长的 206；200／416 关闭响应并返回无法范围读取，任务层完整重传。网络流中断交给队列重试，响应长度／范围异常归为损坏或冲突，不能拼接。下载 URL 不进入恢复记录。
 - 快照先检查事务日志，完整复制后 fsync，再检查日志和 cTag，第二遍完整源读取比较 SHA-256，最后复查日志与版本并执行注入的私有 SQLite validator。成功发布不可变 UUID 文件，失败仅删除本次 part；这些观察不保证任意源并发安全。未实现一般上传、删除和条件写回。
 
 JVM 测试使用真实 OkHttp Request／Response 的注入 fixture，覆盖身份、目录分页、父级边界、凭据重定向、HTTP 失败及快照冲突。Android JSON 解码和真实 Graph／设备验收仍须使用平台测试与专用测试书库，证据放在 `app/verification/phase-2.md`。
