@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="uuid_id" version="2.0">
+    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+        <dc:identifier opf:scheme="calibre" id="calibre_id">5</dc:identifier>
+        <dc:identifier opf:scheme="uuid" id="uuid_id">c1e49ea8-507e-4f67-ad93-6249aa9d6d68</dc:identifier>
+        <dc:title>李尔王</dc:title>
+        <dc:creator opf:file-as="译, 莎士比亚 著/朱生豪" opf:role="aut">[英]莎士比亚 著/朱生豪 译</dc:creator>
+        <dc:contributor opf:file-as="calibre" opf:role="bkp">calibre (9.14.0) [https://calibre-ebook.com]</dc:contributor>
+        <dc:date>2018-06-08T00:00:00+00:00</dc:date>
+        <dc:language>zho</dc:language>
+        <meta name="calibre:timestamp" content="2026-10-06T09:34:46.926798+00:00"/>
+        <meta name="calibre:title_sort" content="李尔王"/>
+        <meta name="calibre:user_metadata:#read_status" content="{&quot;table&quot;: &quot;custom_column_1&quot;, &quot;column&quot;: &quot;value&quot;, &quot;datatype&quot;: &quot;bool&quot;, &quot;is_multiple&quot;: null, &quot;kind&quot;: &quot;field&quot;, &quot;name&quot;: &quot;阅读状态&quot;, &quot;search_terms&quot;: [&quot;#read_status&quot;], &quot;label&quot;: &quot;read_status&quot;, &quot;colnum&quot;: 1, &quot;display&quot;: {&quot;default_value&quot;: false, &quot;bools_show_text&quot;: true, &quot;bools_show_icons&quot;: false, &quot;description&quot;: &quot;&quot;, &quot;web_search_template&quot;: &quot;&quot;}, &quot;is_custom&quot;: true, &quot;is_category&quot;: false, &quot;link_column&quot;: &quot;value&quot;, &quot;category_sort&quot;: &quot;value&quot;, &quot;is_csp&quot;: false, &quot;is_editable&quot;: true, &quot;rec_index&quot;: 23, &quot;#value#&quot;: false, &quot;#extra#&quot;: null, &quot;is_multiple2&quot;: {}}"/>
+    </metadata>
+    <guide>
+        <reference type="cover" title="封面" href="cover.jpg"/>
+    </guide>
+</package>
