@@ -18,11 +18,12 @@
 
 ## 授权阶段与隐私
 
-- 全球个人账号 `consumers` 端点、授权码、S256 PKCE 与 `openid`、`offline_access`、`https://graph.microsoft.com/Files.ReadWrite` 范围由 AppAuth 构建；使用 AppAuth BrowserSelector 选择系统浏览器，并以 ACTION_VIEW 打开请求。应用接收原始回调，通过门禁后用 AppAuth 解析、兑换和显式刷新，不访问 Graph。
-- OneDriveAuthorizationViewModel 保留单个协调器并串行调用；不会在重绘／恢复首页时重新登录或刷新。浏览器返回未完成时提供显式取消，十分钟过期；兑换／刷新最多一分钟，显示分类错误和重试入口。页面使用静态文字、显式分页和无动画控件。
+- 全球个人账号 `consumers` 端点、授权码、S256 PKCE 与 `openid`、`offline_access`、`https://graph.microsoft.com/Files.ReadWrite` 范围由 AppAuth 构建；使用 AppAuth BrowserSelector 选择系统浏览器，并以 ACTION_VIEW 打开请求。应用接收原始回调，通过门禁后用 AppAuth 解析、兑换和显式刷新，不在授权模块访问 Graph。
+- 应用依赖容器持有唯一授权协调器，OneDriveAuthorizationViewModel 复用它并串行调用；ViewModel 清理不能关闭进程共享 AppAuth 组件。协调器使用同一 mutex 串行浏览器回调与后端刷新；不会在重绘／恢复首页时重新登录或刷新。浏览器返回未完成时提供显式取消，十分钟过期；兑换／刷新最多一分钟，显示分类错误和重试入口。页面使用静态文字、显式分页和无动画控件。
 - 待处理 AuthorizationRequest（含 state 与 PKCE verifier）和 AuthState 共存于加密 envelope。使用 elapsedRealtime 与系统 boot count 约束有效期，进程重建可恢复、设备重启作废。门禁检查完整地址、唯一 state 和唯一 code/error；无待处理或重复结果不兑换。兑换前原子保存消费与 interrupted 标志，进程中断后要求重新登录，不重兑旧代码。
 - EncryptedAuthStateStore 使用 Android Keystore 不可导出 AES-256-GCM 密钥、随机 96-bit IV、认证标签和应用／存储域 AAD；AtomicFile 写入 noBackupFilesDir/onedrive-auth/state.bin，所有磁盘 I/O 运行于 IO dispatcher。恢复失败只清理授权存储，不修改本地目录配置或书籍副本；恢复时校验配置身份，防止复用旧注册。
 - 日志仅包含随机操作 ID、阶段和固定错误分类；debug 输出调试阶段，release 仅输出失败。不得传递原始异常／响应给日志或界面，不启用 AppAuth 内容调试日志。协议实现依据 [AppAuth](https://github.com/openid/AppAuth-Android) 与 [微软授权码流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。
+- `backendAccessToken(forceRefresh)` 仅供可信存储后端使用：返回尚有效的现有 access token，过期时刷新，401 重试可强制刷新；失败返回 null 并通过固定 LoginIssue 分类，取消传播。不创建第二份 token 存储，调用者不得持久化或日志输出 token。`sessionId()` 返回非敏感登录代次 UUID，与 AuthState 共存于原加密 envelope；成功新登录更换、刷新保持、恢复保留，需重新登录时不返回它。旧授权 envelope 首次恢复迁移并持久化代次。
 - 凭据不可进入普通配置、书籍 provider、日志或备份；错误不能包含原始 OAuth 响应、完整回调 query 或属性值。
 
 ## 配置验证
@@ -30,3 +31,7 @@
 - 根 `scripts/verify-oauth-config.py` 在被忽略的 `.oauth-verification/` 内创建独立工程副本，只用虚构注册标识，不覆盖用户配置；只继承 SDK 定位，不复制用户 OAuth 属性，不更新依赖锁。
 - 核对两变体的 generated BuildConfig、merged Manifest 和 APK，覆盖缺配置、部分配置、合法的独立回调、非法 URI、重叠范围和安全字符串生成；结果与脱敏日志留在临时目录，不提交副本或产物。
 - 真实浏览器、回调及进程重启后的令牌恢复须步骤 06 真机验收，配置矩阵不能证明微软注册或真实登录有效。
+
+- 源任务通过 `OneDriveAuthorizationSession` 携带预期登录代次；`backendAccessToken(expectedSession=...)` 在同一授权互斥锁内核对代次、刷新并取得令牌。旧任务不能在并发重新登录后取用新账号令牌，代次不匹配不刷新、不使新登录失效。
+
+- `accountSubject(expectedSession)` 返回成功登录时由 AppAuth 从 ID token 解析出的稳定 subject，并在同一加密 envelope 内随 session 保存；刷新响应可省略 ID token，因此不能只依赖最新 TokenResponse。刷新保持 subject，新登录重新取值（缺失时清空），旧授权可从已有 AppAuth 状态迁移；不输出 subject 或原始 token，不新增 OAuth 范围。

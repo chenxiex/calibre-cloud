@@ -45,9 +45,19 @@ sealed interface TaskRequest {
     val libraryId: LibraryId?
 
     /** Internal backend registration only; no book identity exists before successful validation. */
-    data class CandidateConfiguration(val context: CandidateContext, val operation: String) : TaskRequest {
+    data class CandidateConfiguration(
+        val context: CandidateContext,
+        val operation: String,
+        val directoryItemId: String? = null,
+        /** Legacy serialized page index; complete directory loads ignore it. */
+        val directoryPage: Int = 0,
+    ) : TaskRequest {
         override val libraryId: LibraryId? = null
-        init { require(operation.matches(Regex("[a-z][a-z0-9_]{0,63}"))) }
+        init {
+            require(operation.matches(Regex("[a-z][a-z0-9_]{0,63}")))
+            require(directoryPage >= 0)
+            require(directoryItemId == null || (directoryItemId.isNotBlank() && directoryItemId.none { it.isISOControl() }))
+        }
     }
 
     data class MetadataSync(

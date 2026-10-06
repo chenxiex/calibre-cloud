@@ -9,6 +9,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import io.github.chenxiex.calibrecloud.auth.*
+import io.github.chenxiex.calibrecloud.CalibreCloudApplication
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -65,15 +66,12 @@ class OneDriveAuthorizationViewModel(private val authorization: OneDriveAuthoriz
         issue = authorization.issue
     }
 
-    override fun onCleared() { authorization.close() }
-
     companion object {
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T = modelClass.cast(
-                OneDriveAuthorizationViewModel(OneDriveAuthorization(
-                    context.applicationContext, OneDriveOAuthConfiguration.fromBuildConfiguration(),
-                    EncryptedAuthStateStore(context.applicationContext),
-                )),
+                OneDriveAuthorizationViewModel(
+                    (context.applicationContext as CalibreCloudApplication).dependencies.oneDriveAuthorization,
+                ),
             )!!
         }
     }

@@ -63,6 +63,36 @@ class ApplicationStateRepository(
         }
     }
 
+    /** Explicit directory selection rejects an obsolete browser context in the selection transaction. */
+    suspend fun chooseCandidate(context: CandidateContext, location: LibraryLocation): CandidateContext? = withContext(ioDispatcher) {
+        transaction {
+            val selected = current(this) ?: return@transaction null
+            if (selected.token != context.selectionToken || selected.backend != context.backend ||
+                selected.authorizationId != context.authorizationId || location.backend != context.backend) return@transaction null
+            val next = CandidateContext(UUID.randomUUID(), context.backend, context.authorizationId)
+            update("current_selection", locationValues(location).apply {
+                put("token", next.selectionToken.toString())
+                putNull("library_id")
+                put("authorization_id", context.authorizationId.toString())
+            }, "singleton = 1", null)
+            next
+        }
+    }
+
+    /** Reauthorizing a saved position cannot overwrite a concurrent backend/directory selection. */
+    suspend fun reauthorizeCandidate(selectionToken: UUID, authorizationId: UUID): CandidateContext? = withContext(ioDispatcher) {
+        transaction {
+            val selected = current(this) ?: return@transaction null
+            if (selected.token != selectionToken || selected.backend != BackendKind.ONEDRIVE || selected.location == null) return@transaction null
+            val next = CandidateContext(UUID.randomUUID(), selected.backend, authorizationId)
+            update("current_selection", ContentValues().apply {
+                put("token", next.selectionToken.toString()); put("authorization_id", authorizationId.toString())
+                putNull("library_id")
+            }, "singleton = 1", null)
+            next
+        }
+    }
+
     suspend fun current(): LibrarySelection? = withContext(ioDispatcher) { current(database.readableDatabase) }
 
     suspend fun binding(id: LibraryId): LibraryIdentity? = withContext(ioDispatcher) {

@@ -22,6 +22,11 @@ import kotlinx.coroutines.Dispatchers
 /** One process-owned state store and reader; lazy construction performs no source or database I/O. */
 class ApplicationDependencies(context: Context) {
     private val applicationContext = context.applicationContext
+    val oneDriveAuthorization by lazy {
+        io.github.chenxiex.calibrecloud.auth.OneDriveAuthorization(applicationContext,
+            io.github.chenxiex.calibrecloud.auth.OneDriveOAuthConfiguration.fromBuildConfiguration(),
+            io.github.chenxiex.calibrecloud.auth.EncryptedAuthStateStore(applicationContext))
+    }
     val database by lazy { ApplicationStateDatabase(applicationContext) }
     private val bookFiles by lazy { PrivateBookFiles(applicationContext.filesDir) }
     val state by lazy { ApplicationStateRepository(database, bookFiles, Dispatchers.IO) }
@@ -30,8 +35,26 @@ class ApplicationDependencies(context: Context) {
         LocalSourceBackend(AndroidLocalDocumentAccess(applicationContext),
             File(applicationContext.filesDir, "snapshots/local"), AndroidSnapshotValidator(), Dispatchers.IO)
     }
+    val oneDriveBackend by lazy {
+        io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveSourceBackend(
+            { force -> oneDriveAuthorization.backendAccessToken(force,
+                kotlinx.coroutines.currentCoroutineContext()[io.github.chenxiex.calibrecloud.auth.OneDriveAuthorizationSession]?.id) },
+            File(applicationContext.filesDir, "snapshots/onedrive"), AndroidSnapshotValidator(), Dispatchers.IO,
+            diagnostic = { reason -> android.util.Log.w("OneDriveSource", "stage=$reason") },
+            accountProvider = { oneDriveAuthorization.accountSubject(
+                kotlinx.coroutines.currentCoroutineContext()[io.github.chenxiex.calibrecloud.auth.OneDriveAuthorizationSession]?.id) })
+    }
+    val oneDriveBrowseStore by lazy {
+        io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveBrowseStore(File(applicationContext.filesDir, "onedrive-browser"))
+    }
+    val oneDriveTasks by lazy {
+        io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateService(
+            state, oneDriveAuthorization, taskQueue, taskCoordinator, oneDriveBrowseStore)
+    }
     val taskCoordinator by lazy {
-        TaskCoordinator(taskQueue, listOf(LocalSnapshotTaskHandler(state, localBackend, Dispatchers.IO)))
+        TaskCoordinator(taskQueue, listOf(LocalSnapshotTaskHandler(state, localBackend, Dispatchers.IO),
+            io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler(
+                state, oneDriveAuthorization, oneDriveBackend, oneDriveBrowseStore)))
     }
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO) }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }

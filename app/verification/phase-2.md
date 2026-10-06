@@ -236,3 +236,165 @@ adb shell rm -f /sdcard/window-step03.xml
 - Calibre 结构、动态栏目、完整索引与原子书库激活留步骤 05；副本完整传输、封面发布、缓存清理、后台恢复及阅读器分别留后续步骤；第四阶段安全写回能力未实现。本步不关闭完整 AC01／AC03、后台或源提交验收。
 
 交付静态检查：`git diff --check`、全部本步修改／新增文档的本地链接与空白检查通过；书籍 provider 路径仍仅为 `books/`。暂存区为空，`plan.md` 经 `git check-ignore` 确认为忽略，依赖及锁文件未改。
+
+## 步骤 04：个人 OneDrive 目录、只读后端与快照（2026-10-06）
+
+当前状态：实现、自动／平台检查与用户手动验收已通过；最终验收和设备收尾见本节末尾。下文早期失败及待验收状态保留为历史记录，以末尾结论为准。
+
+对应 R03–R06、R08–R09、R31–R35。本步实现与自动／平台检查完成，**真实 Graph 与用户共同验收尚未完成，未提交**。没有开始步骤 05。
+
+### 实现与边界
+
+应用容器共享加密授权组件。可信后端按需取得有效令牌，过期或 Graph 401 时通过 AppAuth 刷新；临时网络／服务端失败保留刷新凭据，失效授权要求重新登录。登录会话 UUID 与原 AuthState 一同加密保存，刷新保持、成功重新登录换代、旧 envelope 迁移。源任务携带预期会话，授权互斥锁内核对代次后才取得令牌，避免旧任务在并发重新登录后使用新账号令牌；不新增凭据存储。
+
+只读后端从本人 `/me/drive` 取得 `owner.user.id`、drive ID 与根 item ID，只接受个人 drive，拒绝共享／remote 项目。目录分页校验立即父级、drive 与祖先链；源路径逐级解析到选定根内，定位 ID 拒绝路径归一化片段与分隔符。文件内容版本使用 cTag，eTag／显示名称／时间不作为内容版本。Graph nextLink 只允许同一 HTTPS children 端点，任务只保存目录 item ID 与页码；预签名内容 URL 不进入数据库、浏览结果、日志或 reader。重定向使用独立无授权客户端，拒绝降级 HTTP 和带用户凭据的 URL；不实现上传、源删除或写回。
+
+目录发现／浏览／分页和快照均进入共享持久候选队列。私有浏览结果只包含稳定账号／drive／item ID、目录名及页码，恢复查询不联网。UI 分为本地授权、OneDrive 授权、目录与候选任务四页，每页最多三个目录，显示当前目录名称，显式选择根；导航链仅在请求成功后变更。浏览失败可继续显示当前选择代次内的上一有效结果；取消／重选／会话变化不会显示旧候选结果。根选择和已保存位置的重新授权以选择代号校验事务换代，过期操作不能覆盖较新的本地或云端配置。目录选择不分配 LibraryId，不激活书库。
+
+云快照复用本地私有 SQLite validator，检查 WAL／journal／SHM 与多库 journal，复制并 fsync 私有暂存，前后多次比较 item ID／cTag，第二次完整读取比较 SHA-256，并检查已知大小。日志冲突、源变化、中断或损坏只清理本次 part，旧成功代次保留。成功文件位于 `filesDir/snapshots/onedrive/<task UUID>/<attempt UUID>.db`，不进入书籍 provider，成功只表示 SQLite 快照有效，Calibre 结构验证与完整导入留步骤 05。这是保守变化检测，不保证任意并发源写入安全，也不证明第四阶段条件提交能力。
+
+实现与官方端点依据见 [OneDrive 后端约束](../src/main/java/io/github/chenxiex/calibrecloud/storage/onedrive/AGENTS.md)、[授权约束](../src/main/java/io/github/chenxiex/calibrecloud/auth/AGENTS.md) 和 [任务约束](../src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)。操作说明见 [OneDrive 配置与入口](../README.md#onedrive-配置)。没有新增产品决策、schema 版本、权限、依赖或锁文件变更；候选请求新增目录 ID／页码使用向后兼容缺省解析。
+
+### 自动检查
+
+运行以下完整基线（最终代码版本）：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+```
+
+结果 `BUILD SUCCESSFUL`（1m 8s）；JVM **68 tests、0 failures、0 errors、0 skipped**，新增 OneDrive 后端 12 项使用真实 OkHttp Request／Response 的注入 fixture，覆盖个人身份／换账号、分页及恶意 nextLink、根边界／共享项目／明确缺失、路径 ID 归一化拒绝、401 刷新、无凭据内容重定向、429／503／Retry-After、版本变化、事务日志、读流中断、损坏快照与取消清理。JVM fixture 注入 JSON decoder，Android 的实际 org.json 解码另由下面的平台测试覆盖。
+
+首轮编译发现私有目录恢复时遗漏 `OneDriveItem` 三个字段，补齐后通过。新增定位边界测试首次失败，补齐 opaque ID 中分隔符的拒绝后通过。失败尝试不记为通过。最终代码版 lint 为 0 errors；随后删除四页入口不再使用的两项旧分页字符串，并定向重建两变体／AndroidTest 与重跑两变体 lint，结果见下方交付检查；不屏蔽 lint、不更新依赖锁。
+
+### PA6 平台与静态入口检查
+
+设备 PA6、Android 14 / API 34，在线。当前 `local.properties` 三项 OAuth 属性非空，未读取／输出其值、未修改用户配置；完整配置不等于真实账号或 Graph 验收通过。安装前用 `apkanalyzer` 核对独立 `.debug`／`.debug.test` application ID；实际 Manifest 核对 debug 可调试、书籍 provider 非导出且 authority 为 `.debug.books`。
+
+```bash
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.auth.OneDriveAuthorizationTest,io.github.chenxiex.calibrecloud.tasks.OneDriveCandidateTaskHandlerTest,io.github.chenxiex.calibrecloud.tasks.LocalSnapshotTaskHandlerTest,io.github.chenxiex.calibrecloud.storage.local.LocalSnapshotIntegrityTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+最终 **OK (27 tests)**（10.776s）：17 项授权、5 项 OneDrive 候选队列集成、4 项本地候选回归、1 项真实私有 SQLite 完整性。此前 26 项也通过，新增预期登录会话测试后执行上述最终 27 项。
+
+| 路径 | 实际结果 |
+| --- | --- |
+| 可信授权获取 | 有效缓存 token 不刷新；过期／强制刷新保持会话；恢复及旧 envelope 迁移保留会话；新登录换代；网络／服务端失败保留凭据可重试，invalid_grant 要求重新登录；取消传播；旧会话不能读取新 token 或触发刷新 |
+| 真实 SQLite 与 JSON | 生产 service／handler、真实状态库／队列及 org.json decoder 配合注入 OAuth／HTTP 响应，目录末页及名称持久恢复，恢复查询零 Graph；只保存稳定 ID／名称，无 token、nextLink 或 HTTPS URL |
+| 候选选择隔离 | 非当前列出的 item 被拒绝；选择保存账号／drive／根 ID，不激活书库；旧浏览选择及旧重新授权不能覆盖较新的本地选择；登录换代后旧任务在发 Graph 前失败 |
+| 快照与恢复 | 私有云快照完成两遍源读取且不激活书库；重开保存位置与完成状态；Running 目录请求重开后从持久页码重新执行。此处数据库内容／validator 为 fixture，不宣称真实云端 Calibre SQLite 验证 |
+| 既有本地路径 | 生产候选处理器完成／取消／重选／重开恢复及真实私有 SQLite validator 的 5 项回归通过，不访问真实书库 |
+
+此批平台检查不访问真实 Graph、SAF 源或真实账号，所有可写数据库和输出均为应用私有独立 fixture。
+
+实际启动 debug 首页，经 ADB 操作四页分页入口：未登录状态、目录尚未选择与任务尚未提交文案可见，所有页面无 scrollable 应用节点，按钮／文字在 PA6 可见范围内。首次紧接启动的 UI 采样返回 null root，等待页面就绪后重新采样成功，不将失败采样记为通过。检查时没有发起真实登录、选择真实云盘目录或修改源书库。此观察不替代有目录列表／长任务的墨水屏交互共同验收。
+
+用于上述最终 27 项平台测试的产物（后续仅移除无引用旧分页资源）：
+
+| 测试产物 | SHA-256 |
+| --- | --- |
+| debug APK | `77f8db8a0737847e14c11edf424cffdbaa1c6d8025b3074c33e6e83a4cb4f09f` |
+| AndroidTest APK | `30d10cc8d4cd06d281680a79901a5dc5d0bb4c9de6b61179fdd4dd6006024878` |
+
+### 待完成验收
+
+- 需要用户在独立 debug 包内完成个人测试账号登录，并提供专用 OneDrive 测试书库目录（从仓库样本准备独立副本，不能选择真实书库）。本次安装后的生产授权状态为未登录，未提供已确认的专用云端目录；不索取密码、token 或 client secret，不自行访问真实书库。
+- 尚未执行真实 Graph 目录分页、稳定账号／drive 校验、数据库／格式／封面读取、cTag 前后核验、断网后旧快照保留与重新登录／重试恢复，以及对应目录／错误／控制入口的用户墨水屏验收。这些项目保持未完成；配置、fixture 和平台测试不替代它们。
+- 第一阶段无浏览器场景的条件补验保持原证据范围；本步不补写为通过。导入、动态栏目、离线完整副本、传输／清理／后台／阅读器与源写回继续留后续阶段。
+- 按 plan.md 推进门槛，真实必要项及用户共同验收通过后才提交步骤 04；当前未提交、未开始步骤 05。
+
+### 交付检查与清理
+
+删除无引用旧分页资源后运行：
+
+```bash
+./gradlew :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+```
+
+`BUILD SUCCESSFUL`（47s）；debug／release lint 均为 **0 errors、9 warnings、1 hint**，数量与既有 debug 基线相同。这次仅资源清理，没有改变上述 27 项平台测试覆盖的生产逻辑；没有再次扩展平台测试范围。最终 debug APK SHA-256 为 `174faecf1e1a41f2b13d89467805a97ab18a891d3962de900e3d3f2dc4cffd71`，AndroidTest APK 与上表一致，release 未签名 APK 为 `b4755c172213b38f7fb2bda44f64be2b370849e7fc2d78d85a29c6bee0e6c369`。
+
+记录后执行：
+
+```bash
+adb uninstall io.github.chenxiex.calibrecloud.debug.test
+adb uninstall io.github.chenxiex.calibrecloud.debug
+adb shell pm list packages io.github.chenxiex.calibrecloud.debug
+adb shell rm -f /sdcard/window-step04.xml
+```
+
+两次卸载均返回 `Success`，包列表无匹配；只清理本次 UI 采样文件，未操作正式应用或源书库。构建／平台测试／UI 采样输出保存在 `/tmp`，未加入版本控制。`git diff --check`、本步修改／新增文档的本地链接检查通过；暂存区为空，`plan.md` 仍被忽略，构建文件及依赖锁未改。
+
+### 重新安装供用户实机验证（2026-10-06）
+
+用户要求安装调试包并提供真机指引。PA6 在线；核对现有 APK SHA-256 与上述最终 debug 产物一致（`174faecf1e1a41f2b13d89467805a97ab18a891d3962de900e3d3f2dc4cffd71`），实际 Manifest 的 application ID 为 `io.github.chenxiex.calibrecloud.debug`、可调试、书籍 provider 非导出且使用独立 `.debug.books` authority。没有代码变化，本次未重跑构建／测试。
+
+执行 `adb install -r app/build/outputs/apk/debug/app-debug.apk` 返回 `Success`，随后启动 debug `MainActivity`。只安装 debug 应用，未安装正式包或 AndroidTest 包；按用户要求保留应用用于手工验收，待记录验收结果后卸载。当前仍未将任何真实 Graph 项目记为通过。
+
+在 `/tmp/calibre-cloud-step04-test-20261006.zip` 准备仓库样本的独立测试副本：顶层 `calibre-cloud-step04-test-20261006` 下有 `library-a`、`library-b` 两个完整样本副本，以及 `missing-db`、`navigation-only` 两个仅含说明文件的目录。后两个目录用于分页和缺失数据库检查；样本原件未修改。此 ZIP 未上传 OneDrive，用户须自行解压并上传整个顶层目录至个人测试账号，待同步完成后测试；不能直接上传 ZIP 来代替目录，也不能选择真实书库。
+
+手工顺序及预期：
+
+1. 在第 2 / 4 页登录个人测试账号，返回后显示已授权。
+2. 在第 3 / 4 页“浏览／切换到 OneDrive”，进入专用测试顶层目录；应有当前目录名称，每页最多三个子目录，能翻至包含第四个目录的末页，末页下一页禁用；进入目录／返回上层可用，文字与控件无滑动／动画且在墨水屏上可读。
+3. 进入 `library-a`，点击“选择当前目录为书库”；第 4 / 4 页点击“验证／加载快照”，最终应显示“已取得有效 SQLite 快照，待导入；尚未验证 Calibre 结构”。此阶段不会出现图书列表。
+4. 从系统设置强行停止 debug 应用并重新打开；登录、所选目录及已完成任务状态应恢复，打开页面不自动重新取得快照。
+5. 保留已选 `library-a`，关闭 Wi-Fi 后再次加载；应显示网络等待／错误，配置保留。恢复 Wi-Fi，等待至少 30 秒后使用“执行排队任务”（等待状态）或“重试”（失败状态），应完成。旧快照是否保留及版本核验留 agent 后续检查，不能仅靠 UI 文案证明。
+6. 重新浏览，进入 `missing-db` 并明确选择它，再加载；应报告目录或 `metadata.db` 不存在。随后重选 `library-a` 或 `library-b`，加载应恢复成功。
+7. 第 2 页重新登录同一测试账号，再加载已选测试目录，应可恢复；能够实际观察到运行中任务时测试暂停／继续／取消。小样本过快无法操作时如实记未测，不能将任务结束视为控制通过。
+8. 仅在专用 `library-b` 测试副本中，上传一个非空 `metadata.db-wal`（可为纯文本测试文件，确保 OneDrive 文件名完整且同步结束）；选择该库加载应显示事务日志／一致性冲突。删除本次添加的测试文件并等待云端同步后重试，应恢复成功。不能在真实书库制造日志。
+
+用户回报各项通过／失败／未测及应用提示后，再核对真实源请求、私有快照、内容版本、源未修改及必要技术补验；目前不将登录／浏览／快照／错误／控制或共同验收记为通过。不采集账号、密码、令牌或完整回调 URL。
+
+### 实机浏览故障修复与复验（2026-10-06）
+
+用户回报第 1 项登录完成、显示已授权；第 2 项点击“浏览／切换到 OneDrive”没有反应，页面翻页正常。第 1 项真实登录按用户确认记录通过，第 2 项原版本失败，不将其记为共同验收通过。
+
+读取独立 debug 应用的持久任务（只检查固定状态／错误类别）确认点击已提交，多个浏览任务以 `UNSUPPORTED_OPERATION` 结束；目录页没有就近展示失败，因而用户看不到反馈。通过固定阶段诊断确认真实本人个人 drive 响应未提供可用的 `owner.user.id`，错误来自必填 owner ID 的工程假设，不是登录失败。诊断仅输出 `stage=owner_id` 等固定标签／数字 HTTP 状态，不包含响应正文、账号／目录标识、路径、凭据或异常全文。
+
+先添加 owner ID 缺失、提供已授权 subject 的 JVM 回归测试，定向运行稳定复现失败（1 test、1 failed）；修复后通过。后端优先使用 Microsoft consumers 登录流程中 AppAuth 解析的稳定 ID token subject，并加固定来源前缀；不从显示名、邮件地址或 drive ID 猜账号身份。账号 subject 同原加密 envelope 及登录会话保存，刷新省略 ID token 时仍保持，恢复可迁移，新登录重新取值，旧会话不能读取新账号 subject。不改变 OAuth scopes、不新增 credential store；可信 fixture 未提供 subject 时仍可使用返回的 owner ID，两种标识不能直接视为相等。
+
+目录页直接显示浏览任务排队、执行、等待、失败与完成状态，快照完成不冒充目录成功。返回上层与选择书库按钮放在同一行，以保留三目录布局和触控高度。新增 4 项状态回归；授权新增 5 项平台测试覆盖 subject 解析、恢复、会话隔离、缺 ID token、刷新省略 ID token及旧 envelope 迁移。
+
+实际运行：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
+./gradlew :app:assembleRelease :app:lintDebug :app:lintRelease
+adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.auth.OneDriveAuthorizationTest,io.github.chenxiex.calibrecloud.tasks.OneDriveCandidateTaskHandlerTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+结果两次构建均 `BUILD SUCCESSFUL`（9s、1m 22s）；JVM **73 tests、0 failures、0 errors、0 skipped**，平台 **OK (27 tests)**（34.553s，22 项授权及 5 项候选集成），两变体 lint 均 **0 errors、9 warnings、1 hint**。
+
+更新安装 debug APK 返回 `Success`，没有卸载或清除用户刚完成的登录。当前 debug APK SHA-256：`b07579a9a50e9f413ab6d679688670b453717e34b8f8a8dd0e826a5a1938d30c`。平台测试仅使用独立私有 fixture，不覆盖生产授权；结束后卸载 `.debug.test` 返回 `Success`，按用户手工验收请求继续保留 `.debug`。
+
+在现有真实登录状态下，显式点击目录浏览，经生产持久队列与后端取得本人 drive 及根目录第一页。实际任务最终 `Completed`，私有结果包含 **3 个目录、hasNext=true**，没有 token／nextLink 等凭据字段。页面可见当前目录与“目录浏览已完成”提示，返回上层／选择书库按钮在 PA6 可见区域（文字纵坐标 1118–1173，页面导航从 1248 开始），无 scrollable 应用节点。仅查询目录元数据，未打开任何真实书库文件、未写入源；没有将账号、根目录名称或 ID 输出到日志。启动期间一次误打开系统本地选择器，随即取消，未确认授权或更改本地选择。
+
+此证据仅补上真实个人 drive 身份发现和根目录第一页浏览；专用测试目录的分页／选择、真实数据库快照、断网／缺失／日志冲突恢复、格式／封面技术项及用户共同验收仍待完成。用户可从当前第 3 页继续原第 2 项验收。步骤 04 未提交，未开始步骤 05。
+
+
+### 完整目录加载与第三页错误修复（2026-10-06）
+
+用户明确调整 R08：进入目录时完整加载子项目，翻页不再等待网络。已先同步 [spec.md](../../spec.md) 与计划，再实施。这里的“一次加载”是一次候选任务；若 Graph 返回 nextLink，任务必须取完服务器分页，并不承诺任意大小目录只有一条 HTTP 请求。当前四页入口为第二阶段临时验证 UI，每页三个目录用于覆盖分页路径；第三阶段最终 UI 不固定三个目录，具体布局随该阶段实现。
+
+第三页报“不支持此云盘或目录”的真实脱敏诊断为 `shared_remote_deleted_item`。原实现将 `shared` 一概当成外部共享项而拒绝整个列表；实际上本人 drive 中向他人共享的项目也有该字段。现在仍核对本人 drive、立即父级与祖先链，允许本人拥有的 shared 项；浏览跳过文件、remoteItem、删除项及 package，其他不支持项不再使整个目录失败，源访问的边界保持严格。新增回归 `unrelatedUnsupportedChildrenDoNotPreventDirectoryBrowsing` 修复前实际失败（ClassCastException），记录 `/tmp/calibre-step04-third-page-repro.log`。后续首轮测试另发现两处 fixture 断言错误（父名称与协程复制取消异常），已修正测试，未为断言更改生产行为。
+
+进入目录／返回上层显式提交完整加载任务，所有服务器页完成且控制／会话检查通过才原子保存完整结果；中断不发布半页。旧结果缺少 complete 标志时不用于本地分页。UI 从完整结果切片，翻页不提交任务、不唤醒协调器、不访问 Graph；恢复只读私有结果。新增集成测试覆盖 14 个目录、多服务器页、本地第三页／末页、页越界、恢复与 ViewModel 翻页前后队列／HTTP 请求数不变。
+
+
+本次检查：`./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease` 为 `BUILD SUCCESSFUL`（1m 14s），JVM **79 tests、0 failures、0 errors、0 skipped**，两变体 lint **0 errors、9 warnings**（既有 hint 保留）。真机执行 `adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.tasks.OneDriveCandidateTaskHandlerTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner` 为 **OK (6 tests)**（38.279s）；独立 fixture 验证完整加载及 UI 本地分页。日志分别为 `/tmp/calibre-step04-local-pagination-build.log`、`/tmp/calibre-step04-local-pagination-device-tests.log`。debug／test APK application ID 核对为独立 `.debug`／`.debug.test`，更新安装成功，测试后卸载 test 包成功；按用户要求保留 debug 与真实登录。debug APK SHA-256：`0300f08df95202ea180010121a0d454868b525af2df80a0341c565dc9ea07b81`。
+
+
+真实 PA6 根目录复验：保留现有授权后显式浏览，生产任务 `Completed`，私有完整结果 **14 个目录、complete=true**。ADB 操作本地翻到 **目录列表第 3 页** 和 **第 5 页（末页）**；第三页正常显示，末页目录“下一页”按钮实际 clickable 节点为 `enabled=false`。翻页前后持久队列均 **27 项**，最新任务 ID 与 Completed 状态不变，未创建目录翻页任务；无 scrollable 应用节点。采样时一次 UI dump／传输较慢，完成后读到有效页面，不将传输耗时当作翻页耗时。本次仅读取目录元数据，没有打开真实书库文件或写入源；账号、目录名称与 ID 未输出。用户仍需继续专用测试书库选择、快照和失败恢复等原有验收；步骤 04 未提交，未开始步骤 05。
+
+
+### 用户验收通过与步骤收尾（2026-10-06）
+
+对应 R03–R06、R08–R09、R31–R35 的本步路径。用户在完整目录加载／第三页修复版本上明确确认“全部手动测试通过”，据此记录上述第 1–8 项手动清单及墨水屏交互共同验收通过，包括登录、目录导航／本地分页、专用测试书库选择与快照、重启恢复、断网后恢复、缺失数据库后重选恢复、重新登录与任务控制，以及测试 WAL 冲突与清理后重试。该结论是用户反馈，不改写成 agent 逐项自动操作的结果。
+
+提交前以只读方式核对 PA6 的持久任务与应用私有产物：真实 OneDrive 快照任务有 **5 次 Completed**；取出这 5 次成功任务的私有 `.db`，全部 `PRAGMA integrity_check=ok` 且包含 `books` 表，内容散列一致。此检查证实真实快照产物可读，不等于步骤 05 的 Calibre schema／栏目导入验收。没有读取授权密文、采集账号或输出书库内容，没有发出新的 Graph 请求或源写入；错误历史保留，不把旧失败改成成功。源未修改依赖本步只读请求边界与测试覆盖；未取得云端源前后散列，不声称已独立完成源前后散列对比。格式／封面真实传输随步骤 06／07 验证，旧导入和副本离线可用性随步骤 05／06 验证；第一阶段既有条件补验不因本次确认而关闭。
+
+有界只读提交审查未发现阻塞问题；本步构建、79 项 JVM、6 项最新候选平台测试及此前 22 项授权平台测试的证据保持上述实际执行范围。收尾仅修改验收文档与计划，执行 `git diff --check` 和本地文档链接／暂存范围检查。`plan.md`、`local.properties`、日志、APK 和测试数据库不加入提交，依赖锁未变化。
+
+手工验收已结束，执行 `adb uninstall io.github.chenxiex.calibrecloud.debug` 返回 `Success`，随后 `adb shell pm list packages io.github.chenxiex.calibrecloud` 无匹配；测试包已在上一轮卸载。正式应用及源测试目录未操作。本步共同验收通过并按既定计划提交；步骤 05 保持待实施。

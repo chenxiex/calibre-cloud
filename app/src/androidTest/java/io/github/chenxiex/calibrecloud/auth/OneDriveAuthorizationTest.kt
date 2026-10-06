@@ -2,8 +2,10 @@ package io.github.chenxiex.calibrecloud.auth
 
 import android.content.Intent
 import android.net.Uri
+import android.util.Base64
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import net.openid.appauth.AuthorizationException
 import net.openid.appauth.AuthorizationRequest
@@ -23,6 +25,99 @@ import org.junit.runner.RunWith
 class OneDriveAuthorizationTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private val configuration = OneDriveOAuthConfiguration("test-client", "test-debug:/oauth2redirect")
+
+    @Test
+    fun accountSubjectUsesAppAuthIdTokenAndSurvivesRestoration() = runBlocking {
+        val store = MemoryStore()
+        val platform = FakePlatform().apply { accountSubject = "test-account-a" }
+        val authorization = coordinator(store, platform)
+        assertNull(authorization.accountSubject())
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val session = authorization.sessionId()!!
+        assertEquals("test-account-a", authorization.accountSubject(expectedSession = session))
+        val restoredPlatform = FakePlatform()
+        val restored = coordinator(store, restoredPlatform)
+        assertEquals("test-account-a", restored.accountSubject(expectedSession = session))
+        assertEquals(0, restoredPlatform.exchanges)
+    }
+
+    @Test
+    fun staleSourceSessionCannotConsumeNewAccountSubject() = runBlocking {
+        val platform = FakePlatform().apply { accountSubject = "test-account-a" }
+        val authorization = coordinator(MemoryStore(), platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val oldSession = authorization.sessionId()!!
+        platform.accountSubject = "test-account-b"
+        authorization.begin()
+        authorization.callback(callback(platform))
+        assertNull(authorization.accountSubject(expectedSession = oldSession))
+        assertEquals("test-account-b", authorization.accountSubject(expectedSession = authorization.sessionId()))
+        assertEquals(2, platform.exchanges)
+        assertEquals(LoginStatus.AUTHORIZED, authorization.status)
+    }
+
+    @Test
+    fun previousAuthorizationWithoutIdTokenProvidesNoAccountSubject() = runBlocking {
+        val store = MemoryStore()
+        val platform = FakePlatform()
+        val authorization = coordinator(store, platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        assertNull(authorization.accountSubject())
+        assertNull(coordinator(store, FakePlatform()).accountSubject())
+        assertEquals(LoginStatus.AUTHORIZED, authorization.status)
+    }
+
+    @Test
+    fun refreshWithoutIdTokenPreservesAccountSubjectAndRestoration() = runBlocking {
+        val store = MemoryStore()
+        val platform = FakePlatform().apply { accountSubject = "test-account-a" }
+        val authorization = coordinator(store, platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val session = authorization.sessionId()!!
+        platform.accountSubject = null
+        assertNotNull(authorization.backendAccessToken(forceRefresh = true, expectedSession = session))
+        assertEquals("test-account-a", authorization.accountSubject(expectedSession = session))
+        assertEquals("test-account-a", coordinator(store, FakePlatform()).accountSubject(expectedSession = session))
+        authorization.begin()
+        authorization.callback(callback(platform))
+        assertNull(authorization.accountSubject())
+        assertNull(coordinator(store, FakePlatform()).accountSubject())
+    }
+
+    @Test
+    fun previousAuthorizedEnvelopeMigratesParsedAccountSubjectDurably() = runBlocking {
+        val store = MemoryStore()
+        val platform = FakePlatform().apply { accountSubject = "test-account-a" }
+        val authorization = coordinator(store, platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val previous = JSONObject(store.state!!)
+        previous.remove("subject")
+        store.state = previous.toString()
+        assertEquals("test-account-a", coordinator(store, FakePlatform()).accountSubject())
+        assertEquals("test-account-a", JSONObject(store.state!!).getString("subject"))
+        assertEquals("test-account-a", coordinator(store, FakePlatform()).accountSubject())
+    }
+
+    @Test
+    fun staleSourceSessionCannotConsumeNewLoginTokenOrForceRefresh() = runBlocking {
+        val platform = FakePlatform()
+        val authorization = coordinator(MemoryStore(), platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val oldSession = authorization.sessionId()!!
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val exchanges = platform.exchanges
+        assertNull(authorization.backendAccessToken(forceRefresh = true, expectedSession = oldSession))
+        assertEquals(exchanges, platform.exchanges)
+        assertNotNull(authorization.backendAccessToken(expectedSession = authorization.sessionId()))
+        assertEquals(LoginStatus.AUTHORIZED, authorization.status)
+    }
 
     @Test
     fun matchingCallbackExchangesOnceAndAuthorizationSurvivesRecreation() = runBlocking {
@@ -238,6 +333,108 @@ class OneDriveAuthorizationTest {
         assertEquals(1, store.clears)
     }
 
+    @Test
+    fun backendUsesCachedTokenAndPreservesSessionAcrossRefreshAndRestoration() = runBlocking {
+        val store = MemoryStore()
+        val platform = FakePlatform()
+        val authorization = coordinator(store, platform)
+        assertNull(authorization.sessionId())
+        assertNull(authorization.backendAccessToken())
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val session = authorization.sessionId()
+        assertNotNull(session)
+        assertEquals("test-access-token", authorization.backendAccessToken())
+        assertEquals(1, platform.exchanges)
+        assertEquals("test-access-token", authorization.backendAccessToken(forceRefresh = true))
+        assertEquals(2, platform.exchanges)
+        assertEquals(session, authorization.sessionId())
+        val restoredPlatform = FakePlatform()
+        val restored = coordinator(store, restoredPlatform)
+        assertEquals(session, restored.sessionId())
+        assertEquals("test-access-token", restored.backendAccessToken())
+        assertEquals(0, restoredPlatform.exchanges)
+        restored.begin()
+        restored.callback(callback(restoredPlatform))
+        assertTrue(session != restored.sessionId())
+    }
+
+    @Test
+    fun expiredBackendTokenAutomaticallyRefreshesOnlyOnce() = runBlocking {
+        val store = MemoryStore()
+        val platform = FakePlatform().apply { expiredToken = true }
+        val authorization = coordinator(store, platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val session = authorization.sessionId()
+        platform.expiredToken = false
+        assertEquals("test-access-token", authorization.backendAccessToken())
+        assertEquals("refresh_token", platform.tokenRequest!!.grantType)
+        assertEquals(2, platform.exchanges)
+        assertEquals(session, authorization.sessionId())
+        authorization.backendAccessToken()
+        assertEquals(2, platform.exchanges)
+    }
+
+    @Test
+    fun backendRefreshNetworkFailureIsRetryableAndInvalidGrantRequiresLogin() = runBlocking {
+        val platform = FakePlatform()
+        val authorization = coordinator(MemoryStore(), platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        platform.tokenError = AuthorizationException.GeneralErrors.NETWORK_ERROR
+        assertNull(authorization.backendAccessToken(forceRefresh = true))
+        assertEquals(LoginIssue.NETWORK, authorization.issue)
+        platform.tokenError = AuthorizationException.TokenRequestErrors.OTHER
+        assertNull(authorization.backendAccessToken(forceRefresh = true))
+        assertEquals(LoginIssue.SERVER, authorization.issue)
+        assertNotNull(authorization.sessionId())
+        platform.tokenError = null
+        assertNotNull(authorization.backendAccessToken(forceRefresh = true))
+        platform.tokenError = AuthorizationException.TokenRequestErrors.INVALID_GRANT
+        assertNull(authorization.backendAccessToken(forceRefresh = true))
+        assertEquals(LoginIssue.RELOGIN, authorization.issue)
+        assertNull(authorization.sessionId())
+        val exchanges = platform.exchanges
+        assertNull(authorization.backendAccessToken(forceRefresh = true))
+        assertEquals(exchanges, platform.exchanges)
+    }
+
+    @Test
+    fun backendRefreshCancellationPropagatesWithoutInvalidatingSession() = runBlocking {
+        val platform = FakePlatform()
+        val authorization = coordinator(MemoryStore(), platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val session = authorization.sessionId()
+        platform.beforeExchange = { throw CancellationException("test cancellation") }
+        var cancelled = false
+        try {
+            authorization.backendAccessToken(forceRefresh = true)
+        } catch (_: CancellationException) {
+            cancelled = true
+        }
+        assertTrue(cancelled)
+        assertEquals(session, authorization.sessionId())
+        assertEquals(LoginStatus.AUTHORIZED, authorization.status)
+        assertNull(authorization.issue)
+    }
+
+    @Test
+    fun previousAuthorizedEnvelopeMigratesOneSessionDurably() = runBlocking {
+        val store = MemoryStore()
+        val platform = FakePlatform()
+        val authorization = coordinator(store, platform)
+        authorization.begin()
+        authorization.callback(callback(platform))
+        val previous = JSONObject(store.state!!)
+        previous.remove("session")
+        store.state = previous.toString()
+        val migrated = coordinator(store, FakePlatform()).sessionId()
+        assertNotNull(migrated)
+        assertEquals(migrated, coordinator(store, FakePlatform()).sessionId())
+    }
+
     private fun coordinator(store: AuthStateStore, platform: OAuthPlatform) =
         OneDriveAuthorization(context, configuration, store, platform)
 
@@ -272,6 +469,8 @@ class OneDriveAuthorizationTest {
         var tokenError: AuthorizationException? = null
         var beforeExchange: (() -> Unit)? = null
         var browserAvailable = true
+        var expiredToken = false
+        var accountSubject: String? = null
 
         override fun browserIntent(request: AuthorizationRequest): Intent? {
             this.request = request
@@ -286,7 +485,18 @@ class OneDriveAuthorizationTest {
             return TokenResponse.Builder(request)
                 .setTokenType("Bearer")
                 .setAccessToken("test-access-token")
+                .setAccessTokenExpirationTime(if (expiredToken) 1L else System.currentTimeMillis() + 3_600_000)
                 .setRefreshToken("test-refresh-token")
+                .setIdToken(accountSubject?.let { subject ->
+                    val now = System.currentTimeMillis() / 1000
+                    val claims = JSONObject().put("iss", "https://login.microsoftonline.com/test/v2.0")
+                        .put("sub", subject).put("aud", request.clientId).put("iat", now).put("exp", now + 3600)
+                    request.nonce?.let { claims.put("nonce", it) }
+                    fun encode(value: String): String = Base64.encodeToString(
+                        value.toByteArray(Charsets.UTF_8), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING,
+                    )
+                    "${encode("{}")}.${encode(claims.toString())}.test-signature"
+                })
                 .build() to null
         }
 

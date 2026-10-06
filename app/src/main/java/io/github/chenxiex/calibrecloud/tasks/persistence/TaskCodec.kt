@@ -100,7 +100,7 @@ internal object TaskCodec {
         is TaskRequest.CandidateConfiguration -> obj(
             "tag" to "candidate_configuration", "selection" to value.context.selectionToken.toString(),
             "backend" to backendCode(value.context.backend), "authorization" to value.context.authorizationId.toString(),
-            "operation" to value.operation,
+            "operation" to value.operation, "directory_item" to value.directoryItemId, "directory_page" to value.directoryPage,
         )
         is TaskRequest.MetadataSync -> obj(
             "tag" to "metadata_sync", "library" to value.libraryId.value.toString(),
@@ -130,6 +130,8 @@ internal object TaskCodec {
                 UUID.fromString(json.getString("authorization")),
             ),
             json.getString("operation"),
+            if (json.has("directory_item") && !json.isNull("directory_item")) json.getString("directory_item") else null,
+            json.optInt("directory_page", 0),
         )
         "metadata_sync" -> TaskRequest.MetadataSync(
             libraryId(json.getString("library")),

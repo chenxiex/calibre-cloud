@@ -11,6 +11,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,6 +29,8 @@ import androidx.compose.runtime.LaunchedEffect
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
 import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
 import io.github.chenxiex.calibrecloud.tasks.api.TaskError
+import io.github.chenxiex.calibrecloud.tasks.api.TaskRequest
+import io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import androidx.compose.runtime.getValue
@@ -39,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.ViewModelProvider
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.auth.OneDriveOAuthConfiguration
@@ -62,6 +67,9 @@ class MainActivity : ComponentActivity() {
     private val snapshotModel by lazy {
         ViewModelProvider(this, LocalSnapshotViewModel.factory(applicationContext))[LocalSnapshotViewModel::class.java]
     }
+    private val oneDriveLibraryModel by lazy {
+        ViewModelProvider(this, OneDriveLibraryViewModel.factory(applicationContext))[OneDriveLibraryViewModel::class.java]
+    }
     private var pickerOpen by mutableStateOf(false)
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pickerOpen = false
@@ -78,7 +86,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel,
+                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel,
                     { oneDriveModel.login { startActivity(it) } }) {
                     pickerOpen = true
                     picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
@@ -99,6 +107,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         oneDriveModel.restore()
+        oneDriveLibraryModel.restore()
         if (pickerOpen) return
         authorizationModel.refresh()
     }
@@ -115,10 +124,16 @@ private fun AuthorizationPage(
     busy: Boolean,
     snapshot: LocalSnapshotViewModel,
     oneDrive: OneDriveAuthorizationViewModel,
+    library: OneDriveLibraryViewModel,
     onLogin: () -> Unit,
     onSelect: () -> Unit,
 ) {
-    LaunchedEffect(state, busy) { if (!busy) snapshot.restore() }
+    LaunchedEffect(state, busy, oneDrive.status) {
+        if (!busy) {
+            snapshot.restore()
+            library.restore()
+        }
+    }
     // Split authorization entries into explicit pages without scrolling or animated controls.
     var page by rememberSaveable { mutableIntStateOf(0) }
     Column(
@@ -149,7 +164,7 @@ private fun AuthorizationPage(
                 Spacer(Modifier.height(12.dp))
                 LocalSnapshotControls(snapshot, !busy && state.status in setOf(
                     DirectoryAuthorizationStatus.AUTHORIZED, DirectoryAuthorizationStatus.READ_ONLY))
-            } else {
+            } else if (page == 1) {
                 Text(stringResource(R.string.onedrive_authorization), style = MaterialTheme.typography.titleMedium)
                 if (OneDriveOAuthConfiguration.fromBuildConfiguration() == null) {
                     Text(stringResource(R.string.onedrive_unavailable))
@@ -182,9 +197,18 @@ private fun AuthorizationPage(
                         }
                     }
                 }
+            } else if (page == 2) {
+                OneDriveDirectoryControls(library, oneDrive.status == LoginStatus.AUTHORIZED && !oneDrive.busy)
+            } else {
+                OneDriveTaskControls(library, oneDrive.status == LoginStatus.AUTHORIZED && !oneDrive.busy)
             }
         }
-        StaticButton(stringResource(if (page == 0) R.string.next_page else R.string.previous_page), true) { page = 1 - page }
+        Text(stringResource(R.string.authorization_page_number, page + 1))
+        Row {
+            StaticButton(stringResource(R.string.page_previous), page > 0) { page-- }
+            Spacer(Modifier.width(8.dp))
+            StaticButton(stringResource(R.string.page_next), page < 3) { page++ }
+        }
     }
 }
 
@@ -194,7 +218,7 @@ private fun StaticButton(label: String, enabled: Boolean, onClick: () -> Unit) {
         interactionSource = remember { MutableInteractionSource() }, indication = null,
         enabled = enabled, onClick = onClick,
     ).padding(horizontal = 16.dp, vertical = 12.dp)) {
-        Text(label)
+        Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -234,6 +258,116 @@ private fun LocalSnapshotControls(model: LocalSnapshotViewModel, authorized: Boo
         if (controls.canCancel) StaticButton(stringResource(R.string.local_snapshot_cancel), true) { model.control(TaskControl.CANCEL) }
         if (taskState == TaskState.Queued || taskState is TaskState.Waiting) {
             StaticButton(stringResource(R.string.local_snapshot_run), authorized && !model.submitting) { model.acquire() }
+        }
+    }
+}
+
+@Composable
+private fun OneDriveDirectoryControls(model: OneDriveLibraryViewModel, authorized: Boolean) {
+    Text(stringResource(R.string.onedrive_directory), style = MaterialTheme.typography.titleMedium)
+    Text(stringResource(if (model.rootChosen) R.string.onedrive_root_chosen else R.string.onedrive_root_pending))
+    StaticButton(stringResource(R.string.onedrive_browse), authorized && !model.submitting) { model.browse() }
+    Text(stringResource(directoryStatusResource(
+        model.record?.state,
+        (model.record?.submission?.request as? TaskRequest.CandidateConfiguration)?.operation,
+        model.rejected,
+        model.submitting,
+    )), maxLines = 2, overflow = TextOverflow.Ellipsis)
+    val page = model.page
+    if (page != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(stringResource(R.string.onedrive_current_directory, page.directoryName), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(stringResource(R.string.onedrive_directory_page, page.page + 1))
+        val directories = page.items.filter { it.directory }
+        if (directories.isEmpty()) Text(stringResource(R.string.onedrive_directory_empty))
+        directories.take(3).forEach { item ->
+            Spacer(Modifier.height(4.dp))
+            StaticButton(item.name, authorized && !model.submitting) { model.enter(item.id) }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row {
+            StaticButton(stringResource(R.string.page_previous), authorized && !model.submitting && page.page > 0) {
+                model.paginate(page.page - 1)
+            }
+            Spacer(Modifier.width(8.dp))
+            StaticButton(stringResource(R.string.page_next), authorized && !model.submitting && page.hasNext) {
+                model.paginate(page.page + 1)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Row {
+            StaticButton(stringResource(R.string.onedrive_directory_up), authorized && !model.submitting && model.canGoUp) { model.up() }
+            Spacer(Modifier.width(8.dp))
+            StaticButton(stringResource(R.string.onedrive_directory_choose), authorized && !model.submitting) {
+                model.choose(page.parentItemId)
+            }
+        }
+    }
+}
+
+/** Shared text mapping keeps browser errors visible beside the control that submitted them. */
+internal fun oneDriveTaskStatusResource(taskState: TaskState?, operation: String?, rejected: Boolean): Int {
+    return when (taskState) {
+        TaskState.Queued -> R.string.onedrive_task_queued
+        is TaskState.Running -> R.string.onedrive_task_running
+        is TaskState.Waiting -> when {
+            io.github.chenxiex.calibrecloud.tasks.api.WaitingReason.NETWORK in taskState.reasons -> R.string.onedrive_task_network
+            io.github.chenxiex.calibrecloud.tasks.api.WaitingReason.LOGIN in taskState.reasons -> R.string.onedrive_relogin
+            else -> R.string.onedrive_task_waiting
+        }
+        is TaskState.Paused -> R.string.local_snapshot_paused
+        is TaskState.Finished -> when (val result = taskState.result) {
+            TaskResult.Completed -> if (operation ==
+                OneDriveCandidateTaskHandler.SNAPSHOT) R.string.local_snapshot_ready else R.string.onedrive_browse_completed
+            is TaskResult.Cancelled -> R.string.onedrive_task_cancelled
+            is TaskResult.Failed -> when ((result.failure.error as? TaskError.Source)?.error?.kind) {
+                StorageErrorKind.NO_NETWORK -> R.string.onedrive_task_network
+                StorageErrorKind.LOGIN_REQUIRED -> R.string.onedrive_relogin
+                StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.onedrive_task_permission
+                StorageErrorKind.SOURCE_MISSING -> R.string.local_snapshot_missing
+                StorageErrorKind.VERSION_CONFLICT -> R.string.local_snapshot_conflict
+                StorageErrorKind.CORRUPT_CONTENT, StorageErrorKind.INCOMPATIBLE_DATABASE -> R.string.local_snapshot_corrupt
+                StorageErrorKind.INSUFFICIENT_SPACE -> R.string.local_snapshot_space
+                StorageErrorKind.UNSUPPORTED_OPERATION -> R.string.onedrive_task_unsupported
+                else -> R.string.onedrive_task_io
+            }
+            else -> R.string.onedrive_task_io
+        }
+        null -> if (rejected) R.string.onedrive_task_rejected else R.string.onedrive_task_pending
+    }
+}
+
+/** Snapshot tasks belong to the task page and cannot stand in for directory results. */
+internal fun directoryStatusResource(taskState: TaskState?, operation: String?, rejected: Boolean, submitting: Boolean): Int {
+    if (rejected) return R.string.onedrive_task_rejected
+    if (operation == OneDriveCandidateTaskHandler.SNAPSHOT) return R.string.onedrive_task_pending
+    if (submitting && (taskState == null || taskState is TaskState.Finished)) return R.string.onedrive_task_queued
+    return oneDriveTaskStatusResource(
+        if (operation == OneDriveCandidateTaskHandler.BROWSE) taskState else null,
+        OneDriveCandidateTaskHandler.BROWSE,
+        false,
+    )
+}
+
+@Composable
+private fun OneDriveTaskControls(model: OneDriveLibraryViewModel, authorized: Boolean) {
+    Text(stringResource(R.string.onedrive_tasks), style = MaterialTheme.typography.titleMedium)
+    val taskState = model.record?.state
+    val status = oneDriveTaskStatusResource(
+        taskState, (model.record?.submission?.request as? TaskRequest.CandidateConfiguration)?.operation, model.rejected,
+    )
+    Text(stringResource(status))
+    Spacer(Modifier.height(8.dp))
+    val active = taskState != null && taskState !is TaskState.Finished
+    StaticButton(stringResource(R.string.local_snapshot_acquire), authorized && model.rootChosen && !active && !model.submitting) { model.acquire() }
+    model.record?.controls?.let { controls ->
+        Spacer(Modifier.height(8.dp))
+        if (controls.canPause) StaticButton(stringResource(R.string.local_snapshot_pause), true) { model.control(TaskControl.PAUSE) }
+        if (controls.canResume) StaticButton(stringResource(R.string.local_snapshot_resume), authorized) { model.control(TaskControl.RESUME) }
+        if (controls.canRetry) StaticButton(stringResource(R.string.local_snapshot_retry), authorized) { model.control(TaskControl.RETRY) }
+        if (controls.canCancel) StaticButton(stringResource(R.string.onedrive_task_cancel), true) { model.control(TaskControl.CANCEL) }
+        if (taskState == TaskState.Queued || taskState is TaskState.Waiting) {
+            StaticButton(stringResource(R.string.local_snapshot_run), authorized && !model.submitting) { model.runQueued() }
         }
     }
 }
