@@ -126,4 +126,17 @@
     <string name="download_conflict">传输期间源版本变化，请重试；已有副本保留。</string>
     <string name="download_corrupt">传输内容不完整，未发布；已有副本保留。</string>
     <string name="download_io">传输或本地发布失败，请重试；已有副本保留。</string>
+    <string name="cover_title">按需封面</string>
+    <string name="cover_explanation">仅加载当前这一页的封面；翻页不预取其它书籍。</string>
+    <string name="cover_empty">当前导入没有书籍。</string>
+    <string name="cover_page">封面 %1$d / %2$d</string>
+    <string name="cover_available">已读取完整封面缓存。</string>
+    <string name="cover_placeholder">暂无封面，显示书名占位。</string>
+    <string name="cover_reading">正在读取本地封面状态。</string>
+    <string name="cover_queued">当前封面已低优先级排队。</string>
+    <string name="cover_running">正在加载当前封面。</string>
+    <string name="cover_waiting">封面等待网络或授权等条件，可重新执行。</string>
+    <string name="cover_paused">封面任务已暂停，可继续。</string>
+    <string name="cover_cancelled">封面任务已取消，保留书名占位。</string>
+    <string name="cover_failed">封面加载失败或当前书库已变化；保留书名占位，可显式重试。</string>
 </resources>

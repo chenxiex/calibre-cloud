@@ -45,6 +45,7 @@ class OneDriveSourceBackendTest {
         var data = "database"
         var tag = "content-1"
         var valid = true
+        var thumbnails = emptyList<Map<String, Any?>>()
         var onRequest: (Request) -> Response? = { null }
         var onContent: () -> Unit = {}
         var childPages: (String, String?) -> Map<String, Any?> = { parent, _ ->
@@ -72,6 +73,7 @@ class OneDriveSourceBackendTest {
                     response(request, 302, headers = mapOf("Location" to "https://download.example/file?secret=ephemeral"))
                 } else {
                     val result = when {
+                        path.endsWith("/thumbnails") -> mapOf("value" to thumbnails)
                         path.endsWith("/me/drive") -> mapOf("id" to "drive", "driveType" to driveType, "owner" to mapOf("user" to (if (ownerIdPresent) mapOf("id" to accountId) else emptyMap<String, Any?>())))
                         path.endsWith("/children") -> childPages(request.url.pathSegments[4], request.url.queryParameter("page"))
                         path.endsWith("/root") -> item("root", "library", null, true)
@@ -98,6 +100,95 @@ class OneDriveSourceBackendTest {
         fixture.driveType = "business"
         assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.discover()))
     }
+
+    @Test fun coverRequestsExactImageItemAndChoosesSmallestSufficientThumbnailWithoutCredentials() = runTest {
+        val fixture = Fixture()
+        fixture.childPages = { _, _ -> mapOf("value" to listOf(
+            fixture.item("cover-image", "cover.jpg", "root", false),
+            fixture.item("book-format", "book.epub", "root", false),
+        )) }
+        fixture.thumbnails = listOf(mapOf(
+            "small" to thumbnail(64, 96, "small"),
+            "medium" to thumbnail(200, 300, "medium"),
+            "large" to thumbnail(800, 1200, "large"),
+        ))
+        fixture.onRequest = { request ->
+            if (request.url.host == "thumbnail.example") fixture.response(request, data = request.url.pathSegments.last()) else null
+        }
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        var dimensions: Pair<Int, Int>? = null
+        val stream = (backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180) { width, height ->
+            dimensions = width to height
+        } as OneDriveSourceResult.Available).value
+        assertEquals("medium", stream.use { it.readBytes().decodeToString() })
+        assertEquals(200 to 300, dimensions)
+        assertEquals("/v1.0/drives/drive/items/cover-image/thumbnails", fixture.requests.single { it.url.encodedPath.endsWith("/thumbnails") }.url.encodedPath)
+        assertNull(fixture.requests.single { it.url.host == "thumbnail.example" }.header("Authorization"))
+        assertFalse(fixture.requests.any { it.url.encodedPath.contains("book-format") || it.url.encodedPath.endsWith("/content") })
+        val larger = (backend.openCover(location, RelativeSourcePath("cover.jpg"), 1000, 1500) as OneDriveSourceResult.Available).value
+        assertEquals("large", larger.use { it.readBytes().decodeToString() })
+    }
+
+    @Test fun absentUnsafeAndExpiredThumbnailsFallBackToSameCoverOriginal() = runTest {
+        val fixture = Fixture()
+        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("cover-image", "cover.jpg", "root", false))) }
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        for (available in listOf(
+            emptyList(),
+            listOf(mapOf("small" to thumbnail(64, 96, "unsafe") + ("url" to "http://unsafe.example/image"))),
+            listOf(mapOf("medium" to thumbnail(200, 300, "expired"))),
+        )) {
+            fixture.requests.clear()
+            fixture.thumbnails = available
+            fixture.onRequest = { request -> if (request.url.host == "thumbnail.example") fixture.response(request, 404) else null }
+            val stream = (backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180) { _, _ ->
+                throw AssertionError("fallback counted as thumbnail")
+            } as OneDriveSourceResult.Available).value
+            assertEquals("database", stream.use { it.readBytes().decodeToString() })
+            assertEquals("/v1.0/drives/drive/items/cover-image/content", fixture.requests.single { it.url.encodedPath.endsWith("/content") }.url.encodedPath)
+            assertFalse(fixture.requests.any { it.url.host == "unsafe.example" })
+        }
+    }
+
+    @Test fun thumbnailFailuresRetainAuthorizationAndRetrySemanticsWithoutOriginalFallback() = runTest {
+        val fixture = Fixture()
+        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("cover-image", "cover.jpg", "root", false))) }
+        fixture.thumbnails = listOf(mapOf("medium" to thumbnail(200, 300, "image")))
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        for (target in listOf("/thumbnails", "thumbnail.example")) {
+            for ((code, kind) in listOf(403 to StorageErrorKind.AUTHORIZATION_EXPIRED, 429 to StorageErrorKind.NO_NETWORK, 503 to StorageErrorKind.NO_NETWORK)) {
+                fixture.requests.clear()
+                fixture.onRequest = { request ->
+                    if (request.url.encodedPath.endsWith(target) || request.url.host == target) fixture.response(request, code, headers = mapOf("Retry-After" to "12")) else null
+                }
+                val result = backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180) as OneDriveSourceResult.Failed
+                assertEquals(kind, result.error.kind)
+                assertEquals(code != 403, result.transient)
+                if (result.transient) assertEquals(12_000L, result.retryDelayMillis)
+                assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/content") })
+            }
+        }
+    }
+
+    @Test fun thumbnailRedirectRejectsDowngradeAndSourceBoundaryPrecedesThumbnailRequest() = runTest {
+        val fixture = Fixture()
+        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("cover-image", "cover.jpg", "root", false))) }
+        fixture.thumbnails = listOf(mapOf("medium" to thumbnail(200, 300, "image")))
+        fixture.onRequest = { request ->
+            if (request.url.host == "thumbnail.example") fixture.response(request, 302, headers = mapOf("Location" to "http://unsafe.example/image")) else null
+        }
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180)))
+        assertFalse(fixture.requests.any { it.url.host == "unsafe.example" })
+        fixture.requests.clear()
+        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("cover-image", "cover.jpg", "outside", false))) }
+        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180)))
+        assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/thumbnails") })
+    }
+
+    private fun thumbnail(width: Int, height: Int, name: String): Map<String, Any?> = mapOf(
+        "width" to width, "height" to height, "url" to "https://thumbnail.example/$name",
+    )
 
     @Test fun missingOwnerIdUsesStableAuthenticatedSubjectAndDoesNotDependOnDisplayName() = runTest {
         val fixture = Fixture()

@@ -9,11 +9,12 @@ import android.database.sqlite.SQLiteOpenHelper
  * Version 1 separates validated bindings, the current candidate selection and complete manifests.
  * Version 2 adds a durable queue without changing version 1 data.
  * Version 3 adds atomic imported metadata and book identity indexes without changing prior data.
+ * Version 4 adds independent complete cover cache records.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  */
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
-    SQLiteOpenHelper(context.applicationContext, name, null, 3) {
+    SQLiteOpenHelper(context.applicationContext, name, null, 4) {
     override fun onConfigure(db: SQLiteDatabase) {
         db.setForeignKeyConstraintsEnabled(true)
     }
@@ -63,6 +64,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         """.trimIndent())
         createQueue(db)
         createMetadata(db)
+        createCovers(db)
         // The composite primary key is also the library-scoped ordered manifest index.
         db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, authority, root_id, account_id, drive_id)")
     }
@@ -121,12 +123,27 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         """.trimIndent())
     }
 
+    private fun createCovers(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE cover_cache (
+                library_id TEXT NOT NULL REFERENCES library_bindings(library_id),
+                source_id INTEGER NOT NULL,
+                source_uuid TEXT NOT NULL,
+                file_generation TEXT NOT NULL UNIQUE,
+                size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
+                last_access INTEGER NOT NULL,
+                PRIMARY KEY(library_id, source_id, source_uuid)
+            )
+        """.trimIndent())
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..2 && newVersion == 3)
+        check(oldVersion in 1..3 && newVersion == 4)
         if (oldVersion == 1) {
             db.execSQL("ALTER TABLE current_selection ADD COLUMN authorization_id TEXT")
             createQueue(db)
         }
-        createMetadata(db)
+        if (oldVersion <= 2) createMetadata(db)
+        createCovers(db)
     }
 }

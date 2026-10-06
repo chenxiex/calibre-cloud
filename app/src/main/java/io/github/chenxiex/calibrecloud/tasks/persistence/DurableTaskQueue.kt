@@ -299,7 +299,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 require(it.isNull(1))
                 TaskCodec.decode(it.getString(0))
             }
-            require(record.submission.request is TaskRequest.CandidateConfiguration || record.submission.request is TaskRequest.FormatCopy)
+            require(record.submission.request is TaskRequest.CandidateConfiguration || record.submission.request is TaskRequest.FormatCopy || record.submission.request is TaskRequest.CoverLoad)
             require(record.state is TaskState.Running)
             val completed = record.copy(state = TaskState.Finished(TaskResult.Completed), controls = noControls)
             db.update("queued_tasks", ContentValues().apply {

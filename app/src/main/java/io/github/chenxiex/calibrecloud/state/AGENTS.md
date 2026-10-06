@@ -14,3 +14,5 @@
 平台 SQLite 验证见 [第二阶段验证记录](../../../../../../../../verification/phase-2.md)。真实下载／发布与句柄回收协议已实现，精确清理协调留步骤 08。
 
 - Schema v3 非破坏性新增 metadata_imports 与 metadata_books，保留 v1/v2 清单、任务及授权。完整元数据与栏目配置只在 metadata_imports 中保存；最小清单不扩充为完整索引。导入失败不更新绑定或当前引用，快照代次的文件恢复协议见元数据模块。
+
+- Schema v4 非破坏性新增 `cover_cache`，保留 v1–v3 的绑定、导入、清单和任务；完整封面记录与加载任务成功在同一事务发布，目录与限额契约见[封面缓存](../storage/covers/AGENTS.md)。

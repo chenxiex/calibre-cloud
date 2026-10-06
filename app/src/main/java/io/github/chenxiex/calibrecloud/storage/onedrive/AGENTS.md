@@ -7,6 +7,7 @@
 - 源文件按 `RelativeSourcePath` 逐层解析，检查每层 parentReference 的 drive 和立即父 ID；稳定定位为 drive/item ID，版本只使用文件 cTag，不能用 eTag 或书籍时间替代。
 - Graph 401 最多刷新授权一次；403 表示授权失效。429／5xx 将 Retry-After 交回任务调度器，缺失时使用 30 秒有限重试间隔；后端不阻塞睡眠。调度器决定重试次数上限，不以网络／授权失败认定源删除。
 - 下载重定向只接受 HTTPS，由单独无授权 client 处理，最多五跳。生产保持默认独立 contentClient；注入 contentClient 和 GraphJsonDecoder 仅用于可信网络测试。不得保存／打印响应体、token、预签名下载 URL，不能把它们作为 reader URI。
+- 封面按导入的精确图片相对路径解析，只读取该图片 item 的 [thumbnails 集合](https://learn.microsoft.com/en-us/graph/api/driveitem-list-thumbnails?view=graph-rest-1.0)，不得请求 EPUB／PDF 等格式的缩略图。优先选最小满足目标宽高的尺寸，否则选最大可用尺寸；没有安全可用缩略图或缩略图已失效时回退同一封面图片的原内容。缩略图 URL 仅用于当次无授权读取，不进入缓存标识或日志；授权／网络／限流失败仍交给任务调度器，不隐式吞掉。调用方负责流关闭、图像解码与应用私有缓存，验收回调只提供成功打开的缩略图宽高。
 - 单格式副本续传重新解析源身份、cTag 和长度，只向新取得的实际内容 URL 发送 `Range` 与 `Accept-Encoding: identity`，不向 Graph `/content` 发送 Range、不携带 Graph 授权。仅接受匹配断点及总长的 206；200／416 关闭响应并返回无法范围读取，任务层完整重传。网络流中断交给队列重试，响应长度／范围异常归为损坏或冲突，不能拼接。下载 URL 不进入恢复记录。
 - 快照先检查事务日志，完整复制后 fsync，再检查日志和 cTag，第二遍完整源读取比较 SHA-256，最后复查日志与版本并执行注入的私有 SQLite validator。成功发布不可变 UUID 文件，失败仅删除本次 part；这些观察不保证任意源并发安全。未实现一般上传、删除和条件写回。
 
@@ -19,3 +20,5 @@ JVM 测试使用真实 OkHttp Request／Response 的注入 fixture，覆盖身�
 Graph 边界依据：[本人 drive](https://learn.microsoft.com/en-us/graph/api/drive-get?view=graph-rest-1.0)、[账号唯一 ID](https://learn.microsoft.com/en-us/graph/api/resources/identity?view=graph-rest-1.0)、[目录分页](https://learn.microsoft.com/en-us/graph/api/driveitem-list-children?view=graph-rest-1.0)、[shared facet](https://learn.microsoft.com/en-us/graph/api/resources/shared?view=graph-rest-1.0)、[driveItem cTag](https://learn.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0)、[内容重定向及无 Authorization 的下载 URL](https://learn.microsoft.com/en-us/graph/api/driveitem-get-content?view=graph-rest-1.0) 和 [Retry-After](https://learn.microsoft.com/en-us/graph/throttling)。
 
 - 安全诊断只记录固定阶段标签／HTTP 状态码，不包含响应正文、账号标识、目录名、ID token、access token、URL 或异常全文。
+
+真实个人 OneDrive 返回的 thumbnail 描述尺寸与实际解码尺寸可能不同；本轮描述为 800×800、实际图片为 600×800。描述只用于选择候选，解码／缩放必须依据图片内容，验收分别记录两者，不要求图片填满描述尺寸。实际来源和证据见第二阶段记录。

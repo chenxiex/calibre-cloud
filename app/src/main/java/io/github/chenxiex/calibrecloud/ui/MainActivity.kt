@@ -80,6 +80,9 @@ class MainActivity : ComponentActivity() {
     private val downloadModel by lazy {
         ViewModelProvider(this, DownloadViewModel.factory(applicationContext))[DownloadViewModel::class.java]
     }
+    private val coverModel by lazy {
+        ViewModelProvider(this, CoverViewModel.factory(applicationContext))[CoverViewModel::class.java]
+    }
     private var pickerOpen by mutableStateOf(false)
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pickerOpen = false
@@ -96,7 +99,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel,
+                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel, coverModel,
                     { oneDriveModel.login { startActivity(it) } }) {
                     pickerOpen = true
                     picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
@@ -120,6 +123,7 @@ class MainActivity : ComponentActivity() {
         oneDriveLibraryModel.restore()
         metadataModel.restore()
         downloadModel.restore()
+        coverModel.restore()
         if (pickerOpen) return
         authorizationModel.refresh()
     }
@@ -139,6 +143,7 @@ private fun AuthorizationPage(
     library: OneDriveLibraryViewModel,
     metadata: MetadataViewModel,
     downloads: DownloadViewModel,
+    covers: CoverViewModel,
     onLogin: () -> Unit,
     onSelect: () -> Unit,
 ) {
@@ -153,6 +158,9 @@ private fun AuthorizationPage(
     LaunchedEffect(page, state, busy, snapshot.record, library.record, library.rootChosen, library.submitting) {
         metadata.restore()
         downloads.restore()
+    }
+    LaunchedEffect(page, state, busy, snapshot.record, library.record, library.rootChosen, library.submitting) {
+        covers.setVisible(page == 8)
     }
     Column(
         modifier = Modifier.fillMaxSize().background(Color.White)
@@ -225,15 +233,17 @@ private fun AuthorizationPage(
                 MetadataColumnControls(metadata)
             } else if (page == 6) {
                 DownloadControls(downloads)
-            } else {
+            } else if (page == 7) {
                 DownloadList(downloads)
+            } else {
+                CoverScreen(covers)
             }
         }
-        Text(stringResource(R.string.authorization_page_number, page + 1, 8))
+        Text(stringResource(R.string.authorization_page_number, page + 1, 9))
         Row {
             StaticButton(stringResource(R.string.page_previous), page > 0) { page-- }
             Spacer(Modifier.width(8.dp))
-            StaticButton(stringResource(R.string.page_next), page < 7) { page++ }
+            StaticButton(stringResource(R.string.page_next), page < 8) { page++ }
         }
     }
 }

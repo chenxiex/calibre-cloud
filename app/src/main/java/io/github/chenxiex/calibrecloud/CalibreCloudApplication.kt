@@ -59,12 +59,17 @@ class ApplicationDependencies(context: Context) {
         io.github.chenxiex.calibrecloud.tasks.copies.BackendFormatSource(state, localBackend, oneDriveBackend)
     }
     val copyService by lazy { io.github.chenxiex.calibrecloud.tasks.copies.CopyService(state, metadata, taskCoordinator, taskQueue) }
+    val covers by lazy { io.github.chenxiex.calibrecloud.storage.covers.CoverRepository(database, state,
+        applicationContext.filesDir, Dispatchers.IO) }
+    val coverSource by lazy { io.github.chenxiex.calibrecloud.tasks.covers.BackendCoverSource(state, localBackend, oneDriveBackend) }
+    val coverService by lazy { io.github.chenxiex.calibrecloud.tasks.covers.CoverService(state, metadata, taskCoordinator) }
     val taskCoordinator by lazy {
         TaskCoordinator(taskQueue, listOf(LocalSnapshotTaskHandler(state, localBackend, metadata, Dispatchers.IO),
             io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler(
                 state, oneDriveAuthorization, oneDriveBackend, oneDriveBrowseStore, metadata),
             io.github.chenxiex.calibrecloud.tasks.copies.FormatCopyTaskHandler(state, metadata, taskQueue, formatSource,
-                applicationContext.filesDir, Dispatchers.IO)))
+                applicationContext.filesDir, Dispatchers.IO),
+            io.github.chenxiex.calibrecloud.tasks.covers.CoverTaskHandler(state, metadata, covers, coverSource, formatSource, Dispatchers.IO)))
     }
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO, state.copyAccess) }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }

@@ -661,3 +661,63 @@ ADB 通过系统选择器切到 B 并同步，第 8 页清单为空；复制 B �
 本次仅记录人工通过及清理，未改生产代码，未重复构建或功能测试；文档链接与 `git diff --check` 通过。步骤 06 本轮验收项已完成，尚未暂存、未提交，步骤 07 尚未开始。
 
 用户随后明确要求提交步骤 06。本步验收结果和设备清理已确认；提交包含副本传输／完整发布、两后端续传、版本更新、下载清单、必要测试及相邻约束／验收记录。临时 `plan.md`、构建产物、探测日志、云端定位与授权数据不纳入提交。
+
+## 步骤 07：独立按需封面（验收通过）
+
+本步对应 R06、R10、R12、R17–R18、R31–R36。新增独立 `CoverRepository`、显式 `CoverService`、单资源封面处理器和第 9 页分页入口；沿用应用容器、持久队列及单执行锁。普通读取只查完整私有 PNG；当前可见一本书的缺失封面由页面显式提交低优先任务，等价未完成请求复用。隐藏页面不预取，失败不自动循环重试；切页／换库用选择代号和可见请求代次拒绝旧结果。
+
+Schema v4 非破坏性新增 `cover_cache`，键包含 LibraryId、源数字 ID、源 UUID，记录指向不可变 UUID 图片代次。处理器只读取导入书籍目录的 `cover.jpg`，封面独立于 books/provider；图片流最多 12 MiB，先取尺寸并拒绝边长超过 32768 或一亿像素，再按二的幂采样、缩放为最多 256×384。封面暂存／完整图片 fsync 后，当前身份、导入代次、书籍 UUID 和控制条件在同一 SQLite 事务复核，并将缓存指针与任务成功一起发布。暂停、取消、失败丢弃本次图片暂存，恢复重新获取，不信任半解码图片；失败保留完整旧图。默认 32 MiB 封面限额只回收封面代次，书籍副本不参与淘汰。读取块之间只查询轻量导入代次，不反复解析完整元数据。
+
+OneDrive 新接口先解析确切图片项目，再请求该项目 `/thumbnails`，选择满足显示尺寸的最小图片（均较小时选择最大），无可用缩略图或 thumbnail 404／410 时回退同一图片的内容。图片下载使用独立无授权 client，授权／限流／网络错误交回队列，不打印或持久化临时下载 URL。Microsoft 官方端点和 Android 采样依据已核对并链接到相邻模块约束；没有请求文件夹或书籍格式预览。
+
+| 实际执行（2026-10-06，PA6／API 34） | 结果与范围 |
+| --- | --- |
+| `./gradlew :app:testDebugUnitTest --tests io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveSourceBackendTest` | 后端 27 项通过，新增 4 项 HTTP fixture 用例覆盖确切 cover item、尺寸选择、无凭据图片请求、空／无效／404 回退、授权／限流及目录边界；不是实际 Graph 响应 |
+| `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`（最终生产代码） | `BUILD SUCCESSFUL in 47s`，日志 `app/build/verification/step07/optimized-build.log`；92 项 JVM，0 失败／错误／跳过；lint 0 errors、12 warnings、1 hint，新增提示为建议使用 Bitmap KTX scale；依赖与锁未改 |
+| `CoverTaskHandlerTest` 首轮独立 debug instrumentation | `OK (9 tests)`，101.757 秒，日志 `cover-platform.txt` |
+| `CoverTaskHandlerTest,ApplicationStateRepositoryTest,MetadataRepositoryTest` 最终 instrumentation | `OK (28 tests)`，180.521 秒，日志 `final-platform.txt`；包括本次轻量代次查询变更后的完整封面回归、受 schema／发布契约影响的状态与导入路径 |
+| `adb shell am instrument -w -r -e step07ReadOnly true -e class io.github.chenxiex.calibrecloud.tasks.covers.CoverReadOnlyAcceptanceTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner`，当前为真实 SAF 专用副本 | `OK (1 test)`，3.353 秒，日志 `saf-readonly.txt`；生产 SAF 读取真实 cover.jpg、解码、原图版本前后相同，显式封面任务原子发布，普通完整缓存读取不新增队列任务 |
+
+首轮构建发现 `OsConstants.O_DIRECTORY` 不属于当前 Android SDK 公共常量，使用既有实现同样的只读目录打开／fsync 修正。随后 lint 在新页面的 `when` 局部变量遭遇 Compose detector／Kotlin UAST 工具崩溃；将状态映射与 bitmap 渲染提取为参数函数后检查恢复通过，未禁用 lint 或升级依赖。失败日志保留在忽略目录，不能记为通过。
+
+封面平台测试使用独立 SQLite、文件目录和图片 fixture，覆盖完整缺失读取零源请求、提交去重与缩放持久化、坏图／编码超限／伪造 40000 像素尺寸／版本变化保旧、网络／授权失败保旧、暂停／重开继续／取消关闭流并不暴露半图、书库与 UUID 隔离、LRU 不删除 books、v3→v4 保留导入／清单／任务、当前封面不抢占且用户下载在两个封面子任务之间执行，以及隐藏页零请求、可见页只请求一本书。注入故障与下载处理器只证明边界和调度协议，不冒充真实网络故障或下载验收。
+
+真实 SAF 源位于本轮新准备的 `Download/calibre-step07-acceptance-20261006/library-a/`，来源为步骤 06 已知 fixture 的独立副本；通过系统选择器授权，生产同步成功后 SQLite 显示 1 个元数据导入、0 个封面记录、只有已完成同步任务，确认不因同步预取或等待整库封面。真实只读探针使用应用容器和共享执行锁，默认跳过，仅显式 `step07ReadOnly=true` 且 debug 包、专用 `library-a` 和已知首本图片路径一致才访问源。用户源书库和正式应用未操作。
+
+真实 OneDrive `/thumbnails` 和图片内容尚未执行：当前独立 debug 包为重新安装，账号需用户登录，不能复用步骤 06 的 Range 证据作为新缩略图端点通过。若实际服务无可用缩略图，后续记录原图回退，真实 thumbnail 成功范围仍保持未证实。墨水屏封面／标题占位、灰度与无动画体验也未由用户确认；最短准备见[步骤 07 共同验收](step-07-device-guide.md)。本步未暂存、未提交，不开始步骤 08。
+
+### 生产分页、重启和共同验收准备
+
+真实 SAF 探针后，通过 ADB 导航第 9 页并逐本翻页，私有 SQLite 显示封面记录／任务总数依次为 `1/2 → 2/3 → 3/4`，书籍副本始终为 0；任务为一次同步和三个可见封面，未预取后续书籍或复制书籍格式。加载时的标题占位与完成后的图片／静态状态均可查询，最后一页显示“封面 3 / 3”“第 9 / 9 页”，书籍与应用的“下一页”实际按钮父节点均 `enabled=false`。截图确认新封面及底部控件在 PA6 页面内可见，不能据此确认动画／残影体验。证据为忽略目录的 `page-one.db`、`page-two.db`、`page-three.db`、`last-page.xml` 与 `last-page.png`。
+
+强停并重新打开 debug 应用，未同步；`reopened.db` 的完整封面记录与强停前逐列相同，任务总数仍为 4。对独立 SAF 副本全部 13 个文件逐个 SHA-256 与准备 fixture 比对，全部一致（`source-before.json`／`source-after.sha256`）。源仅通过后端读取，设备源目录未修改。
+
+用户要求继续后，已将独立 debug 应用停在第 2 页“登录／重新登录”；OneDrive 配置有效，但新安装应用尚未登录。AndroidTest 包已卸载 `Success`，debug 与本轮 SAF 专用副本仅为仍在进行的共同验收暂留，真实 OneDrive 检查需要用户自行登录并选择专用 `library-a`。准备完成后由 agent 重新安装独立测试包执行显式只读探针，人工只确认第 9 页墨水屏体验；本轮共同验收结束后仍须卸载 debug／测试包、删除本轮设备专用目录及 UI dump。本节没有新 OneDrive 或人工通过结论。
+
+### 真实 OneDrive 封面与缩略图只读验收
+
+用户反馈“环境已准备好”后，核对独立 debug 当前选择为 OneDrive、私有完整浏览结果中所选 item 名为专用 `library-a`。该位置尚未导入；由 agent 通过第 4 页生产“验证／同步元数据”入口完成导入，并确认所有既有任务已结束，再安装独立 AndroidTest 包执行显式只读探针。没有重新安装／清除 debug 授权，没有写入、改名或删除云端源。
+
+为单独记录真实图片内容，在测试侧增加原图长度／已知样本 SHA-256 比对，以及 thumbnail 描述尺寸、实际解码尺寸、响应字节数和散列的脱敏证据。仅测试代码改变，生产封面处理器与缓存实现未改；构建 `./gradlew :app:assembleDebugAndroidTest` 成功（`cloud-probe-build.log`／`cloud-probe-rebuild.log`，均 3 秒），未无条件重复此前通过的 92 项 JVM／28 项平台回归。
+
+首轮真实检测在 33.226 秒报告 1 项失败（`cloud-readonly.txt`）：原图内容比对与实际 thumbnail 读取成功，但探针错误要求描述尺寸与实际图片尺寸完全一致，实际为描述 800×800、解码 600×800。依据本次响应及 [Graph 官方尺寸表](https://learn.microsoft.com/en-us/graph/api/driveitem-list-thumbnails?view=graph-rest-1.0)中 large 保持原比例／最长边 800 的规则，移除“填满描述框”的错误假设，分别记录描述与实际尺寸，并核对实际图片处于本次描述范围内。生产解码始终使用实际内容尺寸，不需要为这个测试差异改变生产行为。
+
+最终实际执行 `adb shell am instrument -w -r -e step07ReadOnly true -e class io.github.chenxiex.calibrecloud.tasks.covers.CoverReadOnlyAcceptanceTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner`，**OK (1 test)**，69.894 秒（`app/build/verification/step07/cloud-readonly-final.txt`），完成以下真实上游断言：
+
+- 源为已知首本书目录的确切 `cover.jpg` 图片项目，原图 36,903 字节，SHA-256 `a559f3c85079c5e1389db820df0579035bd5e821f4d29a9f395dbf4f23c58615`，与准备 fixture 一致。
+- 生产 `/thumbnails` 与无凭据图片内容请求实际返回可用 thumbnail，描述 800×800，实际解码 600×800、24,657 字节，SHA-256 `b27ef2f8c3648dbbeb2cb5e625bebf9e0753f0ab504eca94e8d4bcc41504a5b9`；不是原图回退，也不是文件夹／书籍格式预览。读取前后原图版本一致。
+- 显式 `CoverLoad` 经生产共享协调器完整执行 transfer／publish，任务完成、私有图片可读取且处于 256×384 限制以内；再次普通缓存读取不新增队列任务。
+
+这关闭本步首本真实 Graph thumbnail 端点、实际图片解码与发布的待验范围。没有制造云端异常或证明任意文件均有缩略图；无缩略图、404／410 回退、授权／网络失败仍由既有确定性 HTTP／平台回归覆盖，不计为真实服务失败实测。
+
+集成检测后私有状态显示当前 OneDrive 封面 1 条，既有本地库封面 3 条保留，书籍副本仍为 0，全部持久任务已结束（`cloud-complete.db`）。AndroidTest 包卸载 `Success`；debug 与本轮专用 SAF 副本继续暂留用于最后的人工墨水屏确认，结束共同验收后统一清理。步骤 07 尚未获得人工体验通过，未暂存、未提交，不推进步骤 08。
+
+新增只读探针后实际执行 `./gradlew :app:lintDebug`，`BUILD SUCCESSFUL in 38s`（`cloud-probe-lint.log`）；生产源码未改，此前构建／JVM／平台回归证据继续有效。第 9 页已准备为第一本完整云端封面，SQLite 仍只有该库 1 条封面，未预取第二／第三本，书籍副本仍为 0（`cloud-ui.db`）。设备临时 UI dump 已删除，AndroidTest 已卸载；debug 保留供本轮尚未结束的人工体验确认。文档本地引用与 `git diff --check` 通过。
+
+### 步骤 07 人工验收通过与设备清理
+
+2026-10-07（Asia/Shanghai），用户明确反馈“通过”，确认第 9 页封面／标题占位、灰度辨识、残影及无应用动画体验通过。结合 92 项 JVM、28 项真机平台回归、真实 SAF 原图和真实 OneDrive 图片项目 thumbnails 的只读检测，本步 R06、R10、R12、R17–R18、R31–R36 对应的本轮验收项已完成。第三阶段完整图书馆／文件夹代表封面、步骤 08 清理联动、步骤 09 后台执行及既有实库／规模补验保持原范围。
+
+验收后卸载 `io.github.chenxiex.calibrecloud.debug` 返回 `Success`，此前 `.debug.test` 已卸载；再次查询 debug 包前缀无匹配。仅删除本轮设备专用 `Download/calibre-step07-acceptance-20261006/` 和 `calibre-step07-ui.xml`，检查均不存在。没有操作正式应用或云端源，云端测试目录由用户决定保留或删除，工作区忽略目录内的构建／探测证据保留。本轮共同验收会话结束。
+
+本次只记录用户通过与清理，没有生产代码变化，沿用未受影响的自动检查，不重复构建／功能测试。按临时计划“用户确认通过后 commit”的门槛提交本步；提交不包含 `plan.md`、`local.properties`、构建产物、私有状态数据库或调试日志，不开始步骤 08。

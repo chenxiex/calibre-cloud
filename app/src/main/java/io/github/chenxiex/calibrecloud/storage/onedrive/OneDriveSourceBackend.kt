@@ -119,6 +119,69 @@ class OneDriveSourceBackend(
         openContent(location, resolveItem(location, path).id)
     }
 
+    /**
+     * Reads thumbnails of the exact source cover image, never thumbnails of a book format.
+     * Prefers the smallest image meeting both target dimensions, otherwise the largest available.
+     * Missing or unusable thumbnails fall back to that same image's original content. Authorization,
+     * network and throttling failures remain scheduler failures. The caller owns and decodes the stream.
+     * The optional callback exposes only dimensions of a successfully opened thumbnail for acceptance.
+     */
+    suspend fun openCover(
+        location: LibraryLocation.OneDrive,
+        path: RelativeSourcePath,
+        targetWidth: Int,
+        targetHeight: Int,
+        thumbnailSelected: (width: Int, height: Int) -> Unit = { _, _ -> },
+    ): OneDriveSourceResult<InputStream> = operation {
+        require(targetWidth > 0 && targetHeight > 0)
+        verifyIdentity(location)
+        val source = resolveItem(location, path)
+        val thumbnail = try {
+            val sets = json(url("drives", location.driveId, "items", source.id, "thumbnails"))["value"] as? List<*>
+                ?: emptyList<Any>()
+            val images = sets.filterIsInstance<Map<*, *>>().flatMap { set ->
+                listOf("small", "medium", "large").mapNotNull { size ->
+                    val value = set[size] as? Map<*, *> ?: return@mapNotNull null
+                    val width = (value["width"] as? Number)?.toInt()?.takeIf { it > 0 } ?: return@mapNotNull null
+                    val height = (value["height"] as? Number)?.toInt()?.takeIf { it > 0 } ?: return@mapNotNull null
+                    val target = (value["url"] as? String)?.let {
+                        try { it.toHttpUrl() } catch (_: IllegalArgumentException) { null }
+                    }?.takeIf { it.isHttps && it.username.isEmpty() && it.password.isEmpty() && it.fragment == null }
+                        ?: return@mapNotNull null
+                    CoverThumbnail(width, height, target)
+                }
+            }
+            images.filter { it.width >= targetWidth && it.height >= targetHeight }
+                .minByOrNull { it.width.toLong() * it.height }
+                ?: images.maxByOrNull { it.width.toLong() * it.height }
+        } catch (failure: OneDriveSourceException) {
+            if (failure.kind != StorageErrorKind.SOURCE_MISSING) throw failure
+            null
+        }
+        if (thumbnail != null) {
+            val stream = try {
+                currentCoroutineContext().ensureActive()
+                val response = followContentRedirects(contentClient.newCall(Request.Builder().url(thumbnail.url).build()).execute())
+                responseStream(response)
+            } catch (failure: OneDriveSourceException) {
+                if (failure.kind != StorageErrorKind.SOURCE_MISSING) throw failure
+                null
+            }
+            if (stream != null) {
+                try {
+                    thumbnailSelected(thumbnail.width, thumbnail.height)
+                    return@operation stream
+                } catch (failure: Throwable) {
+                    stream.close()
+                    throw failure
+                }
+            }
+        }
+        openContent(location, source.id)
+    }
+
+    private data class CoverThumbnail(val width: Int, val height: Int, val url: HttpUrl)
+
     /** Requests only the suffix from a freshly resolved, unauthenticated content URL. */
     suspend fun openRange(location: LibraryLocation.OneDrive, path: RelativeSourcePath, offset: Long, expectedVersion: FileVersion): OneDriveSourceResult<InputStream?> = operation {
         require(offset > 0 && expectedVersion.backend == BackendKind.ONEDRIVE)
@@ -390,6 +453,10 @@ class OneDriveSourceBackend(
 
     private suspend fun openContent(location: LibraryLocation.OneDrive, itemId: String): InputStream {
         val response = contentResponse(location, itemId)
+        return responseStream(response)
+    }
+
+    private fun responseStream(response: Response): InputStream {
         try {
             checkResponse(response)
             return object : FilterInputStream(response.body?.byteStream() ?: unsupported()) {
@@ -403,7 +470,11 @@ class OneDriveSourceBackend(
 
     private suspend fun contentResponse(location: LibraryLocation.OneDrive, itemId: String, offset: Long? = null): Response {
         // Graph /content resolves the URL; Range belongs to the redirected content request only.
-        var response = graph(url("drives", location.driveId, "items", itemId, "content"))
+        return followContentRedirects(graph(url("drives", location.driveId, "items", itemId, "content")), offset)
+    }
+
+    private suspend fun followContentRedirects(initial: Response, offset: Long? = null): Response {
+        var response = initial
         try {
             var hops = 0
             while (response.code in setOf(301, 302, 303, 307, 308)) {
