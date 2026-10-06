@@ -9,6 +9,7 @@
 - [spec.md](spec.md)：已通过用户验收的首版需求、模块契约、状态与验收条件，是后续开发的唯一需求与验收基线。
 - [AGENTS.md](AGENTS.md)：轻量 SDD 流程、协作、文件写入和验证约定。
 - [questions.md](questions.md)：当前已确认结论，以及后续需要填写的阻塞问题。
+- [Android 真机操作技能](.agents/skills/android-device-verification/SKILL.md)：可复用 ADB helper、页面流程与轻量设备操作 agent。
 
 ## OneDrive 应用注册
 

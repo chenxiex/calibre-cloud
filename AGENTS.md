@@ -53,6 +53,8 @@
 
 ## 验证
 
+Android 真机的重复页面操作优先使用仓库技能 [android-device-verification](.agents/skills/android-device-verification/SKILL.md) 及其 helper；异常页面的机械操作可委派给仓库角色 `android_device`（[配置](.codex/agents/android-device.toml)）。同一设备一次只交给一个执行者，按技能记录实际结果。
+
 示例书库位于 [assets/calibre-sample/](assets/calibre-sample/)，根目录包含 `metadata.db`，可用于准备独立测试书库副本；需要写入的验证在副本上执行。
 
 Android 工程的模块开发与验证约束见 [app/AGENTS.md](app/AGENTS.md)，依赖和 Wrapper 维护约束见 [gradle/AGENTS.md](gradle/AGENTS.md)。不存在的任务或尚未执行的命令不得记录为通过。环境初始化、SDK 安装与 ADB 操作遵循开发容器说明及上述写入范围。
