@@ -56,7 +56,7 @@ fun interface SnapshotValidator {
  * logs before/after both reads, and compares the copy hash with a second complete source read.
  * These observations detect changes; they do not claim arbitrary concurrent writers are safe.
  * Published files are immutable private generations. Failures only delete this attempt's staging
- * file and cannot replace or remove an earlier valid snapshot. Calibre structure import is later.
+ * file and cannot replace or remove an earlier valid snapshot. Calibre structure import belongs to the metadata module.
  */
 class LocalSourceBackend(
     private val documents: LocalDocumentAccess,

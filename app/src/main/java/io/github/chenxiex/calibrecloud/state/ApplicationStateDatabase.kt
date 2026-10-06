@@ -8,11 +8,12 @@ import android.database.sqlite.SQLiteOpenHelper
  * Private application state only; never opens, migrates or repairs a Calibre database.
  * Version 1 separates validated bindings, the current candidate selection and complete manifests.
  * Version 2 adds a durable queue without changing version 1 data.
+ * Version 3 adds atomic imported metadata and book identity indexes without changing prior data.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  */
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
-    SQLiteOpenHelper(context.applicationContext, name, null, 2) {
+    SQLiteOpenHelper(context.applicationContext, name, null, 3) {
     override fun onConfigure(db: SQLiteDatabase) {
         db.setForeignKeyConstraintsEnabled(true)
     }
@@ -61,6 +62,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
             )
         """.trimIndent())
         createQueue(db)
+        createMetadata(db)
         // The composite primary key is also the library-scoped ordered manifest index.
         db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, authority, root_id, account_id, drive_id)")
     }
@@ -95,9 +97,36 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         db.execSQL("CREATE INDEX prerequisite_tasks ON task_dependencies(prerequisite_id)")
     }
 
+    private fun createMetadata(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE metadata_imports (
+                library_id TEXT PRIMARY KEY NOT NULL REFERENCES library_bindings(library_id),
+                import_generation TEXT NOT NULL UNIQUE,
+                imported_at INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                read_column_id INTEGER,
+                read_column_lookup TEXT
+            )
+        """.trimIndent())
+        db.execSQL("""
+            CREATE TABLE metadata_books (
+                library_id TEXT NOT NULL REFERENCES library_bindings(library_id),
+                source_id INTEGER NOT NULL,
+                source_uuid TEXT NOT NULL,
+                title TEXT NOT NULL,
+                added_at TEXT,
+                PRIMARY KEY(library_id, source_id),
+                UNIQUE(library_id, source_uuid)
+            )
+        """.trimIndent())
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion == 1 && newVersion == 2)
-        db.execSQL("ALTER TABLE current_selection ADD COLUMN authorization_id TEXT")
-        createQueue(db)
+        check(oldVersion in 1..2 && newVersion == 3)
+        if (oldVersion == 1) {
+            db.execSQL("ALTER TABLE current_selection ADD COLUMN authorization_id TEXT")
+            createQueue(db)
+        }
+        createMetadata(db)
     }
 }

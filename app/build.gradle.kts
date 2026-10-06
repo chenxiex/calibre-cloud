@@ -109,6 +109,9 @@ android {
         buildConfigField("String", "ONEDRIVE_REDIRECT_URI", javaString(callback?.toString().orEmpty()))
     }
 
+    // Reuse the repository's independent Calibre sample only in the test APK.
+    sourceSets.getByName("androidTest").assets.srcDir(rootProject.file("assets"))
+
     buildFeatures {
         buildConfig = true
         compose = true

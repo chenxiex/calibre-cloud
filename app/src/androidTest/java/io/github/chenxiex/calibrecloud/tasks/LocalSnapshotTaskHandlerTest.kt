@@ -3,6 +3,8 @@ package io.github.chenxiex.calibrecloud.tasks
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.chenxiex.calibrecloud.metadata.CalibreFixture
+import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.FileVersion
@@ -45,13 +47,15 @@ class LocalSnapshotTaskHandlerTest {
     private lateinit var queue: DurableTaskQueue
     private lateinit var snapshots: File
     private lateinit var documents: Documents
+    private lateinit var importer: MetadataRepository
 
     @Before
     fun setUp() = runBlocking<Unit> {
         context = InstrumentationRegistry.getInstrumentation().targetContext
         databaseName = "local-snapshot-task-${UUID.randomUUID()}.db"
         snapshots = File(context.cacheDir, "snapshot-task-${UUID.randomUUID()}")
-        documents = Documents()
+        snapshots.mkdirs()
+        documents = Documents(CalibreFixture.create(File(snapshots, "fixture.db")).readBytes())
         reopen()
         select("first")
     }
@@ -65,18 +69,19 @@ class LocalSnapshotTaskHandlerTest {
     }
 
     @Test
-    fun completeSnapshotDoesNotActivateLibraryOrEmitCacheChanged() = runBlocking<Unit> {
+    fun completeSnapshotActivatesImportedLibraryAndEmitsCacheChanged() = runBlocking<Unit> {
         val events = mutableListOf<TaskEvent>()
         val observation = launch(start = CoroutineStart.UNDISPATCHED) { queue.events.collect { events.add(it) } }
         val task = submit()
         coordinator().drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
-        assertNull(state.current()!!.identity)
+        assertNotNull(state.current()!!.identity)
         assertEquals(2, documents.reads.get())
         assertArrayEquals(documents.bytes, snapshot(task).readBytes())
         observation.cancel()
         observation.join()
-        assertFalse(events.any { it is TaskEvent.CacheChanged })
+        assertTrue(events.any { it is TaskEvent.CacheChanged })
+        assertEquals(state.current()!!.identity, importer.currentImport()!!.identity)
     }
 
     @Test
@@ -98,7 +103,7 @@ class LocalSnapshotTaskHandlerTest {
         val replacement = submit(newContext)
         coordinator().drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(replacement)!!.record.state)
-        assertNull(state.current()!!.identity)
+        assertNotNull(state.current()!!.identity)
     }
 
     @Test
@@ -126,7 +131,7 @@ class LocalSnapshotTaskHandlerTest {
         assertEquals(task, queue.claim(0, { emptySet() }, { true })!!.record.id)
         val staleGeneration = UUID.randomUUID()
         queue.update(task) { it.copy(checkpoint = RecoveryCheckpoint(staleGeneration, FileVersion(BackendKind.LOCAL, "old"))) }
-        documents.bytes = "changed database fixture".toByteArray()
+        documents.bytes = CalibreFixture.create(File(snapshots, "changed-fixture.db")).readBytes()
         database.close()
         reopen()
         coordinator().drain()
@@ -134,13 +139,14 @@ class LocalSnapshotTaskHandlerTest {
         assertArrayEquals(documents.bytes, snapshot(task).readBytes())
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
         assertNull(queue.get(task)!!.checkpoint)
-        assertNull(state.current()!!.identity)
+        assertNotNull(state.current()!!.identity)
     }
 
     private fun reopen() {
         database = ApplicationStateDatabase(context, databaseName)
         state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
         queue = DurableTaskQueue(database, Dispatchers.IO)
+        importer = MetadataRepository(database, state, File(snapshots, "imports"), Dispatchers.IO)
     }
 
     private fun select(root: String) {
@@ -160,7 +166,7 @@ class LocalSnapshotTaskHandlerTest {
         (queue.submit(submission(context ?: candidate())) as SubmissionResult.Created).taskId
 
     private fun coordinator() = TaskCoordinator(queue, listOf(LocalSnapshotTaskHandler(
-        state, LocalSourceBackend(documents, snapshots, SnapshotValidator { it.length() > 0 }, Dispatchers.IO), Dispatchers.IO,
+        state, LocalSourceBackend(documents, snapshots, SnapshotValidator { it.length() > 0 }, Dispatchers.IO), importer, Dispatchers.IO,
     )))
 
     private fun snapshot(task: TaskId): File = File(snapshots, task.value.toString()).listFiles().orEmpty().single { it.extension == "db" }
@@ -169,8 +175,7 @@ class LocalSnapshotTaskHandlerTest {
         assertTrue("Source read did not start", documents.started.await(10, TimeUnit.SECONDS))
     }
 
-    private class Documents : LocalDocumentAccess {
-        @Volatile var bytes = "database fixture".toByteArray()
+    private class Documents(@Volatile var bytes: ByteArray) : LocalDocumentAccess {
         @Volatile var blockNextRead = false
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)

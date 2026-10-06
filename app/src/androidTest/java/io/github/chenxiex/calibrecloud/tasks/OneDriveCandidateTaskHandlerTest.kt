@@ -6,6 +6,8 @@ import android.net.Uri
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.auth.*
+import io.github.chenxiex.calibrecloud.metadata.CalibreFixture
+import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
@@ -17,6 +19,9 @@ import io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveSourceBackend
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.onedrive.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -67,7 +72,8 @@ class OneDriveCandidateTaskHandlerTest {
         directory = File(context.cacheDir, "onedrive-candidate-${UUID.randomUUID()}")
         oauth = FakeOAuthPlatform()
         authorization = OneDriveAuthorization(context, configuration, MemoryStore(), oauth)
-        graph = GraphFixture()
+        directory.mkdirs()
+        graph = GraphFixture(CalibreFixture.create(File(directory, "fixture.db")).readBytes())
         login()
         reopen()
     }
@@ -123,10 +129,12 @@ class OneDriveCandidateTaskHandlerTest {
     }
 
     @Test
-    fun selectedSnapshotPublishesPrivateBytesWithoutActivatingLibrary() = runBlocking<Unit> {
+    fun selectedSnapshotPublishesPrivateBytesAndActivatesImportedLibrary() = runBlocking<Unit> {
         service.browse()!!
         coordinator.drain()
         assertTrue(service.choose("library-1"))
+        val events = mutableListOf<TaskEvent>()
+        val observer = launch(start = CoroutineStart.UNDISPATCHED) { queue.events.collect { events.add(it) } }
         val task = service.acquire()!!
         val before = graph.requests.get()
         assertEquals(0, graph.contentReads.get())
@@ -138,7 +146,10 @@ class OneDriveCandidateTaskHandlerTest {
         assertEquals(1, files.size)
         assertEquals("db", files.single().extension)
         assertArrayEquals(graph.databaseBytes, files.single().readBytes())
-        assertNull(state.current()!!.identity)
+        assertNotNull(state.current()!!.identity)
+        observer.cancel()
+        observer.join()
+        assertTrue(events.any { it is TaskEvent.CacheChanged })
         database.close()
         reopen()
         assertCompleted(task)
@@ -230,7 +241,8 @@ class OneDriveCandidateTaskHandlerTest {
             SnapshotValidator { it.readBytes().contentEquals(graph.databaseBytes) }, Dispatchers.IO,
             OkHttpClient.Builder().addInterceptor(graph).build(),
         )
-        coordinator = TaskCoordinator(queue, listOf(OneDriveCandidateTaskHandler(state, authorization, backend, results)))
+        coordinator = TaskCoordinator(queue, listOf(OneDriveCandidateTaskHandler(state, authorization, backend, results,
+            MetadataRepository(database, state, File(directory, "imports"), Dispatchers.IO))))
         service = OneDriveCandidateService(state, authorization, queue, coordinator, results)
     }
 
@@ -257,10 +269,9 @@ class OneDriveCandidateTaskHandlerTest {
         override fun close() = Unit
     }
 
-    private class GraphFixture : Interceptor {
+    private class GraphFixture(val databaseBytes: ByteArray) : Interceptor {
         val requests = AtomicInteger()
         val contentReads = AtomicInteger()
-        val databaseBytes = "independent database fixture".toByteArray()
         override fun intercept(chain: Interceptor.Chain): Response {
             requests.incrementAndGet()
             val request = chain.request()

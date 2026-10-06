@@ -286,6 +286,28 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     private fun backendCode(kind: BackendKind) = when (kind) { BackendKind.LOCAL -> "local"; BackendKind.ONEDRIVE -> "onedrive" }
 
     companion object {
+        /**
+         * Called inside the metadata publication transaction, after selection/control validation.
+         * A complete import and its task outcome become durable together. Later controls therefore
+         * cannot cancel or pause an already published result, including across process death.
+         * The coordinator emits invalidation events only after this transaction commits.
+         */
+        internal fun completePublication(db: SQLiteDatabase, id: UUID) {
+            val args = arrayOf(id.toString())
+            val record = db.rawQuery("SELECT record, control FROM queued_tasks WHERE task_id = ?", args).use {
+                require(it.moveToFirst())
+                require(it.isNull(1))
+                TaskCodec.decode(it.getString(0))
+            }
+            require(record.submission.request is TaskRequest.CandidateConfiguration)
+            require(record.state is TaskState.Running)
+            val completed = record.copy(state = TaskState.Finished(TaskResult.Completed), controls = noControls)
+            db.update("queued_tasks", ContentValues().apply {
+                put("record", TaskCodec.encode(completed)); put("recovery_required", 0)
+                putNull("checkpoint"); putNull("checkpoint_backend"); putNull("checkpoint_version"); putNull("control")
+            }, "task_id = ?", args)
+        }
+
         internal val queuedControls = TaskControls(false, true, false, false)
         internal val noControls = TaskControls(false, false, false, false)
         fun initialStage(request: TaskRequest): TaskStage = when (request) {

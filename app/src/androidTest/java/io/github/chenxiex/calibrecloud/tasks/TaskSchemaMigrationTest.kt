@@ -6,6 +6,12 @@ import android.database.sqlite.SQLiteOpenHelper
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
+import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.BookKey
+import io.github.chenxiex.calibrecloud.model.FileVersion
+import io.github.chenxiex.calibrecloud.tasks.api.*
+import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
+import io.github.chenxiex.calibrecloud.tasks.persistence.RecoveryCheckpoint
 import io.github.chenxiex.calibrecloud.model.LibraryId
 import io.github.chenxiex.calibrecloud.model.LibraryIdentity
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
@@ -19,7 +25,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
 
-/** Seeds the shipped v1 schema directly, so opening the current helper exercises onUpgrade. */
+/** Exercises shipped v1 and v2 state through onUpgrade, including queue recovery evidence. */
 @RunWith(AndroidJUnit4::class)
 class TaskSchemaMigrationTest {
     @Test
@@ -56,6 +62,63 @@ class TaskSchemaMigrationTest {
                     assertTrue(it.moveToFirst())
                     assertEquals("content://test.documents/tree/fixture-root", it.getString(0))
                 }
+                database.readableDatabase.rawQuery("PRAGMA foreign_key_check", null).use { assertEquals(0, it.count) }
+            }
+        } finally {
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun metadataUpgradePreservesVersionTwoQueueDependenciesCheckpointAndManifest() = runBlocking<Unit> {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "metadata-migration-${UUID.randomUUID()}.db"
+        val identity = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.Local("test.documents", "fixture-root"), UUID.randomUUID())
+        val bookUuid = UUID.randomUUID()
+        val fileGeneration = UUID.randomUUID()
+        try {
+            val previous = ApplicationStateDatabase(context, name).use { database ->
+                val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
+                val selected = state.select(identity.location)
+                assertTrue(state.bindValidated(selected.token, identity))
+                val db = database.writableDatabase
+                db.execSQL("INSERT INTO downloaded_copies VALUES (?, 1, ?, 'EPUB', ?, 'Fixture title', 23, 'local', 'fixture-version', 'unconfirmed')",
+                    arrayOf(identity.id.value.toString(), bookUuid.toString(), fileGeneration.toString()))
+                val queue = DurableTaskQueue(database, Dispatchers.IO)
+                val sync = (queue.submit(TaskSubmission(TaskRequest.MetadataSync(identity.id), TaskOrigin.STARTUP_SYNC)) as SubmissionResult.Created).taskId
+                val book = BookKey(identity.id, 1, bookUuid)
+                queue.submit(TaskSubmission(TaskRequest.CoverLoad(book), TaskOrigin.USER_OPEN,
+                    dependencies = FrozenSet(listOf(TaskDependency(sync, DependencyRequirement.SUCCESS)))))
+                queue.update(sync) { it.copy(checkpoint = RecoveryCheckpoint(UUID.randomUUID(), FileVersion(BackendKind.LOCAL, "fixture-checkpoint"))) }
+                val records = queue.list()
+                val selection = state.current()
+                // Remove only the step 05 tables: every remaining table is the shipped v2 schema.
+                db.execSQL("DROP TABLE metadata_books")
+                db.execSQL("DROP TABLE metadata_imports")
+                db.version = 2
+                selection to records
+            }
+            ApplicationStateDatabase(context, name).use { database ->
+                val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
+                val queue = DurableTaskQueue(database, Dispatchers.IO)
+                assertEquals(3, database.readableDatabase.version)
+                assertEquals(previous.first, state.current())
+                assertEquals(identity, state.binding(identity.id))
+                assertEquals(previous.second, queue.list())
+                val copy = state.listCopies(identity.id, 10, 0).single()
+                assertEquals(bookUuid, copy.key.book.sourceUuid)
+                assertEquals(fileGeneration, copy.location.fileGeneration)
+                assertEquals("fixture-version", copy.savedVersion.token)
+                assertEquals(23L, copy.sizeBytes)
+                listOf("metadata_imports", "metadata_books").forEach { table ->
+                    database.readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use {
+                        assertTrue(it.moveToFirst())
+                        assertEquals(0, it.getInt(0))
+                    }
+                }
+                val lastSequence = previous.second.maxOf { it.record.scheduling.sequence.value }
+                val later = queue.submit(TaskSubmission(TaskRequest.CoverLoad(BookKey(identity.id, 2, UUID.randomUUID())), TaskOrigin.USER_OPEN)) as SubmissionResult.Created
+                assertTrue(queue.get(later.taskId)!!.record.scheduling.sequence.value > lastSequence)
                 database.readableDatabase.rawQuery("PRAGMA foreign_key_check", null).use { assertEquals(0, it.count) }
             }
         } finally {

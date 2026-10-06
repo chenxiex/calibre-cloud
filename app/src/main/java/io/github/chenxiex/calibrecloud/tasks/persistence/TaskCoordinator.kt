@@ -123,6 +123,13 @@ class TaskCoordinator(
                 }
                 execution.checkControl()
                 val outcome = handler.execute(entry, execution)
+                // Import publication and terminal state may already be committed atomically.
+                // Switching selections after that point does not cancel the completed old-library task.
+                if (outcome is StageOutcome.Complete && outcome.cachePublished &&
+                    queue.get(entry.record.id)?.record?.state == TaskState.Finished(TaskResult.Completed)) {
+                    queue.update(entry.record.id, cachePublished = true) { it }
+                    return
+                }
                 execution.checkControl()
                 if (entry.record.submission.request is TaskRequest.CandidateConfiguration && !queue.isActive(entry.record)) {
                     queue.update(entry.record.id) { current -> current.copy(record = current.record.copy(
@@ -141,6 +148,7 @@ class TaskCoordinator(
                     is StageOutcome.Complete -> {
                         require(outcome.result == TaskResult.Completed || outcome.result is TaskResult.CompletedWithBookFailures)
                         require(isFinalStage(entry.record.submission.request, stage))
+                        // Candidate import events require the atomically completed publication path above.
                         require(!outcome.cachePublished || entry.record.submission.request !is TaskRequest.CandidateConfiguration)
                         queue.update(entry.record.id, cachePublished = outcome.cachePublished) { current ->
                             current.copy(record = current.record.copy(state = TaskState.Finished(outcome.result), controls = DurableTaskQueue.noControls),

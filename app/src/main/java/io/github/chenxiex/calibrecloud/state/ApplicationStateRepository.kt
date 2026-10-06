@@ -26,7 +26,7 @@ data class LibrarySelection(
  * All public suspend operations dispatch database/file work off the caller's thread.
  * Selection tokens revoke old UI intents and candidate requests: future schedulers must compare them
  * before publishing, and run library tasks only for current().identity. Selecting never validates a source.
- * Binding is reserved for a successful importer; a location alone cannot restore an active identity.
+ * New binding is reserved for a successful importer; re-selection restores only a previously valid private import.
  */
 class ApplicationStateRepository(
     private val database: ApplicationStateDatabase,
@@ -70,9 +70,10 @@ class ApplicationStateRepository(
             if (selected.token != context.selectionToken || selected.backend != context.backend ||
                 selected.authorizationId != context.authorizationId || location.backend != context.backend) return@transaction null
             val next = CandidateContext(UUID.randomUUID(), context.backend, context.authorizationId)
+            val cached = cachedIdentity(this, location)
             update("current_selection", locationValues(location).apply {
                 put("token", next.selectionToken.toString())
-                putNull("library_id")
+                if (cached == null) putNull("library_id") else put("library_id", cached.id.value.toString())
                 put("authorization_id", context.authorizationId.toString())
             }, "singleton = 1", null)
             next
@@ -87,7 +88,6 @@ class ApplicationStateRepository(
             val next = CandidateContext(UUID.randomUUID(), selected.backend, authorizationId)
             update("current_selection", ContentValues().apply {
                 put("token", next.selectionToken.toString()); put("authorization_id", authorizationId.toString())
-                putNull("library_id")
             }, "singleton = 1", null)
             next
         }
@@ -197,19 +197,33 @@ class ApplicationStateRepository(
         }
     }
 
-    private fun selectInTransaction(db: SQLiteDatabase, location: LibraryLocation): LibrarySelection {
-        val selection = LibrarySelection(UUID.randomUUID(), location, null)
+    internal fun selectInTransaction(db: SQLiteDatabase, location: LibraryLocation): LibrarySelection {
+        val previous = cachedIdentity(db, location)
+        val selection = LibrarySelection(UUID.randomUUID(), location, previous)
         val values = locationValues(location).apply {
             put("singleton", 1)
             put("token", selection.token.toString())
-            putNull("library_id")
+            if (previous == null) putNull("library_id") else put("library_id", previous.id.value.toString())
             putNull("authorization_id")
         }
         if (db.update("current_selection", values, "singleton = 1", null) == 0) db.insertOrThrow("current_selection", null, values)
         return selection
     }
 
-    private fun current(db: SQLiteDatabase): LibrarySelection? = db.query("current_selection", null, "singleton = 1", null, null, null, null).use {
+    /** Re-selecting a known position restores its last valid private import without source access. */
+    private fun cachedIdentity(db: SQLiteDatabase, location: LibraryLocation): LibraryIdentity? {
+        val values = locationValues(location)
+        return db.rawQuery("""
+            SELECT b.library_id FROM library_bindings b JOIN metadata_imports m ON b.library_id = m.library_id
+            WHERE b.backend = ? AND b.authority = ? AND b.root_id = ? AND b.account_id = ? AND b.drive_id = ?
+            ORDER BY m.imported_at DESC, m.rowid DESC LIMIT 1
+        """.trimIndent(), arrayOf("backend", "authority", "root_id", "account_id", "drive_id")
+            .map { values.getAsString(it) }.toTypedArray()).use {
+            if (it.moveToFirst()) binding(db, LibraryId(UUID.fromString(it.getString(0)))) else null
+        }
+    }
+
+    internal fun current(db: SQLiteDatabase): LibrarySelection? = db.query("current_selection", null, "singleton = 1", null, null, null, null).use {
         if (!it.moveToFirst()) null else LibrarySelection(
             UUID.fromString(it.text("token")), if (it.text("root_id").isEmpty()) null else it.location(),
             it.optionalText("library_id")?.let { id -> binding(db, LibraryId(UUID.fromString(id))) },
@@ -218,7 +232,7 @@ class ApplicationStateRepository(
         )
     }
 
-    private fun binding(db: SQLiteDatabase, id: LibraryId): LibraryIdentity? = db.query(
+    internal fun binding(db: SQLiteDatabase, id: LibraryId): LibraryIdentity? = db.query(
         "library_bindings", null, "library_id = ?", arrayOf(id.value.toString()), null, null, null,
     ).use { if (!it.moveToFirst()) null else LibraryIdentity(id, it.location(), UUID.fromString(it.text("generation"))) }
 
@@ -234,7 +248,7 @@ class ApplicationStateRepository(
         }
     }
 
-    private fun locationValues(location: LibraryLocation) = ContentValues().apply {
+    internal fun locationValues(location: LibraryLocation) = ContentValues().apply {
         put("backend", backendCode(location.backend))
         put("authority", (location as? LibraryLocation.Local)?.authority ?: "")
         put("root_id", when (location) {

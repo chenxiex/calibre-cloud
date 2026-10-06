@@ -30,6 +30,10 @@ class ApplicationDependencies(context: Context) {
     val database by lazy { ApplicationStateDatabase(applicationContext) }
     private val bookFiles by lazy { PrivateBookFiles(applicationContext.filesDir) }
     val state by lazy { ApplicationStateRepository(database, bookFiles, Dispatchers.IO) }
+    val metadata by lazy {
+        io.github.chenxiex.calibrecloud.metadata.MetadataRepository(database, state,
+            File(applicationContext.filesDir, "metadata"), Dispatchers.IO)
+    }
     val taskQueue by lazy { DurableTaskQueue(database, Dispatchers.IO) }
     val localBackend by lazy {
         LocalSourceBackend(AndroidLocalDocumentAccess(applicationContext),
@@ -52,9 +56,9 @@ class ApplicationDependencies(context: Context) {
             state, oneDriveAuthorization, taskQueue, taskCoordinator, oneDriveBrowseStore)
     }
     val taskCoordinator by lazy {
-        TaskCoordinator(taskQueue, listOf(LocalSnapshotTaskHandler(state, localBackend, Dispatchers.IO),
+        TaskCoordinator(taskQueue, listOf(LocalSnapshotTaskHandler(state, localBackend, metadata, Dispatchers.IO),
             io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler(
-                state, oneDriveAuthorization, oneDriveBackend, oneDriveBrowseStore)))
+                state, oneDriveAuthorization, oneDriveBackend, oneDriveBrowseStore, metadata)))
     }
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO) }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }

@@ -45,6 +45,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.ViewModelProvider
+import io.github.chenxiex.calibrecloud.metadata.ReadColumnStatus
+import io.github.chenxiex.calibrecloud.model.BackendKind
+import java.text.DateFormat
+import java.util.Date
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.auth.OneDriveOAuthConfiguration
 import io.github.chenxiex.calibrecloud.auth.LoginStatus
@@ -70,6 +74,9 @@ class MainActivity : ComponentActivity() {
     private val oneDriveLibraryModel by lazy {
         ViewModelProvider(this, OneDriveLibraryViewModel.factory(applicationContext))[OneDriveLibraryViewModel::class.java]
     }
+    private val metadataModel by lazy {
+        ViewModelProvider(this, MetadataViewModel.factory(applicationContext))[MetadataViewModel::class.java]
+    }
     private var pickerOpen by mutableStateOf(false)
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pickerOpen = false
@@ -86,7 +93,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel,
+                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel,
                     { oneDriveModel.login { startActivity(it) } }) {
                     pickerOpen = true
                     picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
@@ -108,6 +115,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         oneDriveModel.restore()
         oneDriveLibraryModel.restore()
+        metadataModel.restore()
         if (pickerOpen) return
         authorizationModel.refresh()
     }
@@ -125,6 +133,7 @@ private fun AuthorizationPage(
     snapshot: LocalSnapshotViewModel,
     oneDrive: OneDriveAuthorizationViewModel,
     library: OneDriveLibraryViewModel,
+    metadata: MetadataViewModel,
     onLogin: () -> Unit,
     onSelect: () -> Unit,
 ) {
@@ -136,6 +145,9 @@ private fun AuthorizationPage(
     }
     // Split authorization entries into explicit pages without scrolling or animated controls.
     var page by rememberSaveable { mutableIntStateOf(0) }
+    LaunchedEffect(page, state, busy, snapshot.record, library.record, library.rootChosen, library.submitting) {
+        metadata.restore()
+    }
     Column(
         modifier = Modifier.fillMaxSize().background(Color.White)
             .windowInsetsPadding(WindowInsets.safeDrawing).padding(16.dp),
@@ -199,15 +211,19 @@ private fun AuthorizationPage(
                 }
             } else if (page == 2) {
                 OneDriveDirectoryControls(library, oneDrive.status == LoginStatus.AUTHORIZED && !oneDrive.busy)
-            } else {
+            } else if (page == 3) {
                 OneDriveTaskControls(library, oneDrive.status == LoginStatus.AUTHORIZED && !oneDrive.busy)
+            } else if (page == 4) {
+                MetadataSummary(metadata)
+            } else {
+                MetadataColumnControls(metadata)
             }
         }
-        Text(stringResource(R.string.authorization_page_number, page + 1))
+        Text(stringResource(R.string.authorization_page_number, page + 1, 6))
         Row {
             StaticButton(stringResource(R.string.page_previous), page > 0) { page-- }
             Spacer(Modifier.width(8.dp))
-            StaticButton(stringResource(R.string.page_next), page < 3) { page++ }
+            StaticButton(stringResource(R.string.page_next), page < 5) { page++ }
         }
     }
 }
@@ -239,7 +255,8 @@ private fun LocalSnapshotControls(model: LocalSnapshotViewModel, authorized: Boo
                 StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.local_reauthorize
                 StorageErrorKind.SOURCE_MISSING -> R.string.local_snapshot_missing
                 StorageErrorKind.VERSION_CONFLICT -> R.string.local_snapshot_conflict
-                StorageErrorKind.CORRUPT_CONTENT, StorageErrorKind.INCOMPATIBLE_DATABASE -> R.string.local_snapshot_corrupt
+                StorageErrorKind.CORRUPT_CONTENT -> R.string.local_snapshot_corrupt
+                StorageErrorKind.INCOMPATIBLE_DATABASE -> R.string.metadata_incompatible
                 StorageErrorKind.INSUFFICIENT_SPACE -> R.string.local_snapshot_space
                 StorageErrorKind.UNSUPPORTED_OPERATION -> R.string.local_unsupported
                 else -> R.string.local_snapshot_io
@@ -326,7 +343,8 @@ internal fun oneDriveTaskStatusResource(taskState: TaskState?, operation: String
                 StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.onedrive_task_permission
                 StorageErrorKind.SOURCE_MISSING -> R.string.local_snapshot_missing
                 StorageErrorKind.VERSION_CONFLICT -> R.string.local_snapshot_conflict
-                StorageErrorKind.CORRUPT_CONTENT, StorageErrorKind.INCOMPATIBLE_DATABASE -> R.string.local_snapshot_corrupt
+                StorageErrorKind.CORRUPT_CONTENT -> R.string.local_snapshot_corrupt
+                StorageErrorKind.INCOMPATIBLE_DATABASE -> R.string.metadata_incompatible
                 StorageErrorKind.INSUFFICIENT_SPACE -> R.string.local_snapshot_space
                 StorageErrorKind.UNSUPPORTED_OPERATION -> R.string.onedrive_task_unsupported
                 else -> R.string.onedrive_task_io
@@ -370,4 +388,77 @@ private fun OneDriveTaskControls(model: OneDriveLibraryViewModel, authorized: Bo
             StaticButton(stringResource(R.string.local_snapshot_run), authorized && !model.submitting) { model.runQueued() }
         }
     }
+}
+
+@Composable
+private fun MetadataSummary(model: MetadataViewModel) {
+    Text(stringResource(R.string.metadata_title), style = MaterialTheme.typography.titleMedium)
+    val selected = model.selection
+    val imported = model.imported
+    if (model.readFailed) {
+        Text(stringResource(R.string.metadata_local_error))
+    } else if (selected == null) {
+        Text(stringResource(R.string.metadata_unselected))
+    } else {
+        Text(stringResource(R.string.metadata_backend, stringResource(when (selected.backend) {
+            BackendKind.LOCAL -> R.string.metadata_backend_local
+            BackendKind.ONEDRIVE -> R.string.metadata_backend_onedrive
+        })))
+        if (imported == null) {
+            Text(stringResource(R.string.metadata_unvalidated))
+        } else {
+            Text(stringResource(R.string.metadata_library_id, imported.identity.id.value.toString()))
+            Text(stringResource(R.string.metadata_import_ready))
+            Text(stringResource(R.string.metadata_counts, imported.metadata.books.size,
+                imported.metadata.books.sumOf { it.formats.size }))
+            Text(stringResource(R.string.metadata_synced_at,
+                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(imported.importedAt))))
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    StaticButton(stringResource(R.string.metadata_refresh_local), !model.busy) { model.restore() }
+}
+
+@Composable
+private fun MetadataColumnControls(model: MetadataViewModel) {
+    Text(stringResource(R.string.metadata_columns_title), style = MaterialTheme.typography.titleMedium)
+    Text(stringResource(R.string.metadata_columns_explanation))
+    val imported = model.imported
+    if (model.readFailed) {
+        Text(stringResource(R.string.metadata_local_error))
+    } else if (imported == null) {
+        Text(stringResource(R.string.metadata_unvalidated))
+    } else {
+        if (imported.readColumnStatus == ReadColumnStatus.VALID) {
+            val selected = imported.metadata.columns.first { it.id == imported.selectedReadColumn }
+            Text(stringResource(R.string.metadata_column_selected, selected.name, selected.id.lookupName))
+        } else {
+            Text(stringResource(if (imported.readColumnStatus == ReadColumnStatus.INVALID)
+                R.string.metadata_columns_invalid else R.string.metadata_columns_unconfigured))
+        }
+        val columns = imported.metadata.columns.filter { it.datatype == "bool" && it.supported }
+        var columnPage by rememberSaveable(imported.identity.id.value.toString(), imported.generation.toString()) {
+            mutableIntStateOf(0)
+        }
+        val pageCount = maxOf(1, (columns.size + 2) / 3)
+        val currentPage = columnPage.coerceIn(0, pageCount - 1)
+        if (columns.isEmpty()) Text(stringResource(R.string.metadata_columns_empty))
+        columns.drop(currentPage * 3).take(3).forEach { column ->
+            Spacer(Modifier.height(4.dp))
+            StaticButton(stringResource(R.string.metadata_column_option, column.name, column.id.lookupName),
+                !model.busy && column.id != imported.selectedReadColumn) { model.selectColumn(column.id) }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(stringResource(R.string.metadata_columns_page, currentPage + 1, pageCount))
+        Row {
+            StaticButton(stringResource(R.string.page_previous), !model.busy && currentPage > 0) { columnPage = currentPage - 1 }
+            Spacer(Modifier.width(8.dp))
+            StaticButton(stringResource(R.string.page_next), !model.busy && currentPage + 1 < pageCount) { columnPage = currentPage + 1 }
+        }
+        Spacer(Modifier.height(8.dp))
+        StaticButton(stringResource(R.string.metadata_columns_clear), !model.busy && imported.selectedReadColumn != null) {
+            model.selectColumn(null)
+        }
+    }
+    if (model.configurationFailed) Text(stringResource(R.string.metadata_configuration_failed))
 }

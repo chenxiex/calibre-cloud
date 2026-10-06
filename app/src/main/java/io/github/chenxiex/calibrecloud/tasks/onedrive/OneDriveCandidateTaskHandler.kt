@@ -13,12 +13,13 @@ import io.github.chenxiex.calibrecloud.tasks.persistence.*
 
 private class StaleOneDriveSelection : RuntimeException()
 
-/** Read-only candidate access. Neither browsing nor a valid SQLite snapshot activates a library. */
+/** Read-only candidate access. Browsing never activates; complete validated snapshot import does. */
 class OneDriveCandidateTaskHandler(
     private val state: ApplicationStateRepository,
     private val authorization: OneDriveAuthorization,
     private val backend: OneDriveSourceBackend,
     private val results: OneDriveBrowseStore,
+    private val importer: io.github.chenxiex.calibrecloud.metadata.MetadataRepository,
 ) : TaskHandler {
     override fun supports(request: TaskRequest) = request is TaskRequest.CandidateConfiguration &&
         request.context.backend == BackendKind.ONEDRIVE && request.operation in setOf(BROWSE, SNAPSHOT)
@@ -72,9 +73,20 @@ class OneDriveCandidateTaskHandler(
             }
             check()
             return when (val snapshot = backend.acquireSnapshot(location, entry.record.id.value) { check() }) {
-                is OneDriveSourceResult.Available -> { check(); StageOutcome.Complete() }
+                is OneDriveSourceResult.Available -> {
+                    check()
+                    val identity = importer.importSnapshot(request.context.selectionToken, snapshot.value.file,
+                        check = { check() }, taskId = entry.record.id.value)
+                    if (identity == null) loginFailure() else StageOutcome.Complete(cachePublished = true)
+                }
                 is OneDriveSourceResult.Failed -> failed(snapshot)
             }
+        } catch (failure: io.github.chenxiex.calibrecloud.metadata.SnapshotParseException) {
+            return StageOutcome.Fail(TaskError.Source(StorageError(when (failure.reason) {
+                io.github.chenxiex.calibrecloud.metadata.SnapshotParseFailure.INCOMPATIBLE -> StorageErrorKind.INCOMPATIBLE_DATABASE
+                io.github.chenxiex.calibrecloud.metadata.SnapshotParseFailure.IO -> StorageErrorKind.LOCAL_IO
+                else -> StorageErrorKind.CORRUPT_CONTENT
+            })))
         } catch (_: StaleOneDriveSelection) {
             return loginFailure()
         }

@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks.local
 
+import io.github.chenxiex.calibrecloud.metadata.*
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
@@ -14,13 +15,14 @@ import kotlinx.coroutines.withContext
 private class StaleLocalSelection : RuntimeException()
 
 /**
- * Selection-scoped read-only snapshot acquisition, not metadata import or library activation.
+ * Selection-scoped read-only acquisition followed by complete metadata import and library activation.
  * Recovery always reacquires and validates the current source; partial files never imply success.
  * Local persisted grants use the selection token as a non-secret authorization context identifier.
  */
 class LocalSnapshotTaskHandler(
     private val state: ApplicationStateRepository,
     private val backend: LocalSourceBackend,
+    private val importer: MetadataRepository,
     private val io: CoroutineDispatcher,
 ) : TaskHandler {
     override fun supports(request: TaskRequest): Boolean = request is TaskRequest.CandidateConfiguration &&
@@ -48,9 +50,19 @@ class LocalSnapshotTaskHandler(
                 // A replacement may revoke the old grant while the read is running. Stop at a chunk boundary.
                 if (state.current()?.token != request.context.selectionToken) throw StaleLocalSelection()
             }) {
-                is LocalSourceResult.Available -> StageOutcome.Complete()
+                is LocalSourceResult.Available -> {
+                    val identity = importer.importSnapshot(request.context.selectionToken, result.value.file,
+                        check = { execution.checkControl() }, taskId = entry.record.id.value)
+                    if (identity == null) staleFailure() else StageOutcome.Complete(cachePublished = true)
+                }
                 is LocalSourceResult.Failed -> StageOutcome.Fail(TaskError.Source(result.error))
             }
+        } catch (failure: SnapshotParseException) {
+            StageOutcome.Fail(TaskError.Source(StorageError(when (failure.reason) {
+                SnapshotParseFailure.INCOMPATIBLE -> StorageErrorKind.INCOMPATIBLE_DATABASE
+                SnapshotParseFailure.IO -> StorageErrorKind.LOCAL_IO
+                else -> StorageErrorKind.CORRUPT_CONTENT
+            })))
         } catch (_: StaleLocalSelection) {
             staleFailure()
         }

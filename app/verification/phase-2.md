@@ -398,3 +398,118 @@ adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.auth.OneDriv
 有界只读提交审查未发现阻塞问题；本步构建、79 项 JVM、6 项最新候选平台测试及此前 22 项授权平台测试的证据保持上述实际执行范围。收尾仅修改验收文档与计划，执行 `git diff --check` 和本地文档链接／暂存范围检查。`plan.md`、`local.properties`、日志、APK 和测试数据库不加入提交，依赖锁未变化。
 
 手工验收已结束，执行 `adb uninstall io.github.chenxiex.calibrecloud.debug` 返回 `Success`，随后 `adb shell pm list packages io.github.chenxiex.calibrecloud` 无匹配；测试包已在上一轮卸载。正式应用及源测试目录未操作。本步共同验收通过并按既定计划提交；步骤 05 保持待实施。
+
+## 步骤 05：完整导入、动态栏目与书库激活（2026-10-06）
+
+对应 R03–R05、R09、R13、R22–R25 的导入数据基础、R31–R36。实现、自动验证及八组共同真机操作已完成，用户于 2026-10-06 明确要求提交本步；缺少样本的补验保持未完成，详见本节末尾。不开展步骤 06。
+
+### 实现范围
+
+两后端的持久候选同步进入同一只读 Calibre 解析器，验证 SQLite 完整性、必需结构、关联、UUID、路径、格式与支持的栏目布局，完整导入书籍、作者、加入时间、评分、丛书／序号、标签、可展示简介、格式／大小与相对定位。动态发现布尔、文本、枚举、多值文本；未知／计算栏目只保存定义，不执行模板。结构依据及长期开发契约见 [元数据模块](../src/main/java/io/github/chenxiex/calibrecloud/metadata/AGENTS.md)。
+
+Schema v3 非破坏性增加完整导入与书籍身份索引，保留 v1/v2 配置、清单、队列、依赖、序号与恢复检查点。独立私有代次完成快照与索引后，事务同时发布书库绑定、导入引用、完整书籍索引与任务完成状态；失败保留旧有效导入，未发布 UUID 目录在下一次导入安全回收。只在完整提交后发缓存事件，不访问／修改 Calibre 源库。
+
+位置先按后端／账号／根隔离，再比较源书库 UUID 与同数字 ID 的书籍 UUID；相容更新复用身份，不兼容替换隔离新身份。切回已知位置恢复最后有效缓存，不隐式验证源。元数据页展示当前库、数量和同步时间；已读栏目页从导入列出布尔栏目并显式分页，保存设置校验当前身份与导入代次。未配置或栏目改名／删除／类型变化显示配置问题；空／否仅在有效配置下为未读，不维护本地覆盖，不提供写回。
+
+六页最小入口与资源化文案已接入。历史步骤 04 的完成任务仍保留原状态；任务完成提示使用“源加载任务已完成；完整导入结果见当前书库页”，只有实际有效导入才显示“Calibre 元数据已完整导入并激活书库”，避免升级后将历史快照误报为完整导入。
+
+### 必要验证
+
+实际执行：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+./gradlew :app:assembleRelease :app:lintRelease
+adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.metadata.CalibreSnapshotParserTest,io.github.chenxiex.calibrecloud.metadata.MetadataRepositoryTest,io.github.chenxiex.calibrecloud.tasks.LocalSnapshotTaskHandlerTest,io.github.chenxiex.calibrecloud.tasks.OneDriveCandidateTaskHandlerTest,io.github.chenxiex.calibrecloud.tasks.TaskSchemaMigrationTest,io.github.chenxiex.calibrecloud.tasks.DurableTaskQueueTest,io.github.chenxiex.calibrecloud.state.ApplicationStateRepositoryTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+完整实现最终基线为 `BUILD SUCCESSFUL`（51s），JVM **79 tests、0 failures、0 errors、0 skipped**，debug lint **0 errors、9 warnings、1 hint**。修正升级完成文案后实际追加 `:app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`（43s）与 `:app:testDebugUnitTest`，结果仍成功、同样 79 项 JVM／lint 数量；release 追加检查 `:app:assembleRelease :app:lintRelease` 为 `BUILD SUCCESSFUL`（48s），lint **0 errors、9 warnings、1 hint**；产物为未签名正式包、debuggable=false，未安装或使用正式应用数据。没有改动依赖版本或锁文件。release 日志 `/tmp/calibre-step05-release-build.log`；debug 日志为 `/tmp/calibre-step05-build-complete.log`、`/tmp/calibre-step05-resource-final-build.log`、`/tmp/calibre-step05-resource-final-unit.log`。
+
+平台结果为 **OK (60 tests)**（127.27s），日志 `/tmp/calibre-step05-device-tests.log`。覆盖实际仓库样本（包括 FTS 结构）解析及源字节不变，动态异名栏目与多值关系、空值／否、格式大小和危险路径，损坏／不兼容拒绝、SQLite trigger 注入的发布事务失败、旧代次保留、中断代次回收、重启恢复、切回与 UUID 替换隔离、栏目失效／旧界面配置拒绝，两后端获取后的同一路径导入，以及既有队列协议回归。v1→v3 和 v2→v3 迁移在真实 SQLite 上验证清单、配置、任务／依赖／检查点／序号保留。
+
+有界审阅发现发布与任务结束的竞态。先新增 `publicationCompletesTaskAtomicallyBeforeLaterControl` 并在 PA6 定向执行，稳定复现 **1 test、1 failure**：导入已发布后暂停仍被接受，日志 `/tmp/calibre-step05-publication-regression-device.log`。修复将发布与任务完成放入同一事务，提交后的暂停／取消被拒绝，协调器只在提交后发布事件；上述 60 项设备测试包含此回归且通过。初轮开发编译中发现的包名被 dispatcher 属性遮蔽、参数顺序及测试重复 import 问题已修正，最终检查不是将这些失败记为通过。
+
+新 fixture 按 Calibre 9.14.0 官方表／栏目布局构造，平台确实执行 Android SQLite；其最小结构不等于经过 Calibre 桌面程序打开的完整自定义栏目书库。本轮首次验证时的仓库原始样本没有自定义栏目，不能据此宣称完整桌面兼容、多栏目实库或代表性规模验收完成；用户随后更新的桌面实库补验见下文。
+
+### 本地 SAF 与最小页面技术检查
+
+设备为 PA6（汉王 Clear6 Turbo），Android 14，1072×1448；ADB `192.168.0.72:41871`。安装前 `apkanalyzer` 核对 debug／test application ID 为独立 `.debug`／`.debug.test`，debuggable=true、minSdk=30；安装均 `Success`，未覆盖正式包。最终 debug APK SHA-256：`5fe337aa879f23923a016987dd806027eb991f0609bffda11c76e0bda9e39407`。60 项平台测试使用此前实现相同、仅完成文案调整前的 APK；最终 APK 另执行以下实际页面检查，不将未重复运行的平台测试写成重新运行。
+
+从仓库样本复制两份完整独立测试书库到本次专用临时目录，再推送到设备 Download 下的 `calibre-step05-device-source/library-a`／`library-b`。B 仅在准备副本时修改书库 UUID，两库均含数字书籍 ID 1；不修改仓库原始样本或用户书库。通过真实系统 SAF 选择器授权 A、显式同步，生产持久任务 `Completed`，私有状态为 1 个绑定、1 个完整导入、1 本书及 1 个格式。
+
+再次通过系统选择器选择 B、显式同步后，两个书库各有独立绑定与完整导入，`metadata_books` 中数字 ID 1 分属两个 LibraryId。切回 A 后立即复用原 LibraryId 与原导入代次，任务总数仍为 2，不等待新源同步。暂时移走本次专用 A 根目录并强行停止／重新启动 debug 应用，当前绑定与原导入代次仍恢复，未创建新任务。此检查保持无线 ADB 的 Wi-Fi 连接，证明源不可用情况下私有状态恢复，不宣称设备已实际断网。
+
+移走整个授权根的显式读取返回现有后端的 `UNSUPPORTED_OPERATION`（提供方未返回可用查询结果），旧导入保留；这不作为准确 `SOURCE_MISSING` 分类通过。恢复根后，仅将其测试 `metadata.db` 临时改名，再显式同步实际返回 `SOURCE_MISSING`，页面显示“所选目录或 metadata.db 不存在”，旧 LibraryId／导入代次不变。恢复测试数据库后点击重试，原失败任务完成，复用 LibraryId 并发布新的导入代次，任务总数仍为 4（3 项完成，根目录异常的历史失败保留）。尚未对目录移除时更细的提供方错误分类作新增承诺。
+
+最终 APK 的当前库页显示完整导入、1 本书／1 个格式及同步时间；栏目页对这个无自定义栏目的样本显示未配置及没有可选布尔栏目，不将其展示为全库未读。页面导航、数据与栏目状态均为静态文字，检查第 5／6 页无 scrollable 应用节点。完成文案修正后另核对任务页的升级兼容提示与当前库页的实际有效导入提示。两份设备源 `metadata.db` 在同步、缺失／恢复及重试后的 SHA-256 均与各自准备后的散列相同；相邻 EPUB／封面未进入本步传输，不宣称书籍下载已完成。
+
+### 首次交付时的待验收安排
+
+以下保留首次交付时的安排；其中后续已完成的项目及当前剩余范围，以本文件末尾“共同真机验收准备与结果”的逐项记录为准。
+
+- 真实个人 OneDrive 书库的完整导入、重新登录后同步、失败保留旧索引与断网启动仍需本步实测。步骤 04 的真实快照取得不自动算作步骤 05 完整导入验收；本轮未读取账号凭据或对真实云端文件操作。
+- 用户更新的桌面样本已具备单布尔栏目与空／否／是数据，其自动化补验见下文。桌面程序实际改名／删除／改类型后的界面检查、多个布尔栏目分页，以及文本／枚举／多值文本的桌面实库验证仍待补齐；程序变更的副本与最小 fixture 不替代这些验收。
+- 需核对真实同目录不兼容替换、用户墨水屏触控／灰度提示及代表性约 286 本书的本地响应；目前没有对应规模样本，不提供未经测量的性能结论。整个授权根移除时的提示分类另保留核对，不把现有 `UNSUPPORTED_OPERATION` 误写为目录缺失分类通过。
+- 文件副本、清理、完整图书馆／搜索／分类、后台执行及真实写回仍分别属于后续步骤／阶段；本步只补 AC01 身份／索引部分与 AC09／AC10 的新增路径，不关闭完整 AC01–AC10。
+
+共同验收时安装最终独立 debug APK，仅选择本地／OneDrive 专用测试副本：本地在第 1 页、OneDrive 在第 4 页显式“验证／同步元数据”，第 5 页核对数量／当前身份／成功时间，第 6 页选择已读布尔栏目并分页。切到另一个同数字 ID 测试库再切回，检查各自统计／栏目隔离；重启与断网查看旧导入不自动入队；在测试副本制造缺失／损坏数据库并同步，检查错误及旧代次保留，恢复后显式重试。仅在测试副本中更改栏目与替换数据库，不操作真实书库。共同验收通过前不提交本步。
+
+设备技术检查结束后，卸载 `.debug.test` 与 `.debug` 均返回 `Success`，包列表无匹配；已删除本次设备专用源副本与 UI dump，未删除用户原有测试库或云端内容。后续共同验收需重新安装最终 debug APK。
+
+交付前 `git diff --check`、本次文档本地链接检查、XML／资源键唯一性检查均通过。计划保持被忽略，未暂存或提交；`local.properties`、日志、APK、真实书库与凭据不加入版本控制。
+
+### 桌面自定义栏目实库自动化补验（2026-10-06）
+
+用户通过 Calibre 桌面程序更新 `assets/calibre-sample/` 后，针对 R09、R13、R22–R25 的导入数据基础补验。当前实库为 **3 本书、3 个 EPUB、1 个自定义布尔栏目**（ID 1，查找名 `#read_status`，显示名“阅读状态”）；书籍 ID 1 缺少布尔值行，ID 2 为是（1），ID 3 为否（0）。数据库 SHA-256：`1d099ad42c8eadf553ca2759726e2adcca8f40dc3892665beeb9409bdb7448a8`。本轮未自行更改用户样本，开始与结束核对全部 12 个源文件的散列；只读 SQLite 完整性检查为 `ok`，3 个 EPUB 的实际文件大小均与 `data.uncompressed_size` 相符。
+
+更新原实库解析测试，解除“只有 1 本书且无栏目”的旧断言，核对 3 本书的身份、中文／日文作者关系、标签、丛书与 2.5 序号、格式大小／定位、动态布尔定义和来源值，并验证完整 JSON 往返与解析前后字节不变。新增 2 项 repository 实库测试：未配置时没有已读推断，显式选择导入发现的布尔栏目后缺行／否为未读、是为已读；删除测试快照后重开私有数据库仍恢复完整缓存与栏目设置。
+
+另一项测试在独立实库副本上程序修改栏目 label 为 `renamed_read`，确认原配置失效且不能解释为全库未读，显式选择新名恢复有效，证明实现不硬编码 `read_status`；另以副本修改类型为不支持的 `composite` 或删除栏目定义，验证配置失效、拒绝无效选择及旧导入代次提交，清空选择后恢复未配置。**这些是实库副本的程序故障注入，不是 Calibre 桌面程序完成改名／删除／改类型的互操作证据**。
+
+实际执行：
+
+```bash
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
+adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.metadata.CalibreSnapshotParserTest,io.github.chenxiex.calibrecloud.metadata.MetadataRepositoryTest,io.github.chenxiex.calibrecloud.tasks.LocalSnapshotTaskHandlerTest,io.github.chenxiex.calibrecloud.tasks.OneDriveCandidateTaskHandlerTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+构建 **BUILD SUCCESSFUL（4s）**，PA6／Android 14 实际平台执行 **OK (24 tests)**（111.17s）：解析器 6 项、repository 8 项（含新增 2 项实库测试）、本地任务处理器 4 项、OneDrive 任务处理器 6 项。后端任务处理器测试为既有模拟后端回归，不算本轮真实 SAF／云盘同步实测。日志 `/tmp/calibre-step05-real-columns-build.log`、`/tmp/calibre-step05-real-columns-device-tests.log`；12 文件散列清单 `/tmp/calibre-step05-real-columns-source-manifest.json`。本轮只调整测试及就近文档，未修改生产逻辑或依赖，未重跑前轮 JVM／release／lint，不把前轮结果记录为本轮新执行。
+
+安装前用 `apkanalyzer` 核对 `.debug`／`.debug.test` 包标识和 debug 可调试状态，两包安装均 `Success`，未使用正式应用数据。debug APK SHA-256 为 `5e7676924b868a31cb1b1fd046052b80e386b4604ed9624f2abdb60bd4a66db5`；测试 APK SHA-256 为 `e3c58525278863e8f19e55a49dfca06a73b30f7cf7f86481df05be9401f21d4e`。测试结束卸载两包均 `Success`，包列表无匹配；全部 12 个仓库源文件与开始时散列相同。`git diff --check` 与本次修改文档的本地链接检查通过；未暂存、未提交，步骤 06 未开始。
+
+本轮已补齐此前缺少桌面自定义栏目书库而无法执行的**单布尔栏目实库解析／配置／来源状态／私有恢复自动化验收**。当前仅 1 个布尔栏目，仍不能验收多个布尔栏目的界面分页，也没有文本／枚举／多值文本的桌面实库；只有 3 本书，不能宣称约 286 本规模性能通过。真实 OneDrive、桌面程序实际更改栏目后的界面互操作及用户墨水屏交互等共同验收继续保留未完成。
+
+### 共同真机验收准备与结果（2026-10-06）
+
+按用户请求重新安装独立 `.debug` 包供共同验收，`apkanalyzer` 核对包名与 debuggable=true，`adb install -r` 返回 `Success`；已启动应用。设备仍为 PA6／Android 14。验收期间保留调试包，八组操作完成后已卸载（结果见本节末尾）；本轮未安装测试包，未访问正式应用数据。
+
+独立样本位于设备 `Download/calibre-step05-acceptance-20261006/`，对应工作区临时产物 `app/build/verification/calibre-step05-acceptance-20261006/` 与同名 ZIP（均被构建目录规则忽略）。`library-a` 是用户桌面样本原样副本；`library-b` 仅程序修改源库 UUID，用于身份隔离／替换，未同步改相邻 OPF，不作为桌面维护的独立库证据；`columns-paging` 程序增加 3 个布尔栏目至总计 4 个，用于最小界面分页，不作为桌面自定义栏目互操作证据。三份均为 3 本书／3 个 EPUB，SQLite 完整性为 `ok`，38 个文件推送完成，三个设备数据库 SHA-256 与准备副本逐一一致。原始样本 12 文件内容保持不变。
+
+一步步操作与预期见 [步骤 05 真机操作指南](step-05-device-guide.md)。安装与样本准备已完成；用户操作结果按下表逐项记录，OneDrive 完整导入、实际离线、分页及桌面栏目变更等未完成项不自动判为通过。
+
+| 验收组 | 实际结果与证据 | 状态 |
+| --- | --- | --- |
+| 第 1 组：本地导入、栏目选择与重启 | 用户于 2026-10-06 明确反馈“第一组通过”，确认按指南完成 library-a 本地导入、3 本书／3 个格式、布尔栏目选择及强停重启后状态保持；本项为用户操作验收反馈，未新增 ADB 检查或逐本已读界面验证。 | 通过 |
+| 第 2 组：切换书库并切回 | 用户于 2026-10-06 明确反馈“第2组通过”，确认 library-b 导入后标识与 A 不同、栏目配置未继承，切回 library-a 不同步即恢复原标识、成功时间与栏目选择；本项为用户操作验收反馈。 | 通过 |
+| 第 3 组：栏目分页与墨水屏操作 | 用户于 2026-10-06 明确反馈“第3组通过”，确认 columns-paging 的 4 个布尔栏目分两页可访问、跨页选择与强停重启后保存、清空选择恢复未配置，以及本组按钮／选中提示的墨水屏可辨认与可操作；本项为用户操作验收反馈，程序追加栏目不作为桌面创建多栏目的证据。 | 通过 |
+| 第 4 组：实际断网启动 | 用户于 2026-10-06 明确反馈“第4组通过”，确认选择 library-a 后实际关闭联网、强停并重新启动，旧书库标识、3 本书／3 个格式、成功时间和栏目选择仍恢复，无需等待联网且未自动同步；本项为用户操作验收反馈，覆盖本地书库，云端书库的实际断网恢复仍待第 6 组。 | 通过 |
+| 第 5 组：本地数据库缺失与恢复 | 用户于 2026-10-06 明确反馈“第5组通过”，确认专用 library-a 副本暂时改名 metadata.db 后显式同步显示缺失提示，旧标识、数量、成功时间与栏目保留；恢复文件名后重试成功，标识和栏目保持、成功时间更新。本项为用户操作验收反馈，不扩展为整个授权根移除时的错误分类通过。 | 通过 |
+| 第 6 组：真实 OneDrive 导入与重新登录 | 用户于 2026-10-06 明确反馈“第6组导入与重新登录通过”，确认个人 OneDrive 专用 library-a 测试目录完整导入、后端与 3 本书／3 个格式统计、栏目选择及强停重启保持，同账号同目录重新登录后再次同步成功、书库标识和栏目保持、成功时间更新。本项为用户操作验收反馈；云端实际断网与缺失恢复未包含在此反馈中。 | 通过（断网／缺失另行记录） |
+| 第 6 组：云端实际断网恢复 | 用户于 2026-10-06 明确反馈“第6组云端断网通过”，确认当前为 OneDrive 测试书库时实际关闭联网、强停并重启，旧后端、书库标识、3 本书／3 个格式、成功时间与栏目选择恢复，无需等待联网且未自动同步；本项为用户操作验收反馈。 | 通过 |
+| 第 6 组：云端数据库缺失与恢复 | 用户于 2026-10-06 明确反馈“第6组云端缺失恢复通过”，确认个人 OneDrive 专用测试目录暂时改名 metadata.db 后同步显示缺失提示，旧书库标识、3 本书／3 个格式、成功时间与栏目保留；恢复文件名后重试成功，标识和栏目保持、成功时间更新。本项为用户操作验收反馈，第 6 组导入／重新登录、实际断网与缺失恢复各子项均通过。 | 通过 |
+| 第 7 组：桌面查找名改名的首次操作 | 用户反馈桌面改栏目后删除 OneDrive 书库目录并在同路径重传；第 4 页同步提示目录或 metadata.db 不存在，第 3 页重新选择后同步成功，第 6 页未配置且可见 read_check，第 5 页标识未检查。应用按账号／drive／root item ID 定位，删除重建会创建新目录对象；该现象与原对象消失、重新选择新位置后隔离配置一致（未读取前后 item ID 实证）。本次确认改名栏目可被导入，不能证明原位置原配置的改名失效，须保留目录、覆盖数据库后补验。 | 首次操作记录；失效补验已通过 |
+| 第 7 组：保留云端目录的查找名改名补验 | 用户于 2026-10-06 对补验步骤明确反馈“已通过”：先选择 #read_check，桌面改查找名为 read_check2 后关闭 Calibre，只覆盖现有 OneDrive 测试目录的 metadata.db，不重新选择目录直接同步；确认书库标识保持、原栏目配置显示失效，显式选择 #read_check2 后恢复有效。本项为用户操作验收反馈，补齐原位置原配置的改名失效；前次删除重建目录的操作记录保留。 | 通过 |
+| 第 7 组：桌面删除已选栏目 | 用户于 2026-10-06 明确反馈“第7组删除通过”，确认桌面测试副本删除 #read_check2 并关闭 Calibre，只覆盖现有云端测试目录的 metadata.db 后直接同步，书库标识保持、配置显示失效且栏目不再列出；清空选择恢复未配置。本项为用户操作验收反馈；桌面改名与删除均通过，桌面类型变化仍未实测。 | 通过 |
+| 第 8 组：同目录不兼容替换 | 用户于 2026-10-06 明确反馈“第8组替换通过”，确认重新选择 A 不同步先恢复旧缓存与栏目，随后显式同步替换副本，3 本书／3 个格式仍正常、书库标识改变且新身份未继承旧栏目配置。本项为用户操作验收反馈；恢复原副本后的身份／栏目复用另待核对。 | 通过（恢复另行记录） |
+| 第 8 组：恢复原副本 | 用户于 2026-10-06 明确反馈“第8组恢复通过”，确认恢复 A 的备份后显式同步，找回原 A 的书库标识、3 本书／3 个格式与 #read_status 栏目选择，成功时间更新。本项为用户操作验收反馈。 | 通过 |
+| 代表性规模及缺少栏目类型的桌面实库 | 约 286 本书响应、桌面创建多个布尔栏目及文本／枚举／多值文本的实库解析、桌面类型变化未提供对应样本或操作结果。程序 fixture／分页副本不替代这些实库验收。 | 待验收 |
+
+第 8 组准备：设备恢复无线 ADB 后（PA6，连接 `192.168.0.72:38165`），将设备专用 library-a 完整 12 文件备份到忽略目录 `app/build/verification/step05-before-replacement-20261006/library-a/`，核对与原准备 A 逐文件散列相同。A 与 B 的相邻书籍／OPF／封面等文件全部一致，仅 metadata.db 不同，因此只覆盖设备 library-a 内的数据库即可使完整内容等同 B；保留原授权根目录对象。设备更新后的数据库 SHA-256 为 `0043c467ca8a1b9fcc0fd75c5138aa018bce455bb0d479f47c2443f7eed4c2af`，与准备 B 一致；不修改仓库源样本或云端内容。尚未操作应用同步，用户应先选择 A 但不同步，查看已保存的旧身份，再显式同步检查替换后的身份与配置隔离；通过后恢复备份。
+
+用户确认替换通过后，已通过 ADB 将备份 metadata.db 恢复至设备同一 library-a 目录，推送成功；设备数据库 SHA-256 恢复为 `1d099ad42c8eadf553ca2759726e2adcca8f40dc3892665beeb9409bdb7448a8`，与原 A 备份一致。尚未替用户触发应用同步；恢复后的原书库身份及栏目复用等待用户下一次显式同步核对。
+
+八组共同操作均已收到用户通过反馈，本地与真实个人 OneDrive 的导入、重启／实际离线、缺失恢复、栏目分页、桌面改名／删除，以及同目录替换与恢复均按实际子项记录。结束前设备 A 数据库散列再次与原备份一致。按项目约束卸载独立 debug 包返回 `Success`，包列表无匹配（本轮未安装测试包），已删除仅本轮设备专用 `Download/calibre-step05-acceptance-20261006/`，检查目录不存在；工作区忽略目录中的 ZIP 与备份保留以供后续准备样本。未删除用户云端测试目录或个人书库，未操作正式应用。已通过八组不代表缺少样本的实库与规模项目通过；步骤 05 整体验收结论及提交仍待用户明确确认，未提交、未开始步骤 06。
+
+### 步骤 05 提交确认（2026-10-06）
+
+用户在收到八组通过结果、剩余样本补验和设备清理状态后明确要求“提交吧”，据此提交步骤 05 当前实现、测试和文档。代表性规模、桌面其他栏目类型／多布尔栏目及类型变化不据此记为验证通过，仍保留补验；后续文件副本、清理、后台与写回仍未实施。本次提交前只作必要静态与暂存范围检查，沿用前述实际构建／测试证据，未重复运行或声称新增运行。
