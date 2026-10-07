@@ -210,9 +210,9 @@ class LibraryIndexTest {
     }
 
     @Test
-    fun defaultFormatFollowsPriorityCacheFirstThenSourceAndReportsMissingFormatsWithoutZeroSizes() {
+    fun defaultFormatFollowsPriorityCacheFirstThenSourceAndMissingAuthorsAndSizesStayEmpty() {
         val a = book(1, "A", formats = listOf(pdf to null, mobi to 5L, epub to 10L))
-        val none = book(2, "None", formats = emptyList())
+        val none = book(2, "None", authors = emptyList(), formats = emptyList())
         val gone = book(3, "Gone", formats = listOf(epub to 1L))
         val index = library(listOf(a, none, gone))
         fun row(id: Long, request: LibraryRequest, copies: List<DownloadedCopy> = emptyList()) =
@@ -227,19 +227,13 @@ class LibraryIndexTest {
         assertEquals(DefaultFormat(mobi, true, 5, false), row(1, base, listOf(copy(a, mobi, size = null))).defaultFormat)
         assertEquals(NoFormatReason.NO_FORMAT, row(2, base).noFormat)
         assertNull(row(2, base).defaultFormat)
+        // A missing author stays an empty list; nothing is substituted.
+        assertTrue(row(2, base).authors.isEmpty())
+        assertEquals(libraryId, row(2, base).key.libraryId)
         // A cached copy whose source format vanished, or whose source is confirmed missing, is flagged.
         assertEquals(DefaultFormat(epub, true, 1, true), row(3, base, listOf(copy(gone, pdf, 9), copy(gone, epub, 1, SourceAvailability.CONFIRMED_MISSING))).defaultFormat)
         assertEquals(DefaultFormat(pdf, true, 9, true), row(3, base, listOf(copy(gone, pdf, 9))).defaultFormat)
         assertTrue(row(3, base, listOf(copy(gone, epub, 1, SourceAvailability.CONFIRMED_MISSING))).defaultFormat!!.sourceMissing)
-    }
-
-    @Test
-    fun missingAuthorAndUnknownSizeStayEmptyInRows() {
-        val a = book(1, "A", authors = emptyList(), formats = listOf(epub to null))
-        val row = (library(listOf(a)).query(base, emptyList()) as LibraryQueryResult.Books).rows.single()
-        assertTrue(row.authors.isEmpty())
-        assertNull(row.defaultFormat!!.sizeBytes)
-        assertEquals(libraryId, row.key.libraryId)
     }
 
     @Test

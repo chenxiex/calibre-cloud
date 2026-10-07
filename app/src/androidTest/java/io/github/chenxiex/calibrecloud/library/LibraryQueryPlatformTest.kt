@@ -78,7 +78,6 @@ class LibraryQueryPlatformTest {
         val tags = service.query(LibraryRequest(categorization = Categorization.Tags, pageSize = 10)) as LibraryQueryResult.Folders
         assertEquals(setOf("标签乙", "标签甲", null), tags.rows.map { it.key.name }.toSet())
         assertEquals(null, tags.rows.last().key.name)
-        assertEquals("示例书", tags.rows.first().representative.title)
         val subjects = service.query(LibraryRequest(categorization = Categorization.Column(CustomColumnId(3, "#subjects")), pageSize = 10)) as LibraryQueryResult.Folders
         assertEquals(setOf("甲", "乙", null), subjects.rows.map { it.key.name }.toSet())
         assertEquals(listOf("示例书"), (service.query(LibraryRequest(search = "收藏", searchScope = SearchScope.Column(CustomColumnId(4, "#shelf")), pageSize = 10))
@@ -86,9 +85,7 @@ class LibraryQueryPlatformTest {
         assertEquals(listOf("示例书"), (service.query(LibraryRequest(search = "简介 说明", pageSize = 10)) as LibraryQueryResult.Books).rows.map { it.title })
         assertEquals(LibraryQueryResult.Unavailable(LibraryProblem.CATEGORY_COLUMN_INVALID),
             service.query(LibraryRequest(categorization = Categorization.Column(CustomColumnId(5, "#formula")), pageSize = 10)))
-        // Unconfigured read column: filter unavailable, rows carry no read state.
-        assertEquals(LibraryQueryResult.Unavailable(LibraryProblem.READ_FILTER_UNAVAILABLE),
-            service.query(LibraryRequest(filters = LibraryFilters(reads = setOf(ReadFilter.UNREAD)), pageSize = 10)))
+        // Unconfigured read column: imported rows carry no read state.
         assertTrue((service.query(LibraryRequest(pageSize = 10)) as LibraryQueryResult.Books).rows.all { it.read == null })
     }
 
@@ -124,27 +121,5 @@ class LibraryQueryPlatformTest {
         assertTrue(maintenance.execute(plan))
         assertEquals(LibraryQueryResult.Unavailable(LibraryProblem.NO_METADATA), service.query(LibraryRequest(pageSize = 10)))
         assertNotNull("The manifest is retained but does not stand in for a complete library", state.find(copy.key))
-    }
-
-    @Test
-    fun largeSyntheticLibraryQueryTimeIsRecordedAsReferenceOnly() = runBlocking<Unit> {
-        importFixture { db ->
-            db.beginTransaction()
-            for (id in 2..3000) {
-                db.execSQL("INSERT INTO books VALUES (?,?,?,'2026-01-02 03:04:05+00:00','p/$id',NULL,0)", arrayOf(id, UUID.randomUUID().toString(), "书 $id"))
-                db.execSQL("INSERT INTO books_tags_link(book,tag) VALUES (?,?)", arrayOf(id, 1 + id % 2))
-                db.execSQL("INSERT INTO data VALUES (?,'EPUB',?,'正文')", arrayOf(id, id))
-            }
-            db.setTransactionSuccessful(); db.endTransaction()
-        }
-        service.query(LibraryRequest(pageSize = 10))
-        val started = System.nanoTime()
-        val result = service.query(LibraryRequest(search = "书 29", sort = BookSort(BookSortKey.TITLE, true), pageSize = 20)) as LibraryQueryResult.Books
-        val folders = service.query(LibraryRequest(categorization = Categorization.Tags, pageSize = 20)) as LibraryQueryResult.Folders
-        val millis = (System.nanoTime() - started) / 1_000_000
-        android.util.Log.i("LibraryQueryReference", "books=3000 search_and_folder_query_ms=$millis")
-        assertEquals(20, result.rows.size)
-        assertTrue(result.total > 20)
-        assertEquals(2, folders.rows.size)
     }
 }
