@@ -53,6 +53,32 @@ python3 .agents/skills/android-device-verification/scripts/android_ui.py --seria
 
 这是“已导航到测试目录后的 SAF 确认”模板，所有 `ACTUAL_*` 和 `EXACT_*` 必须换成本轮元素查询取得的值，不能直接执行。不要假设厂商选择器的包名、语言或 ID 一样。运行前核对专用测试副本的提供方、完整目录位置和当前 debug 应用，确认弹窗也需核对接收方和范围；仅匹配末级目录名或“允许”不足以证明选择范围。页面未提供足够范围信息时交回主 agent，不让轻量角色猜测。确认返回应用后，再用现有授权测试／状态查询确认真实持久授权和所选位置。这段流程不负责登录、猜测目录或准备测试数据。
 
+## 超时与恢复
+
+全局参数必须写在 `inspect`／`wait`／`tap`／`flow`／`device-profile` 子命令之前，适用于整次调用；无需复制或修改脚本：
+
+```bash
+python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL --query-timeout 30 --query-retries 1 --artifacts app/build/verification/ui-helper/run-02 flow --elements-only --file app/build/verification/ui-helper/flow.json
+```
+
+- `--query-timeout`：单条 ADB 读取命令的预算，默认 30 秒，必须是大于 0、至多 120 的有限数。适用于 UI 树生成、XML 读取、焦点及设备配置查询。它不是一次点击或整个 flow 的总时限；双快照涉及多条查询。
+- `--query-retries`：一次完整只读检查在 `adb_timeout` 后的额外尝试次数，默认 1，允许 0–2。每次恢复前最多等待 0.2 秒。点击前的重试丢弃之前的检查结果，重新核对双快照、页面和焦点；坐标路径还重新核对设备配置。`inspect` 和 `device-profile` 重新执行完整查询。连接失败 `adb_command_failed`、焦点／页面变化、选择器歧义等错误不自动重试。
+- 子命令 `--timeout`／flow 步骤 `timeout`：后置条件的总查询等待预算，默认 10 秒。焦点、UI 树生成、XML 读取、轮询和重试共用该预算，每条查询还受 `--query-timeout` 限制；增加查询预算不会自动增加后置等待。慢设备可在已核对 flow 中设置例如 `timeout: 45`。输入命令单独最多 15 秒，永远只发送一次。
+
+超时只终止本地 ADB 等待，不能保证远端 UI 查询进程已经退出。helper 不自动杀远端进程，不因超时切换 serial、不绕过页面检查、不重放整段 flow。重试次数耗尽时停止，由主 agent 根据诊断处理连接或页面状态，避免反复加长时限。
+
+每次 dump 都尝试删除本次唯一临时 XML，清理单独最多 5 秒。因此实际运行可超过后置查询预算；重试也可能各自发生一次清理。清理失败记录在 `cleanup_errors`，保留原始查询错误或已经取得的有效 XML，不把清理超时伪装成点击失败。
+
+短结果包含以下诊断，成功和失败都保存；不包含命令参数、屏幕文字、路径、stdout／stderr 或凭据：
+
+- `adb_diagnostics`：最近 20 条 ADB 命令的 `command` 类别（例如 `ui_dump`、`ui_read`、`focus`、`tap`、`ui_cleanup`）、`stage`（例如 `precheck`、`input`、`postcondition`）、`elapsed_seconds`、`timeout_seconds` 和 `status`。
+- `last_adb_failure`：最后一次 ADB 失败的同样摘要，避免恢复后被后续成功查询挤出最近列表；没有失败时为 `null`。
+- `read_retries`：本次调用实际安排的只读重试次数。`cleanup_errors` 单独报告最多 20 个清理错误码。
+
+等待预算耗尽返回 `postcondition_timeout`，底层 ADB 超时仍保留在诊断中。`action_may_have_executed=true` 时只可查询当前状态，不能重新发出未知结果的点击；helper 在这种状态下的自动恢复也仅查询后置条件。`false` 时也不能直接重放整段流程：先核对现状，再仅执行尚未完成且范围已确认的步骤。`completed_steps` 表示已经确认的步骤数。
+
+已恢复的查询超时汇总记录；只有恢复耗尽、连接需要处理或动作结果未知时单独报告用户。先依诊断区分查询、输入与清理，不能仅凭 `adb_timeout` 判断是无线网络、墨水屏或应用缺陷。
+
 ## 坐标与截图
 
 优先复用选择器。需要设备坐标备用时，先用 `device-profile` 查询 build fingerprint、尺寸、密度、旋转、字体缩放和导航模式，保存原样返回值。再在 `flow` 中使用以下步骤结构；`device` 不能使用示例值，`point` 是经过实测的屏幕像素坐标：

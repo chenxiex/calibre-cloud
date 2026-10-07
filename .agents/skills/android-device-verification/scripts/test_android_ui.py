@@ -140,7 +140,7 @@ class UiTests(unittest.TestCase):
         adb = ui.Adb('serial; unsafe')
         with patch.object(adb, 'run', return_value=b'') as run:
             adb.shell('echo', 'a;$(touch /tmp/unwanted)')
-        run.assert_called_once_with(['shell', "echo 'a;$(touch /tmp/unwanted)'"], 15)
+        run.assert_called_once_with(['shell', "echo 'a;$(touch /tmp/unwanted)'"], None)
 
     def test_local_arguments_do_not_use_shell(self):
         with patch.object(ui.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, b'', b'')) as run:

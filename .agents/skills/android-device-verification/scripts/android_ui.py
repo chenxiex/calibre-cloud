@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -63,7 +64,17 @@ def device_lock(serial):
 
 
 class Adb:
-    def __init__(self, serial, artifacts=None, save_xml=False):
+    def __init__(self, serial, artifacts=None, save_xml=False, query_timeout=30, query_retries=1):
+        self.query_timeout = validate_timeout(query_timeout)
+        if type(query_retries) is not int or not 0 <= query_retries <= 2:
+            raise UiError('query_retries_must_be_between_0_and_2')
+        self.query_retries = query_retries
+        self.query_deadline = None
+        self.stage = 'query'
+        self.diagnostics = []
+        self.cleanup_errors = []
+        self.read_retries = 0
+        self.last_adb_failure = None
         self.serial = serial
         self.save_xml = save_xml
         self.artifacts = allowed_output(artifacts) if artifacts else None
@@ -73,21 +84,50 @@ class Adb:
         self.action_may_have_executed = False
         self.completed_steps = 0
 
-    def run(self, args, timeout=15):
+    def run(self, args, timeout=None):
+        timeout = self.query_timeout if timeout is None else timeout
+        parts = shlex.split(args[1]) if args[0] == 'shell' else args
+        command = 'other'
+        for prefix, category in ((['uiautomator', 'dump'], 'ui_dump'),
+                (['exec-out', 'cat'], 'ui_read'), (['dumpsys', 'window'], 'focus'),
+                (['rm', '-f'], 'ui_cleanup'), (['input', 'tap'], 'tap'),
+                (['exec-out', 'screencap'], 'screenshot'), (['dumpsys', 'input'], 'device_profile'),
+                (['getprop'], 'device_profile'), (['wm'], 'device_profile'),
+                (['settings', 'get'], 'device_profile')):
+            if parts[:len(prefix)] == prefix:
+                command = category
+                break
+        # Cleanup has its own short budget, including after an expired wait.
+        if self.query_deadline is not None and command != 'ui_cleanup':
+            remaining = self.query_deadline - time.monotonic()
+            if remaining <= 0:
+                raise UiError('postcondition_timeout')
+            timeout = min(timeout, remaining)
+        started = time.monotonic()
+        status = 'ok'
         try:
             return subprocess.run(['adb', '-s', self.serial, *args], stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, check=True, timeout=timeout).stdout
         except subprocess.TimeoutExpired as exc:
-            raise UiError('adb_timeout') from exc
+            status = 'adb_timeout'
+            raise UiError(status) from exc
         except (subprocess.CalledProcessError, OSError) as exc:
-            # ADB diagnostics can include paths, URLs or screen content.
-            raise UiError('adb_command_failed') from exc
+            # Never retain argv, stdout or stderr: they can contain credentials/screen text.
+            status = 'adb_command_failed'
+            raise UiError(status) from exc
+        finally:
+            self.diagnostics.append({'command': command, 'stage': self.stage,
+                                     'elapsed_seconds': round(time.monotonic() - started, 3),
+                                     'timeout_seconds': timeout, 'status': status})
+            if status != 'ok':
+                self.last_adb_failure = self.diagnostics[-1]
+            self.diagnostics[:] = self.diagnostics[-20:]
 
-    def shell(self, *args, timeout=15):
+    def shell(self, *args, timeout=None):
         # adb shell performs an additional remote shell parse, even with argv locally.
         return self.run(['shell', shlex.join(str(a) for a in args)], timeout)
 
-    def dump(self, timeout=15):
+    def dump(self, timeout=None):
         remote = '/data/local/tmp/calibre-ui-' + uuid.uuid4().hex + '.xml'
         try:
             self.shell('uiautomator', 'dump', remote, timeout=timeout)
@@ -101,7 +141,12 @@ class Adb:
                 allowed_output(self.artifacts / f'ui-{self.counter:04d}-{uuid.uuid4().hex}.xml').write_bytes(raw)
             return root
         finally:
-            self.shell('rm', '-f', remote, timeout=5)
+            try:
+                self.shell('rm', '-f', remote, timeout=5)
+            except UiError as exc:
+                # Preserve the original query failure or valid XML; report cleanup separately.
+                self.cleanup_errors.append(str(exc))
+                self.cleanup_errors[:] = self.cleanup_errors[-20:]
 
     def foreground_package(self):
         raw = self.shell('dumpsys', 'window').decode(errors='replace')
@@ -114,7 +159,7 @@ class Adb:
         return match.group(1)
 
     def tap(self, x, y):
-        self.shell('input', 'tap', str(x), str(y))
+        self.shell('input', 'tap', str(x), str(y), timeout=15)
 
     def screenshot(self):
         if not self.artifacts:
@@ -206,37 +251,76 @@ def choose(root, selector, clickable=False):
 
 
 def validate_timeout(timeout):
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 < timeout <= 120:
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 120:
         raise UiError('timeout_must_be_between_0_and_120')
     return timeout
+
+
+@contextlib.contextmanager
+def query_context(adb, stage, deadline=None):
+    previous_stage = getattr(adb, 'stage', 'query')
+    previous_deadline = getattr(adb, 'query_deadline', None)
+    adb.stage, adb.query_deadline = stage, deadline
+    try:
+        yield
+    finally:
+        adb.stage, adb.query_deadline = previous_stage, previous_deadline
+
+
+def read_operation(adb, operation, stage, deadline=None):
+    """Retry only a complete read check, never input or an entire flow step."""
+    with query_context(adb, stage, deadline):
+        for attempt in range(getattr(adb, 'query_retries', 0) + 1):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise UiError('postcondition_timeout')
+            try:
+                return operation()
+            except UiError as exc:
+                if str(exc) == 'adb_timeout' and deadline is not None and time.monotonic() >= deadline:
+                    raise UiError('postcondition_timeout') from exc
+                # Connection errors and page/selector mismatches need operator diagnosis.
+                if str(exc) != 'adb_timeout' or attempt >= getattr(adb, 'query_retries', 0):
+                    raise
+                adb.read_retries = getattr(adb, 'read_retries', 0) + 1
+                remaining = float('inf') if deadline is None else max(0, deadline - time.monotonic())
+                time.sleep(min(.2, remaining))
 
 
 def wait_for(adb, selector, timeout=10, poll=0.4, expected_package=None, transition_package=None):
     validate_selector(selector)
     deadline = time.monotonic() + validate_timeout(timeout)
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise UiError('postcondition_timeout')
+    allowed_packages = {expected_package, transition_package} - {None}
+
+    def observation():
         before = None
-        allowed_packages = {expected_package, transition_package} - {None}
         if expected_package:
             before = adb.foreground_package()
             if before not in allowed_packages:
                 raise UiError('foreground_package_mismatch')
-        root = adb.dump(timeout=min(15, remaining))
-        after = None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise UiError('postcondition_timeout')
+        root = adb.dump(timeout=min(getattr(adb, 'query_timeout', 30), remaining))
         if expected_package:
             after = adb.foreground_package()
             if after not in allowed_packages:
                 raise UiError('foreground_package_mismatch')
+            if before != after or after != expected_package:
+                return None
         try:
             node = choose(root, selector)
-            if not expected_package or before == after == expected_package:
-                return {'bounds': bounds(node)}
+            return {'bounds': bounds(node)}
         except UiError as exc:
             if str(exc) not in {'selector_not_found', 'node_disabled', 'node_not_visible'}:
                 raise
+            return None
+
+    while True:
+        result = read_operation(adb, observation, 'postcondition', deadline)
+        if time.monotonic() >= deadline:
+            raise UiError('postcondition_timeout')
+        if result is not None:
+            return result
         time.sleep(min(poll, max(0, deadline - time.monotonic())))
 
 
@@ -307,21 +391,26 @@ def action_target(root, selector):
 def tap(adb, selector, postcondition=None, timeout=10, precondition=None):
     validate_tap_conditions(selector, precondition, postcondition)
     validate_timeout(timeout)
-    first = checked_snapshot(adb, selector['package'])
-    pre = choose(first, precondition)
-    point, target_signature, leaf = action_target(first, selector)
-    if pre is leaf:
-        raise UiError('independent_precondition_required')
-    second = checked_snapshot(adb, selector['package'])
-    latest_pre = choose(second, precondition)
-    latest_point, latest_signature, latest_leaf = action_target(second, selector)
-    if latest_pre is latest_leaf:
-        raise UiError('independent_precondition_required')
-    if signature(pre) != signature(latest_pre) or (point, target_signature) != (latest_point, latest_signature):
-        raise UiError('page_changed_before_tap')
-    check_focus(adb, selector['package'])
+    def precheck():
+        first = checked_snapshot(adb, selector['package'])
+        pre = choose(first, precondition)
+        point, target_signature, leaf = action_target(first, selector)
+        if pre is leaf:
+            raise UiError('independent_precondition_required')
+        second = checked_snapshot(adb, selector['package'])
+        latest_pre = choose(second, precondition)
+        latest_point, latest_signature, latest_leaf = action_target(second, selector)
+        if latest_pre is latest_leaf:
+            raise UiError('independent_precondition_required')
+        if signature(pre) != signature(latest_pre) or (point, target_signature) != (latest_point, latest_signature):
+            raise UiError('page_changed_before_tap')
+        check_focus(adb, selector['package'])
+        return point
+
+    point = read_operation(adb, precheck, 'precheck')
     adb.action_may_have_executed = True
-    adb.tap(*point)
+    with query_context(adb, 'input'):
+        adb.tap(*point)
     wait_for(adb, postcondition, timeout, expected_package=postcondition['package'], transition_package=selector['package'])
     adb.action_may_have_executed = False
     return {'tapped': True, 'postcondition_checked': True}
@@ -355,20 +444,25 @@ def validate_profile(profile):
 
 def coordinate(adb, profile, postcondition, timeout):
     expected, point = validate_profile(profile)
+    package = profile['precondition']['package']
     validate_action_selector(postcondition)
     validate_timeout(timeout)
-    if adb.fingerprint() != expected:
-        raise UiError('device_profile_mismatch')
-    package = profile['precondition']['package']
-    first = choose(checked_snapshot(adb, package), profile['precondition'])
-    second = choose(checked_snapshot(adb, package), profile['precondition'])
-    if signature(first) != signature(second):
-        raise UiError('page_changed_before_tap')
-    if adb.fingerprint() != expected:
-        raise UiError('device_profile_mismatch')
-    check_focus(adb, package)
+    def precheck():
+        if adb.fingerprint() != expected:
+            raise UiError('device_profile_mismatch')
+        first = choose(checked_snapshot(adb, package), profile['precondition'])
+        second = choose(checked_snapshot(adb, package), profile['precondition'])
+        if signature(first) != signature(second):
+            raise UiError('page_changed_before_tap')
+        if adb.fingerprint() != expected:
+            raise UiError('device_profile_mismatch')
+        check_focus(adb, package)
+        return None
+
+    read_operation(adb, precheck, 'precheck')
     adb.action_may_have_executed = True
-    adb.tap(*point)
+    with query_context(adb, 'input'):
+        adb.tap(*point)
     wait_for(adb, postcondition, timeout, expected_package=postcondition['package'], transition_package=package)
     adb.action_may_have_executed = False
     return {'tapped': True, 'postcondition_checked': True}
@@ -420,7 +514,7 @@ def run_flow(adb, flow, elements_only=False):
 def inspect_nodes(adb, selector, include_labels=False, limit=20):
     if type(limit) is not int or not 1 <= limit <= 20:
         raise UiError('inspect_limit_must_be_between_1_and_20')
-    found = matches(adb.dump(), selector)
+    found = matches(read_operation(adb, adb.dump, 'inspect'), selector)
     result = []
     for node in found[:limit]:
         detail = {'resource_id': node.get('resource-id', ''), 'package': node.get('package', ''),
@@ -432,6 +526,13 @@ def inspect_nodes(adb, selector, include_labels=False, limit=20):
     return {'count': len(found), 'nodes': result, 'truncated': len(found) > limit}
 
 
+def diagnostic_result(adb):
+    return {'adb_diagnostics': getattr(adb, 'diagnostics', []),
+            'read_retries': getattr(adb, 'read_retries', 0),
+            'cleanup_errors': getattr(adb, 'cleanup_errors', []),
+            'last_adb_failure': getattr(adb, 'last_adb_failure', None)}
+
+
 def save_result(adb, result):
     if adb is not None and adb.artifacts:
         path = allowed_output(adb.artifacts / ('result-' + uuid.uuid4().hex + '.json'))
@@ -441,6 +542,8 @@ def save_result(adb, result):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--serial', required=True)
+    parser.add_argument('--query-timeout', type=float, default=30, help='per ADB read command budget in seconds (0 < value <= 120)')
+    parser.add_argument('--query-retries', type=int, default=1, help='additional read checks on adb_timeout (0..2); never retries input')
     parser.add_argument('--artifacts')
     parser.add_argument('--save-xml', action='store_true', help='explicitly retain full raw UI XML; requires artifacts and authorized page capture')
     parser.add_argument('--screenshot', action='store_true', help='explicitly save one screenshot after operation')
@@ -468,13 +571,13 @@ def main():
             raise UiError('save_xml_requires_artifacts')
         if args.screenshot and not args.artifacts:
             raise UiError('screenshot_requires_artifacts')
-        adb = Adb(args.serial, args.artifacts, args.save_xml)
+        adb = Adb(args.serial, args.artifacts, args.save_xml, args.query_timeout, args.query_retries)
         artifact_path = str(adb.artifacts) if adb.artifacts else None
         with device_lock(args.serial):
             if args.command == 'flow':
                 result = run_flow(adb, json.loads(Path(args.file).read_text()), args.elements_only)
             elif args.command == 'device-profile':
-                result = adb.fingerprint()
+                result = read_operation(adb, adb.fingerprint, 'device_profile')
             else:
                 selector = validate_selector(json.loads(args.selector))
                 if args.command == 'inspect':
@@ -488,7 +591,7 @@ def main():
                 result['screenshot'] = adb.screenshot()
         if artifact_path:
             result['artifacts'] = artifact_path
-        result = {'ok': True, **result}
+        result = {'ok': True, **result, **diagnostic_result(adb)}
         save_result(adb, result)
         print(json.dumps(result, ensure_ascii=False))
         return 0
@@ -496,7 +599,7 @@ def main():
         error = str(exc) if isinstance(exc, UiError) else 'invalid_input_or_file'
         result = {'ok': False, 'error': error,
                   'action_may_have_executed': bool(getattr(adb, 'action_may_have_executed', False)),
-                  'completed_steps': getattr(adb, 'completed_steps', 0)}
+                  'completed_steps': getattr(adb, 'completed_steps', 0), **diagnostic_result(adb)}
         if artifact_path:
             result['artifacts'] = artifact_path
         try:
