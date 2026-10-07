@@ -51,6 +51,91 @@ class UiTests(unittest.TestCase):
 
 
 
+    def test_foreground_reads_global_window_focus_when_windows_subset_omits_it(self):
+        adb = ui.Adb('offline')
+        focused = b'  mCurrentFocus=Window{abc123 u0 test.app/test.app.MainActivity}\n'
+        with patch.object(adb, 'shell', side_effect=lambda *args: focused if args == ('dumpsys', 'window') else b'Window list only') as shell:
+            self.assertEqual('test.app', adb.foreground_package())
+        shell.assert_called_once_with('dumpsys', 'window')
+
+    def test_foreground_rejects_absent_or_ambiguous_focus(self):
+        adb = ui.Adb('offline')
+        focused = b'  mCurrentFocus=Window{abc123 u0 test.app/test.app.MainActivity}\n'
+        for raw in (b'no focus', focused + focused, b'  mCurrentFocus=null\n'):
+            with self.subTest(raw=raw), patch.object(adb, 'shell', return_value=raw):
+                with self.assertRaisesRegex(ui.UiError, 'foreground_unavailable'):
+                    adb.foreground_package()
+
+    def fingerprint_with_outputs(self, input_dump, display_dump=b''):
+        adb = ui.Adb('offline')
+        outputs = {
+            ('dumpsys', 'input'): input_dump,
+            ('dumpsys', 'window', 'displays'): display_dump,
+            ('getprop', 'ro.build.fingerprint'): b'fake-build',
+            ('wm', 'size'): b'Physical size: 1080x1920',
+            ('wm', 'density'): b'Physical density: 320',
+            ('settings', 'get', 'system', 'font_scale'): b'1.0',
+            ('settings', 'get', 'secure', 'navigation_mode'): b'2',
+        }
+        with patch.object(adb, 'shell', side_effect=lambda *args: outputs[args]):
+            return adb.fingerprint()
+
+    def test_fingerprint_keeps_surface_orientation_without_window_fallback(self):
+        for rotation in range(4):
+            with self.subTest(rotation=rotation):
+                result = self.fingerprint_with_outputs(f'SurfaceOrientation: {rotation}\n'.encode())
+                self.assertEqual(rotation, result['rotation'])
+                self.assertEqual('fake-build', result['build_fingerprint'])
+
+    def test_fingerprint_api34_uses_default_display_numeric_rotation(self):
+        display = b"""WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)
+  Display: mDisplayId=0 (organized)
+  DisplayRotation
+    mRotation=0 mDeferredRotationPauseCount=0
+    mOverrideConfig={mRotation=ROTATION_0}
+    mFullConfiguration={mRotation=undefined}
+"""
+        result = self.fingerprint_with_outputs(b'Input Manager State without orientation', display)
+        self.assertEqual(0, result['rotation'])
+
+    def test_fingerprint_fallback_accepts_all_four_numeric_rotations(self):
+        for rotation in range(4):
+            with self.subTest(rotation=rotation):
+                display = f'  Display: mDisplayId=0\n    mRotation={rotation} mDeferredRotationPauseCount=0\n'.encode()
+                self.assertEqual(rotation, self.fingerprint_with_outputs(b'no orientation', display)['rotation'])
+
+    def test_fingerprint_fallback_rejects_missing_invalid_and_configuration_rotations(self):
+        for display in (
+            b'  Display: mDisplayId=0\n    mOverrideConfig={mRotation=ROTATION_0}\n',
+            b'  Display: mDisplayId=0\n    mRotation=undefined\n',
+            b'  Display: mDisplayId=0\n    mRotation=4 mDeferredRotationPauseCount=0\n',
+            b'    mRotation=0 mDeferredRotationPauseCount=0\n',
+            b'  Display: mDisplayId=1\n    mRotation=0 mDeferredRotationPauseCount=0\n',
+        ):
+            with self.subTest(display=display), self.assertRaisesRegex(ui.UiError, 'rotation_unavailable'):
+                self.fingerprint_with_outputs(b'no orientation', display)
+
+    def test_fingerprint_fallback_rejects_ambiguous_numeric_rotation_or_default_display(self):
+        for display in (
+            b'  Display: mDisplayId=0\n    mRotation=0\n    mRotation=1\n',
+            b'  Display: mDisplayId=0\n    mRotation=0\n    mRotation=0\n',
+            b'  Display: mDisplayId=0\n    mRotation=0\n  Display: mDisplayId=1\n    mRotation=1\n',
+            b'  Display: mDisplayId=0\n  Display: mDisplayId=0\n    mRotation=0\n',
+            b'  Display: mDisplayId=0\n  Display: mDisplayId=1\n    mRotation=0\n',
+        ):
+            with self.subTest(display=display), self.assertRaisesRegex(ui.UiError, 'rotation_unavailable'):
+                self.fingerprint_with_outputs(b'no orientation', display)
+
+    def test_fingerprint_rejects_ambiguous_or_invalid_surface_orientation(self):
+        for input_dump in (
+            b'SurfaceOrientation: 0\nSurfaceOrientation: 1\n',
+            b'SurfaceOrientation: 4\n',
+            b'SurfaceOrientation: -1\n',
+            b'SurfaceOrientation: invalid\n',
+        ):
+            with self.subTest(input_dump=input_dump), self.assertRaisesRegex(ui.UiError, 'rotation_unavailable'):
+                self.fingerprint_with_outputs(input_dump)
+
     def test_remote_arguments_are_shell_quoted(self):
         adb = ui.Adb('serial; unsafe')
         with patch.object(adb, 'run', return_value=b'') as run:

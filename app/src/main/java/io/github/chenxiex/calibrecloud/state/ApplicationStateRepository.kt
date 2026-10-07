@@ -152,7 +152,7 @@ class ApplicationStateRepository(
             require(identity.location.backend == copy.savedVersion.backend)
             if (taskId != null) {
                 if (current(this)?.identity != identity) return@transaction false
-                val allowed = rawQuery("SELECT control FROM queued_tasks WHERE task_id = ?", arrayOf(taskId.toString())).use {
+                val allowed = rawQuery("SELECT control FROM queued_tasks WHERE task_id = ? AND revoked = 0", arrayOf(taskId.toString())).use {
                     it.moveToFirst() && it.isNull(0)
                 }
                 if (!allowed) return@transaction false
@@ -181,6 +181,11 @@ class ApplicationStateRepository(
             offset += page.size
         }
         files.collectUnreferenced(libraryId, retained)
+    } }
+
+    /** Retire only the generations frozen by scoped cleanup, preserving unrelated pending publication. */
+    internal suspend fun retireCopies(locations: Set<CompleteCopyLocation>) = withContext(ioDispatcher) { copyAccess.withLock {
+        locations.forEach { files.retire(it) }
     } }
 
     /** Only an explicit source check changes this field; transport/auth failures never call it. */
@@ -250,9 +255,9 @@ class ApplicationStateRepository(
     private fun cachedIdentity(db: SQLiteDatabase, location: LibraryLocation): LibraryIdentity? {
         val values = locationValues(location)
         return db.rawQuery("""
-            SELECT b.library_id FROM library_bindings b JOIN metadata_imports m ON b.library_id = m.library_id
+            SELECT b.library_id FROM library_bindings b JOIN library_preferences m ON b.library_id = m.library_id
             WHERE b.backend = ? AND b.authority = ? AND b.root_id = ? AND b.account_id = ? AND b.drive_id = ?
-            ORDER BY m.imported_at DESC, m.rowid DESC LIMIT 1
+            ORDER BY m.last_imported_at DESC, m.rowid DESC LIMIT 1
         """.trimIndent(), arrayOf("backend", "authority", "root_id", "account_id", "drive_id")
             .map { values.getAsString(it) }.toTypedArray()).use {
             if (it.moveToFirst()) binding(db, LibraryId(UUID.fromString(it.getString(0)))) else null

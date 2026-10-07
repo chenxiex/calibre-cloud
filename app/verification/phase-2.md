@@ -721,3 +721,148 @@ OneDrive 新接口先解析确切图片项目，再请求该项目 `/thumbnails`
 验收后卸载 `io.github.chenxiex.calibrecloud.debug` 返回 `Success`，此前 `.debug.test` 已卸载；再次查询 debug 包前缀无匹配。仅删除本轮设备专用 `Download/calibre-step07-acceptance-20261006/` 和 `calibre-step07-ui.xml`，检查均不存在。没有操作正式应用或云端源，云端测试目录由用户决定保留或删除，工作区忽略目录内的构建／探测证据保留。本轮共同验收会话结束。
 
 本次只记录用户通过与清理，没有生产代码变化，沿用未受影响的自动检查，不重复构建／功能测试。按临时计划“用户确认通过后 commit”的门槛提交本步；提交不包含 `plan.md`、`local.properties`、构建产物、私有状态数据库或调试日志，不开始步骤 08。
+
+## 步骤 08：精确缓存清理（验收通过）
+
+对应 R03、R12、R26、R31–R35，覆盖 AC01、AC03、AC07 的本阶段清理路径。新增生产 `CacheMaintenance`、第 10 页范围确认和第 8 页单格式／全格式移除确认；提交固定完整书籍身份、格式及书库范围。清理不依赖源后端，所有源访问保持既有只读边界。
+
+Schema v5 非破坏性新增 `cache_cleanup` 日志、任务 `revoked`／候选所属库字段和独立 `library_preferences`；保留源书库 UUID、已读栏目配置与绑定，清除完整元数据后仍可复用完整副本。旧任务的发布、重试和调度检查不可撤销的失效标记；新请求在对应清理范围完成前拒绝，范围外请求可入队。事务先移除查询指针并撤销旧生产者，处理器到共享单执行安全边界后删除字节；删除失败或中断保留持久日志，在下一次恢复／调度前重试。已完成历史任务的成功记录保留，不能把清理描述成失败下载。
+
+当前库副本只按匹配清单及相应任务 checkpoint 的不可变代次回收；未匹配格式的任务、暂存和已重命名但未发布文件均保留。普通读句柄与退休代次沿用共享读取门，已有句柄继续读完整字节，最后关闭才回收。清元数据不回收书籍代次，下载源状态变为尚未确认；保留已读任务及未解决保护证据。清其它库只回收冻结的非当前身份范围，保留当前库和未解决恢复资料。多代元数据以私有所属标记回收；无归属且选择代号永久过期的旧候选输入，只作为无用任务暂存经持久日志回收，不推测书库或触及完整缓存与保护域。
+
+### 本轮已经执行的检查
+
+设备为 PA6／API 34，2026-10-07（Asia/Shanghai）。安装前核对 APK：`io.github.chenxiex.calibrecloud.debug`、debuggable=true；测试包为独立 `.debug.test`。仅准备新的 `Download/calibre-step08-acceptance-20261007/library-a`、`library-b`，来自步骤 06 的已知独立 fixture，不操作正式应用或真实书库。
+
+| 实际执行 | 结果与范围 |
+| --- | --- |
+| `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug` | 当轮生产代码 `BUILD SUCCESSFUL in 41s`，`app/build/verification/step08/scoped-build.log`；92 项 JVM，0 失败／错误／跳过；lint 0 errors、14 warnings、1 hint，其中新增 2 个建议使用 SQLite KTX 的提示；遵循既有原生 SQLite 事务风格，未屏蔽检查或变更依赖／锁 |
+| 初轮 `CacheMaintenanceTest,CoverTaskHandlerTest,MetadataRepositoryTest,ApplicationStateRepositoryTest,DurableTaskQueueTest,FormatCopyTaskHandlerTest` instrumentation | **OK (99 tests)**，612.501 秒；`app/build/verification/step08/platform.txt`。包含当时的 10 项清理测试以及受队列、schema、身份与读取影响的回归。后续精确代次回收、无归属输入／多代清理新增项须以对应定向复验补充，不能由本行提前记为通过 |
+| 专用源准备后逐文件 SHA-256 核对 | 26 个文件全部与工作区准备样本一致；`source-before.json`。这是准备时校验，清理后源完整性须另记 |
+
+首个 instrumentation 请求在安装尚未完成时返回“Unable to find instrumentation info”；待两包安装明确 `Success` 后重新执行，得到上述 99 项通过。该启动失败不记为测试通过，也不属于产品失败。
+
+新增接口／平台用例使用真实 SQLite、私有文件和确定性阶段屏障，覆盖 EPUB／PDF 隔离、冻结格式、多格式／无筛选及仅有未完成任务的格式、现存句柄、发布撤销、安全边界、保护证据、配置、书库切换、符号链接故障、持久恢复与 v4→v5 迁移。它们不访问用户源，不冒充真实 SAF／Graph 或真实进程被杀证据。真实后端探针 `CacheReadOnlyAcceptanceTest` 默认跳过，仅 `step08ReadOnly=true`、独立 debug 包及已知 `library-a`、首书固定格式路径／大小／散列核对通过后执行；在生产共享队列复制两格式、加载封面、精确移除和清元数据，清理前后只读比较源 EPUB、PDF 与 `metadata.db` 的完整字节及版本，不上传或修改源。
+
+当前未完成：候选状态修复后的定向平台复验、真实 OneDrive 清理联动、生产页面两库缓存清理与复用、人工范围说明和墨水屏体验、会话结束设备清理及用户整体确认。共同验收准备见[步骤 08 指南](step-08-device-guide.md)。未暂存、未提交，不推进步骤 09；步骤 05 已保留的实库／规模补验、第三阶段阅读器及完整批量 UI、第四阶段源写回保持原范围。
+
+### 定向复验与 helper 设备兼容
+
+该轮定向 instrumentation：`CacheMaintenanceTest,MetadataRepositoryTest,ApplicationStateRepositoryTest,CoverTaskHandlerTest#versionThreeUpgradePreservesImportedMetadataManifestAndQueuedTasks`，**OK (33 tests)**，59.543 秒，`final-platform.txt`；其中清理 13 项全部通过。补足精确 retire 下 PDF 已重命名但未发布代次保留、metadata 不回收任何 books、书籍删除失败恢复、过期无归属候选输入回收、多代同库元数据回收且保留其它库，以及真实协调器发布前阶段屏障等当轮实现路径。前述 99 项回归继续作为未受该轮差异影响的队列／下载／封面证据。
+
+移除确认文案随后精简为“确认移除：格式范围，副本数，字节数”，以独立“此书全部格式”文本表达无筛选范围，未改变维护规则。实际运行 `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`，**BUILD SUCCESSFUL in 39s**（`ui-build.log`）；仅文案／显示调整不重复整套平台回归。
+
+真实 PA6 上 helper 的 `dumpsys window windows` 查询未包含 `mCurrentFocus`，工具在点击前明确停止（action_may_have_executed=false）。先以离线测试稳定复现，再改为完整 `dumpsys window` 查询；缺失、空值和重复焦点仍被拒绝。修复前 44 项中 1 个错误，修复后 **44 项全部通过**（`helper-before.log`／`helper-after.log`）。没有放宽包名或页面检查，没有绕过元素 helper。实际目录导航中另遇一次点击前 ADB 超时，核对已完成的 Download 页面后仅继续后续步骤；“使用此文件夹”的点击已发生但系统弹窗后置 ID 选错／查询超时，未重试该点击，重新查询确定 AppCompat `com.android.documentsui:id/alertTitle` 的接收方与 `library-a` 范围后才执行新的“允许”动作。随后真实持久授权和生产同步成功，私有状态确认根为本轮 `library-a`、1 个绑定／完整导入、0 个书籍副本。工具细节记录于相邻[helper 验证记录](../../.agents/skills/android-device-verification/references/verification.md)。
+
+
+### helper 旋转兼容与真实 SAF 只读清理联动
+
+PA6／API 34 的 `dumpsys input` 未提供 `SurfaceOrientation`，helper 原先无法建立设备 profile。新增离线用例先复现：`helper-profile-before.log` 为 50 项中 2 failures、5 errors；修复后 `helper-profile-after.log` **50 项全部通过**。有明确 `SurfaceOrientation` 时仍使用原路径；仅字段缺失时，从 `dumpsys window displays` 默认 display 0 的独立数值 `mRotation` 读取旋转。默认屏、旋转值必须唯一且值为 0–3，缺失、歧义、非法值和配置文本中的旋转不能冒充证据；未放宽包名、页面或设备 profile 检查。随后 PA6 实际 `device-profile` 查询成功。本项属于 helper 兼容与守卫验证，不是应用清理 UI 或墨水屏体验通过结论。
+
+实际执行 `adb shell am instrument -w -r -e step08ReadOnly true -e class io.github.chenxiex.calibrecloud.storage.cache.CacheReadOnlyAcceptanceTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner`，当前为真实 SAF 专用 `library-a`，**OK (1 test)**，88.499 秒；日志 `app/build/verification/step08/saf-readonly.txt`。该测试调用应用容器的生产存储后端、复制／封面服务及共享持久队列／执行锁，属于真实生产服务集成检测，没有操作应用页面，也没有上传、删除或改名源文件。
+
+| 源只读对象 | 本轮真实结果 |
+| --- | --- |
+| 已知首书 EPUB | 51,734 字节，SHA-256 `ba999028397cc788894686459a59e196299e123d74617ca501218afa456b15b5` |
+| 同书 PDF | 608 字节，SHA-256 `634540ec54cc3a5ffd6698d5673134e85f46e4b4cd34549d3ed001190039e888` |
+| 根 `metadata.db` | SHA-256 `2a84bdeae960a0d8af1be06825f8739876dadf9c79360fa8cb6d94dfa35f12b1` |
+
+生产服务显式复制两格式并校验完整私有字节；只移除 EPUB 后，该格式清单／普通读取均缺失，PDF 清单、文件代次和完整字节保持。真实封面任务先发布可读取图片，清除当前元数据后 `currentImport()` 和封面普通读取均为空，PDF 仍可离线读取，最小清单源状态为 `UNCONFIRMED`；当前配置与持久已读栏目偏好保留。两轮清理前后对上述三个源对象全量读取并比较字节、版本及 SHA，全部不变。该结果补足本轮 SAF 源完整性与生产服务清理联动；不能据此确认生产页面、两库切换／其它库清理 UI、真实 Graph 或人工体验。
+
+### 新候选状态负例与修复复验
+
+在上述证据之后新增第 14 项清理测试 `otherLibraryCleanupBeforeCandidateValidationIncludesAllOldBindingsAndKeepsCandidateProtection`，验证切到尚无位置／身份的 OneDrive 候选时，仍能清理所有旧绑定缓存并保留当前候选配置与保护资料。先执行该单项稳定复现：**Tests run: 1, Failures: 1**，1.011 秒，`candidate-before.txt`；失败发生在 `requireNotNull(maintenance.previewOtherLibraries())`，候选身份为空时预览错误返回空值。本负例不记为通过。
+
+先前 13 项清理与 33 项定向回归只证明当时已执行范围，不提前覆盖本次第 14 项；后续实际修复与复验见下节。
+
+
+### 候选状态修复复验与两库 UI 检查进展
+
+修复 `OTHER_LIBRARIES` 预览在当前候选身份为空时的范围判定：不存在已验证当前库时，所有旧绑定均进入其它库范围；执行事务仍核对冻结选择代号，并重新检查当前身份为空／当前身份不属于删除范围，避免确认后配置变化扩大或误用范围。实际执行完整基线 `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`，**BUILD SUCCESSFUL in 44s**（`candidate-fixed-build.log`）；92 项 JVM，0 失败；lint 保持 0 errors、14 warnings、1 hint。随后 `CacheMaintenanceTest` instrumentation **OK (14 tests)**，16.641 秒（`candidate-fixed-platform.txt`），包含前节先复现失败的候选状态用例。第 14 项至此具有实际修复通过证据。
+
+此后新增“其它库清理 journal 存在时，当前候选请求范围保持可提交”的定向回归，实际重新打包 AndroidTest **BUILD SUCCESSFUL in 5s**（`candidate-scope-build.log`）。该新范围回归尚未执行 instrumentation，不能以构建成功记为平台测试通过；构建后的对应新差异仍待定向验证。
+
+通过元素 helper 操作生产页面，已在本地 `library-b` 第 7 页点击复制当前格式，并满足“完整副本已发布”的后置条件。`b-copy-complete.db` 核对为 A 库 PDF 608 字节、源尚未确认，以及 B 库 EPUB 51,734 字节、源已确认可用；独立私有文件中两条完整字节仍存在。这是生产 UI 复制与两库私有状态隔离证据，未提前证明切回 A 的复用或其它库清理。`b-to-download` 与 `b-back-local` 各 6 步流程通过；切回 A 的系统选择器授权仍在进行，完整两库 UI 清理流程尚未结束。
+
+无线 ADB 端口由原会话变为 `38105`，旧 serial 点击请求失败并明确 `action_may_have_executed=false`。重新发现连接后，先读取新 serial 的设备 fingerprint，与原 PA6 实测 profile 完全匹配再继续既定流程，没有在失败请求可能已执行的情况下盲目重复点击，也未放宽设备／包名守卫。
+
+当前未完成：新增当前候选 journal 范围的平台回归、完整生产页面两库缓存复用／清理、真实 OneDrive 清理联动、人工范围说明／结果与墨水屏体验、会话结束设备清理及用户整体确认。未暂存、未提交，不推进步骤 09；其它阶段和既有实库／规模补验保持原范围。
+
+
+### 切回 A 的已清元数据状态复用
+
+`switch-a-picker` 的选择器打开动作已经发生，后置查询因 `foreground_unavailable` 停止，未重复该动作；后续 `inspect` 确認系统选择器实际位于 B 目录。两次 `picker_parent` 均在点击前因 15 秒 UI dump 超时停止，没有点击。主 agent 随后仅在忽略的执行脚本中将单次 dump 查询默认超时延长为 30 秒，继续使用原 helper 的设备锁、双快照、接收包／页面和元素唯一性检查及后置条件，没有改为裸坐标或绕过守卫。之后选择器返回上层成功，`switch-a-authorize-query30` 的三个元素步骤全部完成。
+
+`a-restored.db` 确认当前选择已回到 A，LibraryId 与清理前相同，重选生成新的选择代号；A 的 `metadata_imports` 仍为 0，保留 PDF 原副本代次、608 字节与 `UNCONFIRMED` 状态。通过 `run-as` 对应用私有 PDF 执行 `sha256sum`，得到 `634540ec54cc3a5ffd6698d5673134e85f46e4b4cd34549d3ed001190039e888`，与准备 fixture 及真实 SAF 源读取一致。这证明重新选择已清元数据的书库可以恢复既有身份与完整副本，没有为切换隐式重新导入。`a-to-list` 七步页面流程当时仍在执行，不记为完成；第 8 页复用显示与第 10 页其它库清理继续待后续证据。
+
+
+### A 的生产下载清单与取消确认
+
+`a-to-list` 的前两步成功，第 3 步在点击前因 30 秒 dump 查询超时停止；重新 `inspect` 确认实际为第 3 页后，只执行 `a-to-list-remaining` 剩余五步，成功到第 8 页，没有重放已完成动作。生产页面实际显示 Quick Start Guide 的 PDF、608 字节、“源尚未确认”及“副本完整，可离线读取”，与 `a-restored.db` 保留清单一致。
+
+`a-removal-cancel.json` 四个元素步骤全部成功：分别打开单 PDF 格式与此书全部格式预览，两次范围均显示 1 个完整副本、608 字节；均点击取消并满足原移除按钮重新出现的后置条件。本项证明生产清单中的精确／全部范围说明与取消路径，不冒充实际副本移除；本轮没有通过这些操作删除 A 的 PDF。
+
+`a-to-cleanup` 两个底部分页步骤当时仍在执行，不记为通过。其它库实际清理、当前元数据预览取消、26 个源文件清理后全量散列复核、新候选 journal 范围回归及第 2 页云端登录准备仍待后续结果；真实 OneDrive、人工体验、设备清理与用户整体确认也未完成。
+
+
+### 生产其它书库确认与源文件复核
+
+`a-to-cleanup` 两个底部分页步骤完成，到达第 10 页。点击其它书库预览后，`inspect` 核对范围仅包含 B 的 LibraryId `7e7b9391-3fae-4c4f-8784-4ae84e039902`，显示 **1 个书库、1 个完整副本、928,314 字节应用缓存**，范围说明包含保留当前库和保护资料；没有将 A 纳入删除范围。确认清理动作完成，并满足“清理完成”的后置条件。
+
+`other-cleaned.db` 的 SQLite 断言确认：A 当前选择和 PDF 原完整清单保留；B 的 downloaded copies、完整索引、导入和封面记录均为空；`cache_cleanup` 为 0，清理已完成而非仅提交请求。检查 `files/books` 与 `files/metadata`，仅有 A 的原 PDF book 文件，metadata 没有剩余文件。结合前述 B 的实际复制、切回 A 保留副本和生产清单显示，本轮两库生产 UI 隔离／复用／其它库清理客观路径已完成；未受影响的 A PDF 保留，不将清理误记为删除源文件。
+
+实际执行忽略产物中的 `check_sources.py`，`source-after.json` 核对 A／B 两个专用源的全部 **26 个文件** SHA-256，全部与准备 fixture 一致。该检查补足本轮生产 UI 操作后的完整源文件保护证据，不仅依赖单项服务探针或数据库版本不变。
+
+当前仍未完成：第 10 页当前元数据预览／取消的生产 UI 路径、新增当前候选 journal 范围平台回归、第 2 页云端登录准备及真实 OneDrive 清理联动、人工范围／结果与墨水屏体验、会话结束设备清理及用户整体确认。未暂存、未提交，不推进步骤 09。
+
+
+### 当前元数据取消与新增候选 journal 回归通过
+
+第 10 页当前元数据预览的后置条件核对为 A 的当前身份。`inspect` 实际范围为 **1 个书库、0 个完整副本、0 字节应用缓存**：A 的完整元数据此前已经清空，当前操作不是删除保留的 PDF。取消动作成功返回“清除当前元数据缓存”入口，没有执行第二次清理。至此第 8 页单格式／全格式预览取消和第 10 页当前元数据取消、其它库实际清理的本轮生产 UI 客观路径均已执行。
+
+实际执行新定向方法 `otherLibraryCleanupJournalAllowsCurrentUnvalidatedCandidateSnapshotSubmission`，**OK (1 test)**，20.973 秒（`candidate-scope-platform.txt`）。方法内分别覆盖 LOCAL 和 ONEDRIVE：其它库 journal 存在时，当前尚未验证候选的快照请求仍被接受并保持 `Queued`、`revoked=0`，当前选择与保护资料保留。该证据关闭前节 `candidate-scope-build.log` 只有构建、尚未平台执行的待验项。清理测试本轮累计 **15 项通过**，为此前类级 14 项及本次新增 1 项定向执行；未声称在新增项之后重新运行整个旧平台套件，未受影响证据继续复用。
+
+独立 AndroidTest 包卸载返回 `Success`，debug 应用重新启动，保留用于尚未结束的云端准备／体验会话。第 1 页到第 2 页的登录准备点击仍在执行，`:app:lintDebug`（`final-lint.log`）也尚未完成；这两项暂不记为通过。当前功能验收剩余真实 OneDrive 登录／只读清理探针、最后人工体验、会话结束 debug／设备专用数据清理及用户整体确认；最终 lint 与登录页准备结果待下一节补记。
+
+
+### 云端共同验收准备与 lint 完成
+
+debug 重新启动后，`login-page` 的第 1 页“下一页”点击成功，后置条件确认已到第 2 页。应用现停在 OneDrive 授权入口等待用户自行登录专用个人账号；没有检查／截图任何账号凭据页面，没有代用户登录或读取授权数据。AndroidTest 包已经卸载，debug 和本轮 `Download/calibre-step08-acceptance-20261007/` 专用 SAF 数据仅为尚未结束的共同验收暂留，结束后统一卸载／清理。
+
+实际执行 `./gradlew :app:lintDebug`，**BUILD SUCCESSFUL in 1m 18s**（`final-lint.log`），关闭前节 lint 尚在运行的状态。当前暂存区 `git diff --cached --stat` 为空，未提交，未开始步骤 09。本地客观清理验收已完成；剩余真实 OneDrive 登录／只读清理探针、最后人工范围／结果与墨水屏体验、会话结束设备清理及用户整体确认。用户按[步骤 08 指南](step-08-device-guide.md)完成最短云端准备后，由 agent 执行必要真实服务检测，不要求重演已完成的本地或故障注入路径。
+
+
+### 用户完成云端准备与生产同步
+
+用户已自行登录个人 OneDrive 并选择专用 `library-a`。主 agent 核对当前为 OneDrive 候选、尚未验证且完整导入为 0；先通过生产底部分页从第 3 页到第 4 页，一步成功，再点击第 4 页“验证／同步元数据”，后置条件确认源加载完成。`cloud-imported.db` 显示当前 OneDrive 身份已验证、完整导入为 1，全部持久任务均为 `Finished`，具备专用只读探针的无其它未完成任务前置条件。
+
+第 3 页曾尝试选择不存在的同步控件，helper 在任何动作前停止（`action_may_have_executed=false`）；之后依据 `MainActivity` 的实际页面划分到第 4 页执行，没有盲目重试旧选择器。另一次在既有 flow 持有设备锁期间发起 `inspect` 被 `device_busy` 拒绝，没有执行动作，也没有并行设备操作。
+
+独立 AndroidTest 包重新安装返回 `Success`。`CacheReadOnlyAcceptanceTest` 使用显式 `step08ReadOnly=true` 的真实 OneDrive 生产服务探针正在执行，日志为 `cloud-readonly.txt`；尚未得到结束结果，本节不记为通过。剩余真实云端清理联动、最后人工体验、会话结束设备清理及用户整体确认，仍未提交，不开始步骤 09。
+
+
+### 真实 OneDrive 只读清理联动通过
+
+实际执行 `adb shell am instrument -w -r -e step08ReadOnly true -e class io.github.chenxiex.calibrecloud.storage.cache.CacheReadOnlyAcceptanceTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner`，真实后端为 **ONEDRIVE**，**OK (1 test)**，190.006 秒（`cloud-readonly.txt`）。本项沿用应用容器生产授权、存储后端、复制／封面服务与共享持久队列／执行锁，不导出凭据；属于生产服务只读集成探针，没有操作清理 UI，也没有上传、删除、改名或修改云端源。
+
+真实 EPUB SHA-256 为 `ba999028397cc788894686459a59e196299e123d74617ca501218afa456b15b5`，PDF 为 `634540ec54cc3a5ffd6698d5673134e85f46e4b4cd34549d3ed001190039e888`，根 `metadata.db` 为 `2a84bdeae960a0d8af1be06825f8739876dadf9c79360fa8cb6d94dfa35f12b1`，与已知准备 fixture 及本轮 SAF 结果一致。两格式复制通过生产共享队列完成并验证完整私有字节；真实封面先发布、后随元数据清理变为不可读取。精确删除 EPUB 后 PDF 保留；清元数据后 import／完整索引／封面均不可查询，当前配置、栏目偏好、最小下载清单及 PDF 原文件代次／完整字节保留。清理前后对三个源对象的全量字节和版本复核全部不变。
+
+`cloud-complete.db` 另核对当前云端书库只保留 PDF 608 字节、源状态 `UNCONFIRMED`；import、完整 books 索引及 cover 记录均为 0，全部持久任务为 `Finished`，journal 为 0。这关闭本轮真实 OneDrive 清理联动待验；与本地生产 UI 和平台竞态／恢复证据分别成立，不扩大为任意真实云端故障或源写回验收。
+
+独立 AndroidTest 包卸载返回 `Success`，debug 重新启动。第 8 页移除确认的最后体验页面正在准备，尚未完成，不能提前称为已停在确认范围；生产源码未变，本节仅记录真实探针结果，不重复构建。本步当前剩余最后范围／结果、灰度／残影／动画体验的用户确认、共同会话结束后 debug 与本轮专用源目录清理，以及用户整体验收确认；未暂存、未提交，不推进步骤 09。
+
+
+### 最后体验页面已准备
+
+`cloud-experience-list` 首次尝试在第 1 步点击前因 30 秒 dump 查询超时停止，`action_may_have_executed=false`、已完成步骤为 0。重新核对原包／页面守卫后，`cloud-experience-list-confirmed` 的七个底部分页步骤全部成功，到达第 8 页。`inspect` 确认单格式移除控件唯一，随后 `cloud-experience-confirmation` 点击成功，后置条件精确匹配“确认移除：PDF，1 个副本，608 字节”。
+
+应用现停在单 PDF 移除确认页，尚未确认删除，保留完整副本供用户检查范围与灰度体验。准备过程未截图、未采集凭据页面。最短顺序见[步骤 08 指南](step-08-device-guide.md)：取消当前单格式预览，查看此书全部格式再取消，到第 10 页分别查看元数据／其它库范围并取消；不要求再次实际清理或复核源文件。当前尚未获得用户共同验收通过，不提交、不开始步骤 09。独立测试包已卸载；最后体验与用户确认结束后，仍须卸载 debug 并删除本轮设备专用测试目录，云端目录由用户自行决定保留或删除。
+
+
+### 步骤 08 用户验收通过与设备清理
+
+2026-10-07（Asia/Shanghai），用户明确反馈“通过”，确认清理范围／结果说明、灰度辨识、分页、触控、残影及无应用过渡／加载动画体验通过。结合 92 项 JVM、累计 15 项清理平台测试、此前实际执行的 99 项与 33 项相关回归、真实 SAF／OneDrive 只读清理联动及两库生产 UI 范围／复用／清理证据，步骤 08 的 R03、R12、R26、R31–R35 对应本阶段 AC01、AC03、AC07 清理验收路径通过。各检查层次及复用范围以上节实际记录为准，不把只读服务探针记为 UI 操作或真实服务故障。
+
+本次确认不扩大第三阶段真实阅读器／完整批量交互、第四阶段源写回、步骤 09 自动同步／后台执行以及步骤 05 实库／代表性规模补验，原留项保持。用户只需完成本轮指南约定的体验，不需重复已经自动验证的清理／源完整性路径。
+
+用户确认后卸载独立 debug 包返回 `Success`，独立 AndroidTest 包此前已卸载。主 agent 仅删除本轮设备专用 `/sdcard/Download/calibre-step08-acceptance-20261007/`，最终 `pm list packages` 的 debug 前缀查询无输出，确认 debug／测试包均不存在；目录 `test -e` 为 false，输出 `dedicated-step08-directory-absent`。另查 `/data/local/tmp` 的 `calibre-ui-*.xml` 无匹配，helper XML 无残留，设备清理完成。云端测试目录由用户自行决定保留或删除，没有操作正式应用或任何正式书库。此节只记录人工验收与清理完成，未改生产代码，不重复构建。按临时计划的“用户确认通过后 commit”门槛提交本步实现、必要测试及持久文档；提交排除 `plan.md`、`local.properties`、凭据、构建产物、私有状态数据库和调试日志，不开始步骤 09。

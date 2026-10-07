@@ -139,4 +139,26 @@
     <string name="cover_paused">封面任务已暂停，可继续。</string>
     <string name="cover_cancelled">封面任务已取消，保留书名占位。</string>
     <string name="cover_failed">封面加载失败或当前书库已变化；保留书名占位，可显式重试。</string>
+    <string name="cleanup_title">缓存清理</string>
+    <string name="cleanup_explanation">先查看本地清理范围，再确认执行。清理不访问源书库。</string>
+    <string name="cleanup_metadata">清除当前元数据缓存</string>
+    <string name="cleanup_other_libraries">清除所有其它书库缓存</string>
+    <string name="cleanup_metadata_scope">清除当前书库的数据库快照、完整索引和封面，并停止既有加载任务。保留书籍副本、下载清单、配置和保护资料。</string>
+    <string name="cleanup_other_libraries_scope">清除全部非当前书库的应用副本、索引、封面和暂存，并停止相关旧任务。保留当前书库及保护资料。</string>
+    <string name="cleanup_range">范围：%1$d 个书库，%2$d 个完整副本，%3$d 字节应用缓存。</string>
+    <string name="cleanup_library">书库：%1$s</string>
+    <string name="cleanup_library_page">书库范围 %1$d / %2$d</string>
+    <string name="cleanup_confirm">确认清理</string>
+    <string name="cleanup_cancel">取消</string>
+    <string name="cleanup_busy">正在核对或清理本地缓存，请等待。</string>
+    <string name="cleanup_completed">清理完成。</string>
+    <string name="cleanup_failed">清理未完成或当前书库已变化，请重新查看范围后重试。</string>
+    <string name="cleanup_unavailable">当前没有可清理的范围，请先确认已选择书库。</string>
+    <string name="download_remove">移除此格式副本</string>
+    <string name="download_remove_confirm">确认移除：%1$s，%2$d 个副本，%3$d 字节</string>
+    <string name="download_all_formats">此书全部格式</string>
+    <string name="download_remove_all">移除此书全部格式</string>
+    <string name="download_remove_cancel">取消</string>
+    <string name="download_remove_done">副本移除完成</string>
+    <string name="download_remove_failed">移除未完成，请刷新后重试</string>
 </resources>

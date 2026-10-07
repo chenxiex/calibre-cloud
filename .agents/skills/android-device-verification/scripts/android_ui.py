@@ -104,7 +104,7 @@ class Adb:
             self.shell('rm', '-f', remote, timeout=5)
 
     def foreground_package(self):
-        raw = self.shell('dumpsys', 'window', 'windows').decode(errors='replace')
+        raw = self.shell('dumpsys', 'window').decode(errors='replace')
         lines = re.findall(r'^\s*mCurrentFocus=(.*)$', raw, re.MULTILINE)
         if len(lines) != 1:
             raise UiError('foreground_unavailable')
@@ -126,13 +126,31 @@ class Adb:
     def fingerprint(self):
         def value(*args):
             return self.shell(*args).decode().strip()
-        rotation = value('dumpsys', 'input')
-        match = re.search(r'SurfaceOrientation:\s*(\d+)', rotation)
-        if not match:
+        input_dump = value('dumpsys', 'input')
+        orientations = re.findall(r'\bSurfaceOrientation:\s*(\d+)\b', input_dump)
+        if orientations:
+            if len(orientations) != 1 or int(orientations[0]) not in range(4):
+                raise UiError('rotation_unavailable')
+            rotation = int(orientations[0])
+        elif 'SurfaceOrientation:' in input_dump:
             raise UiError('rotation_unavailable')
+        else:
+            # Some Android builds omit input orientation. Only a unique numeric rotation
+            # in the default display section is evidence; inline configurations are not.
+            displays = value('dumpsys', 'window', 'displays')
+            headers = list(re.finditer(r'(?m)^[ \t]*Display:[ \t]*mDisplayId=(\d+)\b[^\n]*$', displays))
+            defaults = [index for index, header in enumerate(headers) if header.group(1) == '0']
+            rotations = list(re.finditer(r'(?m)^[ \t]*mRotation=(\d+)(?:[ \t]+[^\n]*)?$', displays))
+            if len(defaults) != 1 or len(rotations) != 1 or int(rotations[0].group(1)) not in range(4):
+                raise UiError('rotation_unavailable')
+            index = defaults[0]
+            section_end = headers[index + 1].start() if index + 1 < len(headers) else len(displays)
+            if not headers[index].end() <= rotations[0].start() < section_end:
+                raise UiError('rotation_unavailable')
+            rotation = int(rotations[0].group(1))
         return {'build_fingerprint': value('getprop', 'ro.build.fingerprint'),
                 'wm_size': value('wm', 'size'), 'wm_density': value('wm', 'density'),
-                'rotation': int(match.group(1)),
+                'rotation': rotation,
                 'font_scale': value('settings', 'get', 'system', 'font_scale'),
                 'navigation_mode': value('settings', 'get', 'secure', 'navigation_mode')}
 

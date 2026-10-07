@@ -92,6 +92,15 @@ internal fun DownloadList(model: DownloadViewModel) {
         Text(stringResource(R.string.metadata_unvalidated))
     } else {
         if (model.entries.isEmpty()) Text(stringResource(R.string.download_list_empty))
+        model.removal?.let { plan ->
+            Text(stringResource(R.string.download_remove_confirm, plan.formats?.joinToString { it.value } ?: stringResource(R.string.download_all_formats), plan.copies.size, plan.bytes))
+            Row {
+                StaticButton(stringResource(R.string.cleanup_confirm), !model.submitting) { model.confirmRemoval() }
+                Spacer(Modifier.width(8.dp))
+                StaticButton(stringResource(R.string.download_remove_cancel), !model.submitting) { model.cancelRemoval() }
+            }
+        }
+        model.removalResult?.let { Text(stringResource(if (it) R.string.download_remove_done else R.string.download_remove_failed)) }
         model.entries.forEach { entry ->
             Spacer(Modifier.height(8.dp))
             Column {
@@ -103,6 +112,13 @@ internal fun DownloadList(model: DownloadViewModel) {
                     SourceAvailability.AVAILABLE -> R.string.download_source_available
                     SourceAvailability.CONFIRMED_MISSING -> R.string.download_source_missing
                 }))
+                if (model.removal == null) {
+                    Row {
+                        StaticButton(stringResource(R.string.download_remove), !model.submitting) { model.previewRemoval(entry) }
+                        Spacer(Modifier.width(8.dp))
+                        StaticButton(stringResource(R.string.download_remove_all), !model.submitting) { model.previewRemoval(entry, true) }
+                    }
+                }
                 Text(stringResource(when (entry.status) {
                     DownloadCopyStatus.AVAILABLE -> R.string.download_copy_available
                     DownloadCopyStatus.MISSING -> R.string.download_copy_missing

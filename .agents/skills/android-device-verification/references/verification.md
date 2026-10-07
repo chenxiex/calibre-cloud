@@ -28,3 +28,16 @@
 焦点／XML 查询与 `input tap` 不能构成系统原子操作，仍有竞态；提示词与 helper 不构成完整 shell 权限下的系统隔离。不得将这些护栏解释为保证消除误触。
 
 未改动生产应用、依赖或全局 Codex 设置，因此未重跑 Android 构建／产品回归。没有预置设备地址、账号信息或未经验证的坐标。
+
+## 2026-10-07：PA6 焦点查询兼容
+
+步骤 08 的实际 PA6／API 34 验收发现 `dumpsys window windows` 只输出窗口列表，没有 `mCurrentFocus`；完整 `dumpsys window` 输出包含唯一有效焦点。先添加稳定复现该差异的离线测试（修复前失败），再改用完整查询；仍拒绝缺失、空值和重复焦点，不放宽包名或页面校验。离线回归 `python3 -m unittest discover -s .agents/skills/android-device-verification/scripts -p 'test_*.py' -v` 为 **44 项通过**。随后真实 helper 导航到步骤 08 专用 `library-a`，核对接收方与目录后授权并同步成功。详细实际产物、临时 ADB 超时及步骤验收范围见[第二阶段记录](../../../../app/verification/phase-2.md)。
+
+
+## 2026-10-07：PA6 设备旋转 profile 兼容
+
+步骤 08 的 PA6／API 34 `dumpsys input` 未提供 `SurfaceOrientation`，原 helper 返回 `rotation_unavailable` 并停止建立设备 profile。先增加离线回归，`app/build/verification/step08/helper-profile-before.log` 为 50 项中 2 failures、5 errors；修复后同一 unittest 命令 **50 项全部通过**（`helper-profile-after.log`）。
+
+有唯一合法 `SurfaceOrientation` 时沿用原路径，缺失时才检查 `dumpsys window displays` 默认 display 0 内独立数值 `mRotation`。默认 display 与数值旋转必须唯一，值限于 0–3；缺失、非法值、歧义、其它屏旋转以及内联配置中的旋转均拒绝，不能用近似文本推断设备姿态。回归覆盖四种旋转、原路径优先及上述拒绝分支，保持坐标 profile 的尺寸、字体与导航模式校验。
+
+随后 PA6 实际 `device-profile` 成功。无线 ADB 端口变更后，旧 serial 点击在执行前失败，主 agent 重新核对新 serial fingerprint 与已记录 profile 完全一致才继续。系统选择器出现 dump 查询超时时，仍保留设备锁、双快照、包／页面与元素唯一性守卫；仅在本轮忽略执行脚本延长单次查询超时到 30 秒，没有放宽可点击范围。真实设备产物与具体可能已执行标记见[第二阶段记录](../../../../app/verification/phase-2.md)，这些结果不代表系统原子点击保证或应用墨水屏体验通过。

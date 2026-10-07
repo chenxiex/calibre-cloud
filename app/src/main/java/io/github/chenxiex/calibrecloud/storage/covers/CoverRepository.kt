@@ -60,7 +60,7 @@ class CoverRepository(
                 arrayOf(book.libraryId.value.toString())).use { it.moveToFirst() && it.getString(0) == importGeneration.toString() }
             val identity = db.rawQuery("SELECT source_uuid FROM metadata_books WHERE library_id = ? AND source_id = ?",
                 arrayOf(book.libraryId.value.toString(), book.sourceId.toString())).use { it.moveToFirst() && it.getString(0) == book.sourceUuid.toString() }
-            val allowed = db.rawQuery("SELECT control FROM queued_tasks WHERE task_id = ?", arrayOf(taskId.toString())).use {
+            val allowed = db.rawQuery("SELECT control FROM queued_tasks WHERE task_id = ? AND revoked = 0", arrayOf(taskId.toString())).use {
                 it.moveToFirst() && it.isNull(0)
             }
             if (!currentImport || !identity || !allowed) return@withLock false

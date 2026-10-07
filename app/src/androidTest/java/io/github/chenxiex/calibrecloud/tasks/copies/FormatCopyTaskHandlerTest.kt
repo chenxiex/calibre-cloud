@@ -5,6 +5,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.lifecycle.ViewModelStore
 import io.github.chenxiex.calibrecloud.ui.DownloadViewModel
 import androidx.test.platform.app.InstrumentationRegistry
+import io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
 import io.github.chenxiex.calibrecloud.metadata.CalibreFixture
 import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
@@ -790,7 +791,7 @@ class FormatCopyTaskHandlerTest {
         val driver = coordinator(source)
         val store = ViewModelStore()
         val viewModel = withContext(Dispatchers.Main) {
-            DownloadViewModel(state, metadata, reader, queue, driver, { _, _ -> error("Restoration must not submit source work") })
+            DownloadViewModel(state, metadata, reader, queue, driver, CacheMaintenance(database, state, queue, root, Dispatchers.IO), { _, _ -> error("Restoration must not submit source work") })
                 .also { store.put("download", it); it.restore() }
         }
         try {
@@ -818,7 +819,7 @@ class FormatCopyTaskHandlerTest {
             assertTrue(source.started.await(10, TimeUnit.SECONDS))
             val viewModel = withContext(Dispatchers.Main) {
                 DownloadViewModel(state, metadata, PrivateCopyReader(state, files, Dispatchers.IO, state.copyAccess),
-                    queue, coordinator, { _, _ -> error("Restoration must not submit source work") })
+                    queue, coordinator, CacheMaintenance(database, state, queue, root, Dispatchers.IO), { _, _ -> error("Restoration must not submit source work") })
                     .also { store.put("download", it); it.restore() }
             }
             val restored = withTimeout(10_000) {

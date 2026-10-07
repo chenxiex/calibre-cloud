@@ -34,7 +34,11 @@ class ApplicationDependencies(context: Context) {
         io.github.chenxiex.calibrecloud.metadata.MetadataRepository(database, state,
             File(applicationContext.filesDir, "metadata"), Dispatchers.IO)
     }
-    val taskQueue by lazy { DurableTaskQueue(database, Dispatchers.IO) }
+    val maintenance: io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance by lazy { io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance(database, state, taskQueue,
+        applicationContext.filesDir, Dispatchers.IO) }
+    val taskQueue: DurableTaskQueue by lazy { DurableTaskQueue(database, Dispatchers.IO).apply {
+        beforeDispatch = { maintenance.recoverLocked() }
+    } }
     val localBackend by lazy {
         LocalSourceBackend(AndroidLocalDocumentAccess(applicationContext),
             File(applicationContext.filesDir, "snapshots/local"), AndroidSnapshotValidator(), Dispatchers.IO)

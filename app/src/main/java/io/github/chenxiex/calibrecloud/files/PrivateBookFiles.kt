@@ -29,7 +29,7 @@ class PrivateBookFiles(private val filesDir: File) : ApplicationCopyHandleFactor
     override fun collectUnreferenced(libraryId: io.github.chenxiex.calibrecloud.model.LibraryId, retained: Set<CompleteCopyLocation>) {
         val root = File(filesDir, "books")
         val directory = File(root, libraryId.value.toString())
-        if (Files.isSymbolicLink(root.toPath()) || Files.isSymbolicLink(directory.toPath())) return
+        if (Files.isSymbolicLink(root.toPath()) || Files.isSymbolicLink(directory.toPath())) throw IOException("Linked book cache")
         directory.listFiles().orEmpty().forEach { file ->
             val generation = runCatching { java.util.UUID.fromString(file.name.removeSuffix(".book")) }.getOrNull()
             if (file.name.endsWith(".book") && generation != null) {
@@ -42,8 +42,10 @@ class PrivateBookFiles(private val filesDir: File) : ApplicationCopyHandleFactor
     private fun collect(location: CompleteCopyLocation) {
         if (location in retired && (readers[location] ?: 0) == 0) {
             val file = File(filesDir, "books/${location.libraryId.value}/${location.fileGeneration}.book")
-            if (!Files.isSymbolicLink(File(filesDir, "books").toPath()) &&
-                !Files.isSymbolicLink(file.parentFile!!.toPath()) && !Files.isSymbolicLink(file.toPath()) && file.delete()) retired.remove(location)
+            if (Files.isSymbolicLink(File(filesDir, "books").toPath()) ||
+                Files.isSymbolicLink(file.parentFile!!.toPath()) || Files.isSymbolicLink(file.toPath())) throw IOException("Linked book cache")
+            if (file.exists() && !file.delete()) throw IOException("Book cache deletion failed")
+            retired.remove(location)
         }
     }
 

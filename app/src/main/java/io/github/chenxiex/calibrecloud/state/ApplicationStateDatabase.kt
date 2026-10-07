@@ -10,11 +10,14 @@ import android.database.sqlite.SQLiteOpenHelper
  * Version 2 adds a durable queue without changing version 1 data.
  * Version 3 adds atomic imported metadata and book identity indexes without changing prior data.
  * Version 4 adds independent complete cover cache records.
+ * Version 5 adds irreversible producer revocation, recoverable cleanup and retained preferences.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  */
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
-    SQLiteOpenHelper(context.applicationContext, name, null, 4) {
+    SQLiteOpenHelper(context.applicationContext, name, null, 5) {
+    private val privateFiles = context.applicationContext.filesDir
+
     override fun onConfigure(db: SQLiteDatabase) {
         db.setForeignKeyConstraintsEnabled(true)
     }
@@ -65,6 +68,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createQueue(db)
         createMetadata(db)
         createCovers(db)
+        createMaintenance(db)
         // The composite primary key is also the library-scoped ordered manifest index.
         db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, authority, root_id, account_id, drive_id)")
     }
@@ -137,13 +141,72 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         """.trimIndent())
     }
 
+    /** Cleanup journals contain only generated private paths and frozen identity scopes. */
+    private fun createMaintenance(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE queued_tasks ADD COLUMN revoked INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE queued_tasks ADD COLUMN scope_library_id TEXT")
+        db.execSQL("CREATE TABLE cache_cleanup (cleanup_id TEXT PRIMARY KEY NOT NULL, payload TEXT NOT NULL)")
+        db.execSQL("""CREATE TABLE library_preferences (
+            library_id TEXT PRIMARY KEY NOT NULL REFERENCES library_bindings(library_id),
+            source_uuid TEXT, read_column_id INTEGER, read_column_lookup TEXT,
+            last_imported_at INTEGER NOT NULL DEFAULT 0
+        )""")
+        db.execSQL("""INSERT INTO library_preferences(library_id,read_column_id,read_column_lookup,last_imported_at)
+            SELECT library_id,read_column_id,read_column_lookup,imported_at FROM metadata_imports""")
+        db.rawQuery("SELECT library_id,payload FROM metadata_imports", null).use { cursor ->
+            while (cursor.moveToNext()) {
+                val payload = org.json.JSONObject(cursor.getString(1))
+                if (!payload.isNull("libraryUuid")) db.execSQL("UPDATE library_preferences SET source_uuid = ? WHERE library_id = ?",
+                    arrayOf(payload.getString("libraryUuid"), cursor.getString(0)))
+            }
+        }
+    }
+
+    /** Legacy candidate inputs are matched only by location or unambiguous private snapshot evidence. */
+    private fun migrateCandidateScopes(db: SQLiteDatabase) {
+        db.rawQuery("SELECT task_id,record FROM queued_tasks", null).use { tasks ->
+            while (tasks.moveToNext()) {
+                val request = io.github.chenxiex.calibrecloud.tasks.persistence.TaskCodec.decode(tasks.getString(1)).submission.request
+                    as? io.github.chenxiex.calibrecloud.tasks.api.TaskRequest.CandidateConfiguration ?: continue
+                val backend = if (request.context.backend == io.github.chenxiex.calibrecloud.model.BackendKind.LOCAL) "local" else "onedrive"
+                val matches = mutableSetOf<String>()
+                db.rawQuery("SELECT library_id FROM current_selection WHERE token = ? AND library_id IS NOT NULL",
+                    arrayOf(request.context.selectionToken.toString())).use { if (it.moveToFirst()) matches.add(it.getString(0)) }
+                if (matches.isEmpty() && backend == "onedrive" && request.directoryItemId != null) {
+                    db.rawQuery("SELECT library_id FROM library_bindings WHERE backend = ? AND root_id = ?",
+                        arrayOf(backend, request.directoryItemId)).use { while (it.moveToNext()) matches.add(it.getString(0)) }
+                }
+                if (matches.isEmpty()) {
+                    val directory = java.io.File(privateFiles, "snapshots/$backend/${tasks.getString(0)}")
+                    if (!java.nio.file.Files.isSymbolicLink(directory.toPath())) directory.listFiles().orEmpty().filter {
+                        it.extension == "db" && !java.nio.file.Files.isSymbolicLink(it.toPath())
+                    }.forEach { snapshot ->
+                        runCatching {
+                            SQLiteDatabase.openDatabase(snapshot.path, null, SQLiteDatabase.OPEN_READONLY).use { source ->
+                                source.rawQuery("SELECT uuid FROM library_id", null).use { ids ->
+                                    if (ids.moveToFirst()) db.rawQuery("""SELECT b.library_id FROM library_bindings b
+                                        JOIN library_preferences p ON b.library_id=p.library_id WHERE b.backend=? AND p.source_uuid=?""",
+                                        arrayOf(backend, ids.getString(0))).use { while (it.moveToNext()) matches.add(it.getString(0)) }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (matches.size == 1) db.execSQL("UPDATE queued_tasks SET scope_library_id = ? WHERE task_id = ?",
+                    arrayOf(matches.single(), tasks.getString(0)))
+            }
+        }
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..3 && newVersion == 4)
+        check(oldVersion in 1..4 && newVersion == 5)
         if (oldVersion == 1) {
             db.execSQL("ALTER TABLE current_selection ADD COLUMN authorization_id TEXT")
             createQueue(db)
         }
         if (oldVersion <= 2) createMetadata(db)
-        createCovers(db)
+        if (oldVersion <= 3) createCovers(db)
+        createMaintenance(db)
+        migrateCandidateScopes(db)
     }
 }

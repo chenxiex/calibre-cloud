@@ -46,6 +46,7 @@ class DownloadViewModel(
     private val reader: CopyReader,
     private val queue: DurableTaskQueue,
     private val coordinator: TaskCoordinator,
+    private val maintenance: io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance,
     private val submitCopy: suspend (CopyKey, UUID) -> SubmissionResult,
 ) : ViewModel() {
     var selection by mutableStateOf<LibrarySelection?>(null)
@@ -66,6 +67,29 @@ class DownloadViewModel(
         private set
     var readFailed by mutableStateOf(false)
         private set
+    var removal by mutableStateOf<io.github.chenxiex.calibrecloud.storage.cache.CleanupPlan?>(null)
+        private set
+    var removalResult by mutableStateOf<Boolean?>(null)
+        private set
+
+    fun previewRemoval(entry: DownloadListEntry, allFormats: Boolean = false) {
+        viewModelScope.launch {
+            removal = maintenance.previewCopies(setOf(entry.copy.key.book), if (allFormats) null else setOf(entry.copy.key.format))
+            removalResult = null
+        }
+    }
+    fun cancelRemoval() { removal = null }
+    fun confirmRemoval() {
+        val plan = removal ?: return
+        if (submitting) return
+        submitting = true
+        viewModelScope.launch {
+            try { removalResult = maintenance.execute(plan) }
+            catch (failure: CancellationException) { throw failure }
+            catch (_: Exception) { removalResult = false }
+            finally { removal = null; submitting = false; restore() }
+        }
+    }
     private var observer: Job? = null
     private val reads = Mutex()
 
@@ -170,6 +194,8 @@ class DownloadViewModel(
             if (switched) {
                 observer?.cancel()
                 record = null
+                removal = null
+                removalResult = null
                 rejected = false
             }
             selection = before
@@ -204,13 +230,13 @@ class DownloadViewModel(
     }
 
     companion object {
-        private const val LIST_SIZE = 2
+        private const val LIST_SIZE = 1
 
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
                 return modelClass.cast(DownloadViewModel(dependencies.state, dependencies.metadata,
-                    dependencies.copyReader, dependencies.taskQueue, dependencies.taskCoordinator,
+                    dependencies.copyReader, dependencies.taskQueue, dependencies.taskCoordinator, dependencies.maintenance,
                     { key, token -> dependencies.copyService.submit(key, token) }))!!
             }
         }

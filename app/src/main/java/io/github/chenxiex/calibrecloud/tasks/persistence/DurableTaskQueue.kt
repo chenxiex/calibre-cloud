@@ -35,6 +35,7 @@ enum class TaskControl(val code: String) { PAUSE("pause"), CANCEL("cancel"), RES
  */
 class DurableTaskQueue(private val database: ApplicationStateDatabase, private val io: CoroutineDispatcher) : TaskQueue {
     internal val executionLock = Mutex()
+    internal var beforeDispatch: suspend () -> Unit = {}
     private val revision = MutableStateFlow(0L)
     private val eventBus = MutableSharedFlow<TaskEvent>(extraBufferCapacity = 64)
     override val events: Flow<TaskEvent> = eventBus.asSharedFlow()
@@ -48,6 +49,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     override suspend fun submit(submission: TaskSubmission): SubmissionResult = withContext(io) {
         val changed = mutableListOf<TaskRecord>()
         val result = transaction {
+            if (cleanupBlocks(this, submission.request)) return@transaction rejected()
             val all = entries(this)
             val byId = all.associateBy { it.record.id }
             val request = submission.request
@@ -89,6 +91,8 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             val record = TaskRecord(id, normalized, SchedulingPosition(submission.origin.priority, sequence(this)),
                 state = TaskState.Queued, controls = queuedControls)
             save(this, QueueEntry(record, initialStage(request)))
+            if (request is TaskRequest.CandidateConfiguration) execSQL("""UPDATE queued_tasks SET scope_library_id =
+                (SELECT library_id FROM current_selection WHERE singleton = 1) WHERE task_id = ?""", arrayOf(id.value.toString()))
             dependencies.forEach { edge -> execSQL("INSERT INTO task_dependencies VALUES(?, ?, ?)",
                 arrayOf(id.value.toString(), edge.taskId.value.toString(), edge.requirement.code)) }
             if (submission.origin.priority == TaskPriority.HIGH) dependencies.forEach {
@@ -125,7 +129,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             val eligible = mutableListOf<QueueEntry>()
             all.forEach { entry ->
                 val record = entry.record
-                if (record.state is TaskState.Finished || record.state is TaskState.Paused || record.id in excluded) return@forEach
+                if (isRevoked(this, record.id) || cacheCleanupPending(this) || record.state is TaskState.Finished || record.state is TaskState.Paused || record.id in excluded) return@forEach
                 val reasons = conditions(record).toMutableSet()
                 if (!active(this, record)) reasons.add(WaitingReason.INACTIVE_LIBRARY)
                 if (!supported(record.submission.request)) reasons.add(WaitingReason.DEPENDENCY)
@@ -162,6 +166,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         var changed: TaskRecord? = null
         val accepted = transaction {
             val entry = entries(this).find { it.record.id == id } ?: return@transaction false
+            if (isRevoked(this, id)) return@transaction false
             val r = entry.record
             val allowed = when (command) {
                 TaskControl.PAUSE -> r.controls.canPause
@@ -281,11 +286,59 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         db.beginTransaction()
         try { return db.action().also { db.setTransactionSuccessful() } } finally { db.endTransaction() }
     }
+    internal fun invalidateObservers() { revision.update { it + 1 } }
+    internal suspend fun revoked(id: TaskId): Boolean = withContext(io) { isRevoked(database.readableDatabase, id) }
+
     private fun publish(record: TaskRecord) { revision.update { it + 1 }; eventBus.tryEmit(TaskEvent.Changed(record)) }
     private fun rejected() = SubmissionResult.Rejected(TaskError.Source(StorageError(StorageErrorKind.UNSUPPORTED_OPERATION)))
     private fun backendCode(kind: BackendKind) = when (kind) { BackendKind.LOCAL -> "local"; BackendKind.ONEDRIVE -> "onedrive" }
 
     companion object {
+        internal fun cacheCleanupPending(db: SQLiteDatabase): Boolean = db.rawQuery("SELECT 1 FROM cache_cleanup LIMIT 1", null).use { it.moveToFirst() }
+        /** New requests outside the frozen cleanup scope remain accepted. Dispatch waits for deletion. */
+        private fun cleanupBlocks(db: SQLiteDatabase, request: TaskRequest): Boolean = db.rawQuery("SELECT payload FROM cache_cleanup", null).use { rows ->
+            while (rows.moveToNext()) {
+                val journal = org.json.JSONObject(rows.getString(0))
+                val libraries = journal.getJSONArray("libraries")
+                val inLibrary = (0 until libraries.length()).any { libraries.getString(it) == request.libraryId?.value?.toString() }
+                val candidate = request as? TaskRequest.CandidateConfiguration
+                val kind = journal.optString("kind", "OTHER_LIBRARIES")
+                val inCandidate = kind == "METADATA" && candidate != null && candidate.context.selectionToken.toString() == journal.optString("token")
+                if (!inLibrary && !inCandidate) continue
+                if (kind == "METADATA" && (request is TaskRequest.ReadStatusWrite || (request is TaskRequest.MetadataSync && request.freshness is SnapshotFreshness.AfterWrite))) continue
+                if (kind == "METADATA") {
+                    if (request is TaskRequest.CoverLoad || request is TaskRequest.MetadataSync || candidate?.operation in setOf("local_snapshot", "onedrive_snapshot")) return@use true
+                } else if (kind == "COPIES") {
+                    val key = when (request) {
+                        is TaskRequest.FormatCopy -> io.github.chenxiex.calibrecloud.model.CopyKey(request.resource.book, request.resource.format)
+                        is TaskRequest.FormatCheck -> request.key
+                        else -> null
+                    } ?: continue
+                    val books = journal.getJSONArray("books")
+                    val book = "${key.book.libraryId.value}/${key.book.sourceId}/${key.book.sourceUuid}"
+                    if ((0 until books.length()).none { books.getString(it) == book }) continue
+                    if (journal.isNull("formats")) return@use true
+                    val formats = journal.getJSONArray("formats")
+                    if ((0 until formats.length()).any { formats.getString(it) == key.format.value }) return@use true
+                } else return@use true
+            }
+            false
+        }
+
+        internal fun isRevoked(db: SQLiteDatabase, id: TaskId): Boolean = db.rawQuery(
+            "SELECT revoked FROM queued_tasks WHERE task_id = ?", arrayOf(id.value.toString())).use { it.moveToFirst() && it.getInt(0) != 0 }
+
+        /** Irrevocable cancellation gate, in the same transaction as cache record removal. */
+        internal fun revoke(db: SQLiteDatabase, id: TaskId) {
+            val args = arrayOf(id.value.toString())
+            val record = db.rawQuery("SELECT record FROM queued_tasks WHERE task_id = ?", args).use { it.moveToFirst(); TaskCodec.decode(it.getString(0)) }
+            val next = record.copy(state = if ((record.state as? TaskState.Finished)?.result == TaskResult.Completed) record.state
+                else TaskState.Finished(TaskResult.Cancelled(record.commit)), controls = noControls)
+            db.update("queued_tasks", ContentValues().apply {
+                put("revoked", 1); put("control", "cancel"); put("record", TaskCodec.encode(next))
+            }, "task_id = ?", args)
+        }
+
         /**
          * Called inside the metadata publication transaction, after selection/control validation.
          * A complete import and its task outcome become durable together. Later controls therefore
@@ -301,6 +354,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             }
             require(record.submission.request is TaskRequest.CandidateConfiguration || record.submission.request is TaskRequest.FormatCopy || record.submission.request is TaskRequest.CoverLoad)
             require(record.state is TaskState.Running)
+            require(!isRevoked(db, TaskId(id)))
             val completed = record.copy(state = TaskState.Finished(TaskResult.Completed), controls = noControls)
             db.update("queued_tasks", ContentValues().apply {
                 put("record", TaskCodec.encode(completed)); put("recovery_required", 0)

@@ -12,6 +12,7 @@ import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
 import io.github.chenxiex.calibrecloud.metadata.CalibreFixture
 import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.model.*
+import io.github.chenxiex.calibrecloud.state.LegacyCacheSchemaFixture
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.storage.api.*
@@ -187,12 +188,13 @@ class CoverTaskHandlerTest {
             "EPUB", UUID.randomUUID().toString(), "Preserved book", 123L, "local", "version-3", "available"))
         val manifest = state.find(CopyKey(book, BookFormat.parse("EPUB")))
         assertNotNull(manifest)
-        // The old schema differs only by the new independent cover table.
+        // Reconstruct the old queue and remove tables absent from version three.
+        LegacyCacheSchemaFixture.downgradeToFour(database.writableDatabase)
         database.writableDatabase.execSQL("DROP TABLE cover_cache")
         database.writableDatabase.version = 3
         database.close()
         reopen()
-        assertEquals(4, database.readableDatabase.version)
+        assertEquals(5, database.readableDatabase.version)
         assertEquals(imported, metadata.currentImport())
         assertEquals(manifest, state.find(CopyKey(book, BookFormat.parse("EPUB"))))
         assertEquals(queued, queue.get(task))

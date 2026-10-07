@@ -40,6 +40,7 @@ private class BoundaryControl(val command: TaskControl) : RuntimeException()
 
 class TaskExecution internal constructor(private val queue: DurableTaskQueue, val id: TaskId) {
     suspend fun checkControl() {
+        if (queue.revoked(id)) throw BoundaryControl(TaskControl.CANCEL)
         val command = queue.get(id)?.control
         if (command == TaskControl.PAUSE || command == TaskControl.CANCEL) throw BoundaryControl(command)
     }
@@ -83,11 +84,12 @@ class TaskCoordinator(
     /** Private-state recovery only. Never waits for an active executor or touches source storage. */
     suspend fun restorePending() {
         if (!queue.executionLock.tryLock()) return
-        try { queue.recover() } finally { queue.executionLock.unlock() }
+        try { queue.beforeDispatch(); queue.recover() } finally { queue.executionLock.unlock() }
     }
 
     /** Explicit foreground driver; returns when no currently executable work remains. */
     suspend fun drain() = queue.executionLock.withLock {
+        queue.beforeDispatch()
         queue.list().filter { it.record.state is TaskState.Finished &&
             (it.record.state as TaskState.Finished).result is TaskResult.Cancelled && it.checkpoint != null }.forEach { entry ->
             handlers.singleOrNull { it.supports(entry.record.submission.request) }?.stopped(entry)
