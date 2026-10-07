@@ -134,12 +134,14 @@ dependencyLocking {
     lockMode = LockMode.STRICT
 }
 
-// Resolve application and test classpaths; build/lint tasks also lock their tool configurations.
+// Resolve application and test classpaths plus the device-test utilities and Unified Test Platform
+// runner that connected tests resolve at run time; build/lint tasks also lock their tool configurations.
 tasks.register("resolveLockedDependencies") {
     description = "Resolves application and test classpaths for dependency lock generation."
     doLast {
         configurations.filter {
-            it.isCanBeResolved && (it.name.endsWith("CompileClasspath") || it.name.endsWith("RuntimeClasspath"))
+            it.isCanBeResolved && (it.name.endsWith("CompileClasspath") || it.name.endsWith("RuntimeClasspath") ||
+                it.name == "androidTestUtil" || it.name.startsWith("_internal-unified-test-platform"))
         }.forEach { configuration ->
             // AGP selects artifact types in its tasks; locking only needs the complete graph.
             configuration.incoming.resolutionResult.allDependencies.forEach { dependency ->
