@@ -13,6 +13,7 @@
 | Android SDK Platform | API 36 | 应用工程的 `compileSdk = 36` |
 | Android Build Tools | 36.0.0 | `aapt2`、`apksigner`、`zipalign` 等工具 |
 | Android Platform Tools | 构建镜像时的稳定版本 | `adb`，在日常创建容器时不重新下载 |
+| Calibre | 9.14.0 官方 Linux 二进制包，安装在 `/opt/calibre` | `calibredb`、`ebook-meta` 等命令行工具，用于制作测试书库；`QT_QPA_PLATFORM=offscreen` 使其无需图形界面 |
 | `sqlite3`、`jq`、`curl` | Debian 仓库版本 | 检查 Calibre 的 `metadata.db` 和 API 响应 |
 | Python 3、`rsync`、`ripgrep`、`shellcheck`、`zip`、`unzip` | Debian 仓库版本 | 初始化缓存、搜索和脚本检查 |
 
@@ -22,7 +23,7 @@
 
 运行 Gradle 的 JDK 与应用的 Java/Kotlin 编译目标分别配置。应用工程显式设置 Java 兼容级别及 Kotlin JVM target，具体约束见 [Android 模块约束](../../app/AGENTS.md#构建与实现)，参考 [Android 构建中的 Java 版本说明](https://developer.android.com/build/jdks)。
 
-Command-line Tools 和 Gradle 的归档使用固定下载地址并校验 SHA-256，校验值来自 [Android 官方下载表](https://developer.android.com/studio#command-line-tools-only)和 [Gradle 官方 checksum 文件](https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)。基础镜像标签、系统软件包和 `platform-tools` 会随上游更新，因此重新构建镜像不保证逐字节相同。构建步骤会通过 `sdkmanager --licenses` 接受 [Android SDK 许可](https://developer.android.com/studio#terms-and-conditions)。
+Command-line Tools、Gradle 和 Calibre 的归档使用固定下载地址并校验 SHA-256／SHA-512，Calibre 的校验值来自其[官方签名文件](https://calibre-ebook.com/signatures/calibre-9.14.0-x86_64.txz.sha512)，其余来自 [Android 官方下载表](https://developer.android.com/studio#command-line-tools-only)和 [Gradle 官方 checksum 文件](https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)。基础镜像标签、系统软件包和 `platform-tools` 会随上游更新，因此重新构建镜像不保证逐字节相同。构建步骤会通过 `sdkmanager --licenses` 接受 [Android SDK 许可](https://developer.android.com/studio#terms-and-conditions)。
 
 ## 持久缓存
 

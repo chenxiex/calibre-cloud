@@ -9,18 +9,32 @@ ARG ANDROID_API_LEVEL=36
 ARG ANDROID_BUILD_TOOLS_VERSION=36.0.0
 ARG GRADLE_VERSION=9.3.1
 ARG GRADLE_SHA256=b266d5ff6b90eada6dc3b20cb090e3731302e553a27c5d3e4df1f0d76beaff06
+ARG CALIBRE_VERSION=9.14.0
+ARG CALIBRE_SHA512=d1a162d472dfbc3b74946809a979197121277150efe9e2172786843573c89dab542ce2bad98164c5d788420d2b9d8caea208cfe82c5016b3db09c0ed3ef3fc3717
 
 # Google's Linux SDK binaries require x86-64. The devcontainer selects this platform.
 # Android builds use Trixie's JDK 21; the Java editor extension bundles its own runtime.
 RUN test "$(dpkg --print-architecture)" = amd64 \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
+        libegl1 \
+        libfontconfig1 \
+        libglx0 \
+        libnss3 \
+        libopengl0 \
         libusb-1.0-0 \
+        libxcb-cursor0 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxkbcommon0 \
+        libxrandr2 \
+        libxtst6 \
         openjdk-21-jdk-headless \
         python3 \
         ripgrep \
         shellcheck \
         sqlite3 \
+        xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 \
@@ -62,9 +76,20 @@ RUN mkdir -p /opt/gradle /opt/gradle-distributions \
     && printf '%s  %s\n' "${GRADLE_SHA256}" "/opt/gradle-distributions/gradle-${GRADLE_VERSION}-bin.zip" | sha256sum --check - \
     && unzip -q "/opt/gradle-distributions/gradle-${GRADLE_VERSION}-bin.zip" -d /opt/gradle
 
+# Official Calibre binary build, matching the Calibre version the metadata layout is checked against.
+# The command-line tools (calibredb, ebook-meta, ...) run headless through Qt's offscreen platform.
+RUN mkdir -p /opt/calibre \
+    && curl --fail --location --retry 3 \
+        "https://download.calibre-ebook.com/${CALIBRE_VERSION}/calibre-${CALIBRE_VERSION}-x86_64.txz" \
+        --output /tmp/calibre.txz \
+    && printf '%s  %s\n' "${CALIBRE_SHA512}" /tmp/calibre.txz | sha512sum --check - \
+    && tar -xJf /tmp/calibre.txz -C /opt/calibre \
+    && rm /tmp/calibre.txz
+
 COPY scripts/post-create.sh scripts/seed-gradle-wrapper.py /usr/local/share/calibre-devcontainer/
 
-ENV PATH=${JAVA_HOME}/bin:${GRADLE_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}:${PATH}
+ENV QT_QPA_PLATFORM=offscreen
+ENV PATH=/opt/calibre:${JAVA_HOME}/bin:${GRADLE_HOME}/bin:${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}:${PATH}
 
 USER vscode
 RUN mkdir -p "${GRADLE_USER_HOME}" "${ANDROID_HOME}" "${ANDROID_USER_HOME}" "${XDG_CACHE_HOME}"
