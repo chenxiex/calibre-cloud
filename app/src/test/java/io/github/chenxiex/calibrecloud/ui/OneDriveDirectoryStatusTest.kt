@@ -24,6 +24,13 @@ class OneDriveDirectoryStatusTest {
             CommitState.NotCommitted,
         )))
         assertEquals(R.string.onedrive_task_io, directoryStatusResource(failed, OneDriveCandidateTaskHandler.BROWSE, false, false))
+        // A network wait continues automatically; only a finished failure asks for a retry.
+        val offline = TaskState.Finished(TaskResult.Failed(StageFailure(
+            TaskStage.CANDIDATE_ACCESS,
+            TaskError.Source(StorageError(StorageErrorKind.NO_NETWORK)),
+            CommitState.NotCommitted,
+        )))
+        assertEquals(R.string.onedrive_task_network_failed, browseStatus(offline))
     }
 
     @Test

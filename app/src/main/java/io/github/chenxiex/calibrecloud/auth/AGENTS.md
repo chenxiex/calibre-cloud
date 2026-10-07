@@ -14,7 +14,7 @@
 
 - `app/oauth-manifests/` 提供带 host 和无 host 的字面模板，由变体 sourceSet 选择；使用应用 OneDriveCallbackActivity，并移除依赖的 AppAuth receiver，避免遗留宽泛 filter。无 host 时省略 host/path 属性，不生成空属性。
 - 带 host 时按 scheme、host 和精确 path 匹配；无 host 的 `scheme:/oauth2redirect` 须正确支持，但 Android 忽略其路径 filter，因此同 scheme 的任意另一变体接收范围都会重叠，必须拒绝。同 scheme 仅在双方都有 host 且 host 或精确 path 不同的情况下允许。规则依据见 [Android data 元素](https://developer.android.com/guide/topics/manifest/data-element)。
-- 完整回调校验由 `OneDriveOAuthConfiguration.acceptsCallback` 承担，包含无 host 的路径检查；OAuth 返回的 query 留待协议流程处理。后续协调器处理结果前还必须核对待处理事务、state 与重复交付，不能把地址匹配视为已授权。
+- 完整回调校验由 `OneDriveOAuthConfiguration.acceptsCallback` 承担，包含无 host 的路径检查；OAuth 返回的 query 留待协议流程处理。协调器处理结果前还须经 `AuthorizationTransactionGate` 核对待处理事务、state 与重复交付，不能把地址匹配视为已授权。
 
 ## 授权阶段与隐私
 

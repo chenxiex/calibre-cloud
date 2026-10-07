@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.system.Os
 import android.system.OsConstants
+import androidx.core.graphics.scale
 import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
@@ -116,10 +117,11 @@ class CoverTaskHandler(private val state: ApplicationStateRepository, private va
             StageOutcome.Complete(cachePublished = true)
         } catch (failure: FormatSourceFailure) {
             val error = TaskError.Source(failure.error)
+            val wait = authorizationWait(imported.identity.location.backend, failure.error.kind)
             when {
                 failure.transient -> StageOutcome.Retry(error, failure.retryDelayMillis)
                 failure.error.kind == StorageErrorKind.NO_NETWORK -> StageOutcome.Wait(WaitingReason.NETWORK)
-                failure.error.kind == StorageErrorKind.LOGIN_REQUIRED -> StageOutcome.Wait(WaitingReason.LOGIN)
+                wait != null -> StageOutcome.Wait(wait)
                 else -> StageOutcome.Fail(error)
             }
         } catch (_: IOException) { fail(StorageErrorKind.LOCAL_IO) }
@@ -143,7 +145,7 @@ class CoverTaskHandler(private val state: ApplicationStateRepository, private va
         val ratio = minOf(1.0, CoverRepository.WIDTH.toDouble() / decoded.width, CoverRepository.HEIGHT.toDouble() / decoded.height)
         if (ratio == 1.0) return decoded
         return try {
-            Bitmap.createScaledBitmap(decoded, maxOf(1, (decoded.width * ratio).toInt()), maxOf(1, (decoded.height * ratio).toInt()), true)
+            decoded.scale(maxOf(1, (decoded.width * ratio).toInt()), maxOf(1, (decoded.height * ratio).toInt()))
         } finally { decoded.recycle() }
     }
     private fun staging(id: TaskId) = covers.privatePath("cover-staging/${id.value}")

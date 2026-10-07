@@ -34,9 +34,8 @@ enum class TaskStage(val code: String) {
 }
 
 enum class WaitingReason(val code: String) {
-    NETWORK("network"), LOGIN("login"), DIRECTORY_AUTHORIZATION("directory_authorization"),
-    DEPENDENCY("dependency"), CURRENT_TASK("current_task"), HIGHER_PRIORITY("higher_priority"),
-    INACTIVE_LIBRARY("inactive_library"), RECOVERY("recovery"),
+    NETWORK("network"), THROTTLED("throttled"), LOGIN("login"), DIRECTORY_AUTHORIZATION("directory_authorization"),
+    DEPENDENCY("dependency"), INACTIVE_LIBRARY("inactive_library"), RECOVERY("recovery"),
 }
 
 /** Total null means unknown: UI renders text, never an animated indeterminate indicator. */
@@ -145,7 +144,7 @@ sealed interface TaskEvent {
 }
 
 /**
- * Explicit durable submission and observation. Implemented by DurableTaskQueue in phase two.
+ * Explicit durable submission and observation, implemented by DurableTaskQueue.
  * Implementations must atomically persist requests, deduplication, dependencies and queue sequences;
  * only eligible tasks in the active library execute, one at a time without automatic preemption.
  * Waiting work cannot block unrelated eligible work; batches reselect between resource children.

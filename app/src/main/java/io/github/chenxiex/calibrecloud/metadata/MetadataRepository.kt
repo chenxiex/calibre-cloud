@@ -102,7 +102,7 @@ class MetadataRepository(
                     if (preferences != null) { values.put("read_column_id", preferences.first); values.put("read_column_lookup", preferences.second) }
                     db.execSQL("""INSERT INTO library_preferences(library_id,source_uuid,last_imported_at) VALUES(?,?,?)
                         ON CONFLICT(library_id) DO UPDATE SET source_uuid=excluded.source_uuid,last_imported_at=excluded.last_imported_at""",
-                        arrayOf(key[0], parsed.sourceLibraryUuid?.toString(), System.currentTimeMillis()))
+                        arrayOf<Any?>(key[0], parsed.sourceLibraryUuid?.toString(), System.currentTimeMillis()))
                     if (taskId != null) db.execSQL("UPDATE queued_tasks SET scope_library_id = ? WHERE task_id = ?", arrayOf(key[0], taskId.toString()))
                     // UPDATE retains the configured source column identity, including invalid configurations.
                     if (db.update("metadata_imports", values, "library_id = ?", key) == 0)

@@ -279,6 +279,7 @@ internal object TaskCodec {
 
     private fun storageCode(value: StorageErrorKind): String = when (value) {
         StorageErrorKind.NO_NETWORK -> "no_network"
+        StorageErrorKind.THROTTLED -> "throttled"
         StorageErrorKind.LOGIN_REQUIRED -> "login_required"
         StorageErrorKind.AUTHORIZATION_EXPIRED -> "authorization_expired"
         StorageErrorKind.SOURCE_MISSING -> "source_missing"

@@ -3,6 +3,7 @@ package io.github.chenxiex.calibrecloud.ui
 import android.content.Context
 import android.content.Intent
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
@@ -15,12 +16,15 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /** Retains one coordinator across Activity recreation; encrypted pending requests survive process death. */
-class OneDriveAuthorizationViewModel(private val authorization: OneDriveAuthorization) : ViewModel() {
+class OneDriveAuthorizationViewModel(
+    private val authorization: OneDriveAuthorization,
+    private val onAuthorized: suspend () -> Unit = {},
+) : ViewModel() {
     var status by mutableStateOf(LoginStatus.UNSIGNED)
         private set
     var issue by mutableStateOf<LoginIssue?>(null)
         private set
-    private var pending by mutableStateOf(0)
+    private var pending by mutableIntStateOf(0)
     val busy: Boolean get() = pending > 0
     private var operation: Job? = null
 
@@ -43,9 +47,20 @@ class OneDriveAuthorizationViewModel(private val authorization: OneDriveAuthoriz
             }
         }
     }
-    fun callback(address: String) = enqueue { authorization.callback(address) { publish() } }
+    fun callback(address: String) = enqueue {
+        authorization.callback(address) { publish() }
+        resumeIfAuthorized()
+    }
     fun cancel() = enqueue { authorization.cancel() }
-    fun refresh() = enqueue { authorization.refresh() { publish() } }
+    fun refresh() = enqueue {
+        authorization.refresh() { publish() }
+        resumeIfAuthorized()
+    }
+
+    /** Work waiting for login continues once the user has signed in again. */
+    private suspend fun resumeIfAuthorized() {
+        if (authorization.status == LoginStatus.AUTHORIZED) onAuthorized()
+    }
 
     private fun enqueue(action: suspend () -> Unit) {
         val previous = operation
@@ -68,11 +83,11 @@ class OneDriveAuthorizationViewModel(private val authorization: OneDriveAuthoriz
 
     companion object {
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
-            override fun <T : ViewModel> create(modelClass: Class<T>): T = modelClass.cast(
-                OneDriveAuthorizationViewModel(
-                    (context.applicationContext as CalibreCloudApplication).dependencies.oneDriveAuthorization,
-                ),
-            )!!
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
+                return modelClass.cast(OneDriveAuthorizationViewModel(dependencies.oneDriveAuthorization,
+                    dependencies.backgroundTasks::resumeAuthorizationWaits))!!
+            }
         }
     }
 }

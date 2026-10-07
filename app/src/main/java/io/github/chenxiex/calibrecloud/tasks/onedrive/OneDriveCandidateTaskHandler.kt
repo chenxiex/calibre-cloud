@@ -92,14 +92,19 @@ class OneDriveCandidateTaskHandler(
         }
     }
 
-    private fun loginFailure() = StageOutcome.Fail(TaskError.Source(StorageError(StorageErrorKind.LOGIN_REQUIRED)))
+    /**
+     * The request is bound to its login session. A lost or replaced session waits for login; after a
+     * successful login, BackgroundTasks continues the work as a request bound to the new session.
+     */
+    private fun loginFailure() = StageOutcome.Wait(WaitingReason.LOGIN)
     private fun failed(result: OneDriveSourceResult.Failed): StageOutcome {
         val error = if (result.error.kind == StorageErrorKind.LOGIN_REQUIRED &&
             authorization.issue in setOf(LoginIssue.NETWORK, LoginIssue.SERVER)) StorageError(StorageErrorKind.NO_NETWORK)
             else result.error
         return if (result.transient || error.kind == StorageErrorKind.NO_NETWORK)
             StageOutcome.Retry(TaskError.Source(error), result.retryDelayMillis)
-            else StageOutcome.Fail(TaskError.Source(error))
+            else authorizationWait(BackendKind.ONEDRIVE, error.kind)?.let { StageOutcome.Wait(it) }
+                ?: StageOutcome.Fail(TaskError.Source(error))
     }
 
     companion object {

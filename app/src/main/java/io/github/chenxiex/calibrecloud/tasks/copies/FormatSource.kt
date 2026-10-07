@@ -20,7 +20,10 @@ interface FormatSource {
         control()
         return version
     }
+    /** Exact size that the transfer must match; null when integrity relies on the content hash instead. */
     suspend fun size(location: LibraryLocation, path: RelativeSourcePath): Long? = null
+    /** Size for progress and space pre-checks only, never integrity evidence. */
+    suspend fun estimatedSize(location: LibraryLocation, path: RelativeSourcePath): Long? = size(location, path)
     suspend fun open(location: LibraryLocation, path: RelativeSourcePath): InputStream
     /** null means range access is unavailable; callers must discard the prefix and restart. */
     suspend fun openRange(location: LibraryLocation, path: RelativeSourcePath, offset: Long, expectedVersion: FileVersion): InputStream? = null
@@ -47,6 +50,10 @@ class BackendFormatSource(
     override suspend fun size(location: LibraryLocation, path: RelativeSourcePath): Long? = when (location) {
         is LibraryLocation.Local -> null // The local content hash validates every transferred byte.
         is LibraryLocation.OneDrive -> oneDrive.resolve(location, path).value().sizeBytes
+    }
+    override suspend fun estimatedSize(location: LibraryLocation, path: RelativeSourcePath): Long? = when (location) {
+        is LibraryLocation.Local -> local.size(tree(location), path).value()
+        is LibraryLocation.OneDrive -> size(location, path)
     }
     override suspend fun open(location: LibraryLocation, path: RelativeSourcePath): InputStream = when (location) {
         is LibraryLocation.Local -> local.openRead(tree(location), path).value()

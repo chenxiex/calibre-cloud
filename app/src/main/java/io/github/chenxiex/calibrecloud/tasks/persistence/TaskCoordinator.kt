@@ -22,6 +22,16 @@ sealed interface StageOutcome {
 data class RecoveryDecision(val stage: TaskStage, val checkpoint: RecoveryCheckpoint?)
 
 /**
+ * Recoverable authorization loss waits until re-login or directory re-authorization wakes the queue.
+ * A OneDrive 403 (AUTHORIZATION_EXPIRED) is permanent denial and remains a failure.
+ */
+fun authorizationWait(backend: io.github.chenxiex.calibrecloud.model.BackendKind, kind: StorageErrorKind): WaitingReason? = when {
+    backend == io.github.chenxiex.calibrecloud.model.BackendKind.ONEDRIVE && kind == StorageErrorKind.LOGIN_REQUIRED -> WaitingReason.LOGIN
+    backend == io.github.chenxiex.calibrecloud.model.BackendKind.LOCAL && kind == StorageErrorKind.AUTHORIZATION_EXPIRED -> WaitingReason.DIRECTORY_AUTHORIZATION
+    else -> null
+}
+
+/**
  * Handler registration is internal to the dependency container; only implemented source operations are registered.
  * recovery MUST inspect latest source/version and staging evidence before approving continuation.
  * A stage cooperatively checks execution.checkControl() while working, closes resources on exit,
@@ -187,13 +197,15 @@ class TaskCoordinator(
                         return
                     }
                     is StageOutcome.Retry -> {
-                        require((outcome.error as? TaskError.Source)?.error?.kind in setOf(StorageErrorKind.NO_NETWORK, StorageErrorKind.LOCAL_IO))
+                        val kind = (outcome.error as? TaskError.Source)?.error?.kind
+                        require(kind in setOf(StorageErrorKind.NO_NETWORK, StorageErrorKind.THROTTLED, StorageErrorKind.LOCAL_IO))
+                        val reason = if (kind == StorageErrorKind.THROTTLED) WaitingReason.THROTTLED else WaitingReason.NETWORK
                         val latest = requireNotNull(queue.get(entry.record.id))
                         if (latest.attempts >= MAX_RETRIES) { fail(entry.record.id, outcome.error); return }
                         val delay = maxOf(outcome.serverDelayMillis ?: 0, 1_000L shl latest.attempts)
                         val deadline = now().let { if (it > Long.MAX_VALUE - delay) Long.MAX_VALUE else it + delay }
                         queue.update(entry.record.id) { it.copy(attempts = it.attempts + 1, retryAt = deadline, recoveryRequired = true,
-                            record = it.record.copy(state = TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))), controls = DurableTaskQueue.queuedControls)) }
+                            record = it.record.copy(state = TaskState.Waiting(FrozenSet(listOf(reason))), controls = DurableTaskQueue.queuedControls)) }
                         return
                     }
                 }

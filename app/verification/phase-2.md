@@ -966,3 +966,41 @@ EPUB、PDF 与封面任务分别为 `98307cec-66ca-48e2-b8c1-f0691344cabe`、`c0
 已保存验收后的脱敏任务快照 `accepted-final-state.json`。实际执行 `adb uninstall io.github.chenxiex.calibrecloud.debug.test` 与 `adb uninstall io.github.chenxiex.calibrecloud.debug`，两项均返回 `Success`；随后仅删除核对过真实路径、根目录只含 `library-a` 且含本轮数据库的 `/sdcard/Download/calibre-step09-acceptance-20261007`，检查该目录不存在、两个包已卸载，其他匹配包清单保持不变（`cleanup.json`）。没有操作正式应用、真实书库或云端测试目录，云端目录由用户自行决定保留或删除。原始日志／APK／设备产物保持在忽略的构建目录，`plan.md` 与本地配置不加入提交。
 
 代表性实库／规模、无相应样本的存储卷／提供方、第三阶段阅读器和第四阶段真实源写回保留原未完成范围；本轮没有证明 SIGKILL 后系统即时自动恢复，不扩大为所有 Android 版本或代表性性能通过。历史失败的 fixture 已按本节实际定向复验关闭，不将多轮计数写成一次全量通过。
+
+## 阶段一、二检查与 Q31–Q34 调整（2026-10-07）
+
+对应 R18、R32 及 [Q31–Q34](../../questions.md#九阶段一二检查结论)：登录／目录授权失效改为等待并在重新授权后自动继续，服务端限流显示“等待限流”，本地复制以 SAF 文档大小作为空间预检与进度总量，调度顺序等待只显示“排队”。同时删除未使用的 `SourceSynchronization`、`StartupSyncSetting`，并修正两处真实 SAF 测试的过期预期。
+
+### 构建、JVM、lint 与平台回归
+
+`./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease` 为 `BUILD SUCCESSFUL`；两变体 lint 为 0 errors，剩余 5 个上游依赖版本 warning。设备 PA6／API 34 上安装独立 `.debug`／`.debug.test` 后执行完整 instrumentation（不带 opt-in 参数），**OK (190 tests)**，8 项真实上游 opt-in 测试按假设跳过（`check-20261007/full-suite.txt`）。
+
+### 真实本地 SAF 验收
+
+专用副本为 `/sdcard/Download/calibre-check-20261007/library-a/`，由仓库示例书库原样推送，12 个文件；开始前保存全部源文件 SHA-256。通过 helper 在系统选择器授权该目录，第 1 页“验证／同步元数据”成功，导入 1 个书库。
+
+- `-e localSaf true` 执行 `LocalSourceBackendDeviceTest#realSafRangeMatchesFullSourceSuffix` 与 `LocalDirectoryAuthorizationDeviceTest`，**OK (2 tests)**。前者新增断言：生产 SAF 后端返回的 `metadata.db` 文档大小等于完整读取的字节数（Q32）；后者最后释放持久授权。
+- 授权撤销状态下，第 1 页显示“目录授权已失效，请重新选择。”。第 7 页复制首本 EPUB、经过第 9 页触发可见封面、第 12 页“立即同步元数据”后，副本、封面和手动同步三项任务均为 `Waiting(directory_authorization)`，没有判为失败；第 7 页显示“目录授权已失效，请重新选择。”，第 11 页任务显示“等待条件／等待目录授权”（Q31）。
+- 回到第 1 页重新选择同一 `library-a` 并允许后，10 秒内全部自动继续：副本与封面原任务 Completed；原同步任务按候选令牌规则取消，等价的新高优先 `manual_sync` 任务 Completed，随后派生的已下载格式检查 Completed。私有副本 SHA-256 与源 EPUB 一致（`ba999028…b15b5`）。
+- `realSafSnapshotSourceReadsCancellationAndRevocation` 首次失败：测试仍要求同步完成后没有书库身份，这是导入接入前的预期。改为断言身份绑定到所选目录后重新执行，**OK (1 test)**（`saf-snapshot.txt`／`saf-snapshot-retest.txt`）。
+
+结束时 12 个源文件 SHA-256 与基线一致。两个包卸载均 `Success`，专用目录已删除，包列表无匹配，`/data/local/tmp` 无 helper XML 残留。
+
+### 界面文案对齐
+
+队列由后台自动执行，等待条件满足后自动继续，因此排队与等待提示不再要求“显式执行”或“重新执行”。按钮“执行排队任务”改为“立即执行”，它仍只请求立即唤醒队列。网络等待提示自动继续；任务已失败于网络不可用时，才提示恢复连接后重试。完整构建、单元测试 92 项与两变体 lint（0 errors，5 个上游 warning）通过。只改文案和状态映射，没有在真机上复验。
+
+### 真实 OneDrive 登录失效与重新登录
+
+重新安装最新 debug 包后，用户自行登录个人测试账号并选择专用云端 `library-a`；主 agent 未查看登录页面。第 4 页“验证／同步元数据”成功，导入 3 本书，书目与既有 `library-a` fixture 一致。
+
+- 用户在 Microsoft 账户的应用权限页删除本应用权限后，第 2 页显示“需要重新登录。”。
+- 此时第 7 页下载首本 EPUB、经过第 9 页触发可见封面、第 12 页“立即同步元数据”，三项任务均为 `Waiting(login)`，没有判为失败。第 7 页显示“需要重新登录。”及“立即执行”，第 11 页显示“等待条件／等待登录”（Q31）。
+- 用户重新登录后无需其它操作，任务按优先级自动继续：高优先副本原任务 Completed，原同步任务按候选令牌规则取消，等价新同步任务 Completed，低优先封面原任务 Completed，随后派生的已下载格式检查 Completed。私有副本 51,734 字节，SHA-256 与已知 fixture 一致（`ba999028…b15b5`）。
+
+结束后卸载 debug 包返回 `Success`，包列表无匹配，`/data/local/tmp` 无 helper XML 残留。云端测试目录由用户决定保留或删除。
+
+### 尚未完成
+
+- 真实服务端限流无法按需触发，“等待限流”仅由 Graph 429／5xx 映射与队列退避的接口回归覆盖。
+- “排队”：本次只删除了额外提示，排队状态的显示代码没有变；示例书库文件太小，无法在真机上稳定构造任务排在执行中任务之后的场景，也没有对应的页面自动测试。

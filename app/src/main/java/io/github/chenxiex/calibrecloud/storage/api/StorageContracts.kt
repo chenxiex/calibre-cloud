@@ -4,7 +4,6 @@ import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.model.CustomColumnId
 import io.github.chenxiex.calibrecloud.model.FileVersion
-import io.github.chenxiex.calibrecloud.model.FormatResource
 import io.github.chenxiex.calibrecloud.model.LibraryId
 import java.io.Closeable
 import java.io.InputStream
@@ -13,8 +12,9 @@ import java.util.UUID
 /** Safe diagnostic correlation token; arbitrary exception text and URLs cannot be carried here. */
 data class DiagnosticId(val value: UUID)
 
+/** THROTTLED covers server throttling and temporary server errors that ask the client to retry later. */
 enum class StorageErrorKind {
-    NO_NETWORK, LOGIN_REQUIRED, AUTHORIZATION_EXPIRED, SOURCE_MISSING,
+    NO_NETWORK, THROTTLED, LOGIN_REQUIRED, AUTHORIZATION_EXPIRED, SOURCE_MISSING,
     INCOMPATIBLE_DATABASE, VERSION_CONFLICT, INSUFFICIENT_SPACE,
     CORRUPT_CONTENT, UNSUPPORTED_OPERATION, LOCAL_IO,
 }
@@ -65,13 +65,6 @@ fun interface CopyReader {
 sealed interface StorageOperationResult {
     data object Completed : StorageOperationResult
     data class Failed(val error: StorageError) : StorageOperationResult
-}
-
-/** Invoked only by future task handlers; explicit loading is separate from ordinary copy reads. */
-interface SourceSynchronization {
-    suspend fun synchronizeMetadata(libraryId: LibraryId): StorageOperationResult
-    suspend fun loadFormat(resource: FormatResource): StorageOperationResult
-    suspend fun loadCover(book: BookKey): StorageOperationResult
 }
 
 /** Removing an exact copy cannot mean deleting its source or another format. */

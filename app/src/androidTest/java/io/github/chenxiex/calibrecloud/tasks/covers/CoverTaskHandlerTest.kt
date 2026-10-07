@@ -184,7 +184,7 @@ class CoverTaskHandlerTest {
         database.writableDatabase.execSQL("""
             INSERT INTO downloaded_copies(library_id,source_id,source_uuid,format,file_generation,title,
                 size_bytes,version_backend,version_token,source_availability) VALUES(?,?,?,?,?,?,?,?,?,?)
-        """.trimIndent(), arrayOf(book.libraryId.value.toString(), book.sourceId, book.sourceUuid.toString(),
+        """.trimIndent(), arrayOf<Any>(book.libraryId.value.toString(), book.sourceId, book.sourceUuid.toString(),
             "EPUB", UUID.randomUUID().toString(), "Preserved book", 123L, "local", "version-3", "available"))
         val manifest = state.find(CopyKey(book, BookFormat.parse("EPUB")))
         assertNotNull(manifest)
@@ -250,8 +250,9 @@ class CoverTaskHandlerTest {
             val source = Source(image(64, 96, Color.BLUE)).apply { failure = kind }
             coordinator(source).drain()
             assertEquals(0, source.opens.get())
-            if (kind == StorageErrorKind.NO_NETWORK) assertTrue(queue.get(task)!!.record.state is TaskState.Waiting)
-            else assertTrue(queue.get(task)!!.record.state is TaskState.Finished)
+            // A local library waits for directory re-authorization instead of failing.
+            val reason = if (kind == StorageErrorKind.NO_NETWORK) WaitingReason.NETWORK else WaitingReason.DIRECTORY_AUTHORIZATION
+            assertEquals(TaskState.Waiting(FrozenSet(listOf(reason))), queue.get(task)!!.record.state)
             assertImage(book, Color.RED, 64, 96)
             if (queue.get(task)!!.record.state is TaskState.Waiting) {
                 assertTrue(queue.control(task, TaskControl.CANCEL))

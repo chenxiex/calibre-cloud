@@ -157,15 +157,14 @@ class OneDriveCandidateTaskHandlerTest {
     }
 
     @Test
-    fun loginSessionMismatchRejectsQueuedBrowseBeforeGraphAccess() = runBlocking<Unit> {
+    fun loginSessionMismatchMakesQueuedBrowseWaitForLoginBeforeGraphAccess() = runBlocking<Unit> {
         val task = service.browse()!!
         val previousSession = authorization.sessionId()
         login()
         assertNotEquals(previousSession, authorization.sessionId())
         coordinator.drain()
         assertEquals(0, graph.requests.get())
-        val result = (queue.get(task)!!.record.state as TaskState.Finished).result as TaskResult.Failed
-        assertEquals(TaskError.Source(StorageError(StorageErrorKind.LOGIN_REQUIRED)), result.failure.error)
+        assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.LOGIN))), queue.get(task)!!.record.state)
         assertNull(service.currentPage())
         assertFalse(service.choose("root"))
         assertNull(state.current()!!.location)

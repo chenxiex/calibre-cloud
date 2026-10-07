@@ -1,6 +1,6 @@
 # Android 开发容器
 
-本配置提供命令行编译、静态检查、SQLite 数据检查和 ADB 工具，适用于 Kotlin + Jetpack Compose + AppAuth-Android + OkHttp + 原生 SQLite + WorkManager/FileProvider。当前仓库尚无 Android 应用工程，初始化容器不会创建工程、下载应用依赖或执行应用构建。
+本配置提供命令行编译、静态检查、SQLite 数据检查和 ADB 工具，适用于 Kotlin + Jetpack Compose + AppAuth-Android + OkHttp + 原生 SQLite + WorkManager/FileProvider。初始化容器不会创建工程、下载应用依赖或执行应用构建；应用工程的构建说明见 [Android 工程](../../app/README.md#构建)。
 
 ## 镜像内的工具
 
@@ -10,7 +10,7 @@
 | OpenJDK | 21 | Android/Gradle 构建，包含在镜像内 |
 | Gradle | 9.3.1 | 初始化项目及生成 Wrapper；发行包 ZIP 同时作为缓存种子 |
 | Android Command-line Tools | 下载构建号 `15859902` | `sdkmanager`、`avdmanager`、`apkanalyzer` 等工具 |
-| Android SDK Platform | API 36 | 供后续工程设置 `compileSdk = 36` |
+| Android SDK Platform | API 36 | 应用工程的 `compileSdk = 36` |
 | Android Build Tools | 36.0.0 | `aapt2`、`apksigner`、`zipalign` 等工具 |
 | Android Platform Tools | 构建镜像时的稳定版本 | `adb`，在日常创建容器时不重新下载 |
 | `sqlite3`、`jq`、`curl` | Debian 仓库版本 | 检查 Calibre 的 `metadata.db` 和 API 响应 |
@@ -20,7 +20,7 @@
 
 镜像使用 [Debian trixie 提供的 OpenJDK 21](https://packages.debian.org/trixie/openjdk-21-jdk-headless)。[AGP 9.1.1 官方兼容表](https://developer.android.com/build/releases/agp-9-1-0-release-notes)要求 Gradle 至少 9.3.1、JDK 至少 17 和 Build Tools 至少 36.0.0；JDK 21 满足最低要求，也在 [Gradle 支持范围](https://docs.gradle.org/current/userguide/compatibility.html#java_runtime)内。AGP、Kotlin、Compose 和应用库的实际版本仍由项目 Gradle 配置决定。Compose 编译器插件应与 Kotlin 版本匹配，参考 [Compose 配置说明](https://developer.android.com/develop/ui/compose/setup-compose-dependencies-and-compiler)。
 
-运行 Gradle 的 JDK 与应用的 Java/Kotlin 编译目标分别配置。后续应用工程应显式设置所需的 Java 兼容级别及 Kotlin JVM target，参考 [Android 构建中的 Java 版本说明](https://developer.android.com/build/jdks)。
+运行 Gradle 的 JDK 与应用的 Java/Kotlin 编译目标分别配置。应用工程显式设置 Java 兼容级别及 Kotlin JVM target，具体约束见 [Android 模块约束](../../app/AGENTS.md#构建与实现)，参考 [Android 构建中的 Java 版本说明](https://developer.android.com/build/jdks)。
 
 Command-line Tools 和 Gradle 的归档使用固定下载地址并校验 SHA-256，校验值来自 [Android 官方下载表](https://developer.android.com/studio#command-line-tools-only)和 [Gradle 官方 checksum 文件](https://services.gradle.org/distributions/gradle-9.3.1-bin.zip.sha256)。基础镜像标签、系统软件包和 `platform-tools` 会随上游更新，因此重新构建镜像不保证逐字节相同。构建步骤会通过 `sdkmanager --licenses` 接受 [Android SDK 许可](https://developer.android.com/studio#terms-and-conditions)。
 
@@ -45,7 +45,7 @@ SDK 种子位于镜像的 `/opt/android-sdk-seed`，可写 SDK 位于 volume 中
 
 Gradle 的已校验 ZIP 会复制到默认 Wrapper 缓存位置。对于 `https://services.gradle.org/distributions/gradle-9.3.1-bin.zip`，Wrapper 首次使用时直接从本地 ZIP 校验、解压，无需再次下载。初始化脚本不伪造 Wrapper 的 `.ok` 完成标记。缓存布局按 [Gradle 9.3.1 PathAssembler](https://github.com/gradle/gradle/blob/v9.3.1/platforms/core-runtime/wrapper-shared/src/main/java/org/gradle/wrapper/PathAssembler.java)和 [Install](https://github.com/gradle/gradle/blob/v9.3.1/platforms/core-runtime/wrapper-shared/src/main/java/org/gradle/wrapper/Install.java) 实现；使用其他版本、镜像 URL、`-all` 发行包或自定义 Wrapper 缓存路径时，首次仍需下载，之后保存在 volume 中。
 
-## 后续使用
+## 使用
 
 宿主机需要 Docker 和支持 Dev Containers 的编辑器。`.github/.devcontainer` 中的配置用于构建开发镜像；可通过 Dev Containers CLI 显式选择此配置：
 
@@ -59,7 +59,7 @@ devcontainer build --workspace-folder . --config .github/.devcontainer/devcontai
 
 VS Code 配置包含 Kotlin 语法支持、Java 和 Gradle 扩展。Java 的 `linux-x64` 平台扩展自带语言服务器运行时，构建 JVM 固定为镜像中的 JDK 21，参考 [扩展官方说明](https://github.com/redhat-developer/vscode-java#java-tooling-jdk)。这些扩展提供基础编辑支持；Compose Preview、Layout Inspector 等 Android Studio 功能需要在宿主机使用 Android Studio。
 
-创建 Android 工程并配置 Gradle 后，可用镜像里的 Gradle 生成匹配版本的 Wrapper：
+仓库已包含项目 Wrapper，维护规则见 [Gradle 配置维护](../../gradle/AGENTS.md)。镜像里的 Gradle 仅用于初始化或重新生成匹配版本的 Wrapper：
 
 ```bash
 gradle wrapper \
@@ -68,7 +68,7 @@ gradle wrapper \
     --gradle-distribution-sha256-sum b266d5ff6b90eada6dc3b20cb090e3731302e553a27c5d3e4df1f0d76beaff06
 ```
 
-将 `gradlew`、`gradlew.bat`、`gradle/wrapper/gradle-wrapper.jar` 和 `gradle-wrapper.properties` 纳入版本控制。日常构建使用项目 Wrapper，参考 [Gradle 官方指南](https://docs.gradle.org/current/userguide/gradle_wrapper.html)：
+`gradlew`、`gradlew.bat`、`gradle/wrapper/gradle-wrapper.jar` 和 `gradle-wrapper.properties` 一起纳入版本控制。日常构建使用项目 Wrapper，参考 [Gradle 官方指南](https://docs.gradle.org/current/userguide/gradle_wrapper.html)：
 
 ```bash
 ./gradlew assembleDebug
@@ -112,6 +112,6 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 如果改为在容器内运行模拟器，可通过 `sdkmanager` 将 `emulator` 和系统镜像安装到 SDK volume，AVD 数据保存在 Android 用户数据 volume。Linux 上的硬件加速通常还需要额外映射 `/dev/kvm` 并配置权限；USB 真机调试也需要单独配置设备访问。
 
-## 本次验证范围
+## 验证记录
 
-仅执行配置与脚本的静态检查。按照当前要求，未在本地构建、拉取或运行镜像，未执行 SDK 安装、ADB 探测或 Android 应用构建；镜像的实际构建和运行效果尚未验证。
+容器持久挂载、SDK、Wrapper 种子及应用构建的实际结果见 [第一阶段验证记录](../../app/verification/phase-1.md)，ADB 真机操作结果见 [第二阶段验证记录](../../app/verification/phase-2.md)。

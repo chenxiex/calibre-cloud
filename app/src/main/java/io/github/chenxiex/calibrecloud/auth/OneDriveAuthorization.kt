@@ -2,10 +2,10 @@ package io.github.chenxiex.calibrecloud.auth
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.util.Log
 import android.os.SystemClock
 import android.provider.Settings
+import androidx.core.net.toUri
 import io.github.chenxiex.calibrecloud.auth.AuthorizationTransactionGate.CallbackResult
 import io.github.chenxiex.calibrecloud.BuildConfig
 import kotlinx.coroutines.CancellationException
@@ -59,8 +59,8 @@ class OneDriveAuthorization(
         val config = configuration ?: return@withLock null
         try {
             val request = AuthorizationRequest.Builder(
-                AuthorizationServiceConfiguration(Uri.parse(config.authorizationEndpoint), Uri.parse(config.tokenEndpoint)),
-                config.clientId, ResponseTypeValues.CODE, Uri.parse(config.redirectUri),
+                AuthorizationServiceConfiguration(config.authorizationEndpoint.toUri(), config.tokenEndpoint.toUri()),
+                config.clientId, ResponseTypeValues.CODE, config.redirectUri.toUri(),
             ).setScopes(config.scopes).build()
             val intent = withContext(Dispatchers.IO) { platform.browserIntent(request) }
                 ?: run { issue = LoginIssue.NO_BROWSER; return@withLock null }
@@ -115,7 +115,7 @@ class OneDriveAuthorization(
                 try {
                     persist(interrupted = true)
                     onExchange()
-                    val response = AuthorizationResponse.Builder(request!!).fromUri(Uri.parse(address)).build()
+                    val response = AuthorizationResponse.Builder(request!!).fromUri(address.toUri()).build()
                     val next = AuthState(response, null)
                     val (token, error) = exchange(response.createTokenExchangeRequest())
                     next.update(token, error)

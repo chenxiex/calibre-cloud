@@ -82,6 +82,7 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
             DocumentsContract.Document.COLUMN_MIME_TYPE,
             DocumentsContract.Document.COLUMN_FLAGS,
+            DocumentsContract.Document.COLUMN_SIZE,
         )
         val cursor = resolver.query(uri, projection, null, null, null)
             ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
@@ -91,7 +92,8 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
                     val id = it.getString(0) ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
                     val name = it.getString(1) ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
                     add(LocalDocument(id, name, it.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR,
-                        it.getInt(3) and DocumentsContract.Document.FLAG_SUPPORTS_WRITE != 0))
+                        it.getInt(3) and DocumentsContract.Document.FLAG_SUPPORTS_WRITE != 0,
+                        if (it.isNull(4)) null else it.getLong(4)))
                 }
             }
         }

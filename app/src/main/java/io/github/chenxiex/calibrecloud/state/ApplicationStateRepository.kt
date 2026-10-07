@@ -27,7 +27,7 @@ data class LibrarySelection(
 
 /**
  * All public suspend operations dispatch database/file work off the caller's thread.
- * Selection tokens revoke old UI intents and candidate requests: future schedulers must compare them
+ * Selection tokens revoke old UI intents and candidate requests: the queue and publishers compare them
  * before publishing, and run library tasks only for current().identity. Selecting never validates a source.
  * New binding is reserved for a successful importer; re-selection restores only a previously valid private import.
  */
@@ -242,7 +242,7 @@ class ApplicationStateRepository(
         }
     }
 
-    /** One-time bridge from phase 1 preferences; never overwrites a newer current selection. */
+    /** One-time bridge from legacy local-directory preferences; never overwrites a newer current selection. */
     internal fun importLocalAuthorization(treeUri: String, location: LibraryLocation.Local) {
         transaction {
             if (localTreeUri() == null) {

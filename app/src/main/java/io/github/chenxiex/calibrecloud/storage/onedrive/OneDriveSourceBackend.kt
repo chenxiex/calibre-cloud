@@ -503,8 +503,8 @@ class OneDriveSourceBackend(
             403 -> StorageErrorKind.AUTHORIZATION_EXPIRED
             404, 410 -> StorageErrorKind.SOURCE_MISSING
             409, 412 -> StorageErrorKind.VERSION_CONFLICT
-            429 -> StorageErrorKind.NO_NETWORK
-            in 500..599 -> StorageErrorKind.NO_NETWORK
+            429 -> StorageErrorKind.THROTTLED
+            in 500..599 -> StorageErrorKind.THROTTLED
             else -> StorageErrorKind.UNSUPPORTED_OPERATION
         }
         val transient = code == 429 || code in 500..599

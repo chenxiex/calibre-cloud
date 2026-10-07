@@ -42,7 +42,7 @@ class LocalSnapshotTaskHandler(
             return@withContext StageOutcome.Fail(TaskError.Source(StorageError(StorageErrorKind.AUTHORIZATION_EXPIRED)))
         }
         val treeUri = state.localTreeUri()
-            ?: return@withContext StageOutcome.Fail(TaskError.Source(StorageError(StorageErrorKind.AUTHORIZATION_EXPIRED)))
+            ?: return@withContext StageOutcome.Wait(WaitingReason.DIRECTORY_AUTHORIZATION)
         if (state.current()?.token != request.context.selectionToken) return@withContext staleFailure()
         try {
             when (val result = backend.acquireSnapshot(treeUri, entry.record.id.value) {
@@ -55,7 +55,8 @@ class LocalSnapshotTaskHandler(
                         check = { execution.checkControl() }, taskId = entry.record.id.value)
                     if (identity == null) staleFailure() else StageOutcome.Complete(cachePublished = true)
                 }
-                is LocalSourceResult.Failed -> StageOutcome.Fail(TaskError.Source(result.error))
+                is LocalSourceResult.Failed -> authorizationWait(BackendKind.LOCAL, result.error.kind)?.let { StageOutcome.Wait(it) }
+                    ?: StageOutcome.Fail(TaskError.Source(result.error))
             }
         } catch (failure: SnapshotParseException) {
             StageOutcome.Fail(TaskError.Source(StorageError(when (failure.reason) {

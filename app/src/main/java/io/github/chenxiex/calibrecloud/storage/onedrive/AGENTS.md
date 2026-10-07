@@ -5,7 +5,7 @@
 - `discover` 使用已授权 Microsoft consumers ID token 的 subject（带固定来源前缀）、本人 `/me/drive` 的 drive ID 及根 item ID 建立稳定定位；可信注入未提供 subject 时才使用可用的 `owner.user.id`，不能假定真实个人 drive 总会返回该字段，只接受 `driveType=personal`。账号标识不依赖 Graph owner 的显示形式，重新登录换账号仍按完整位置隔离。不依赖显示名／邮件地址，不进入 `remoteItem` 或其它 drive。Graph `shared` facet 仅表示项目曾分享给别人，不代表外部共享来源；本人 drive 内满足父级边界的普通项目不能因该字段被拒绝。
 - 目录浏览使用 `listAllDirectories`，同一次任务只校验一次本人 drive 和 parent 到选定根的祖先链，不指定 `$top=3`，沿服务端 nextLink 完整取得子目录。每个服务端页前后检查任务控制；nextLink 只能指向同一 HTTPS Graph children 端点，循环链接和重复 item ID 拒绝。调用方保存完整结果并本地翻页，不为界面翻页访问源。目录选择仅显示普通本人目录，忽略文件及 remoteItem／deleted／package 项；需要显示的目录仍检查 drive 和立即父 ID。源路径解析和快照检查保持原有严格范围，不因无关项目过滤而放宽。
 - 源文件按 `RelativeSourcePath` 逐层解析，检查每层 parentReference 的 drive 和立即父 ID；稳定定位为 drive/item ID，版本只使用文件 cTag，不能用 eTag 或书籍时间替代。
-- Graph 401 最多刷新授权一次；403 表示授权失效。429／5xx 将 Retry-After 交回任务调度器，缺失时使用 30 秒有限重试间隔；后端不阻塞睡眠。调度器决定重试次数上限，不以网络／授权失败认定源删除。
+- Graph 401 最多刷新授权一次；403 表示授权失效。429／5xx 归为 `THROTTLED` 并将 Retry-After 交回任务调度器，缺失时使用 30 秒有限重试间隔；后端不阻塞睡眠。调度器决定重试次数上限，不以网络／授权失败认定源删除。
 - 下载重定向只接受 HTTPS，由单独无授权 client 处理，最多五跳。生产保持默认独立 contentClient；注入 contentClient 和 GraphJsonDecoder 仅用于可信网络测试。不得保存／打印响应体、token、预签名下载 URL，不能把它们作为 reader URI。
 - 封面按导入的精确图片相对路径解析，只读取该图片 item 的 [thumbnails 集合](https://learn.microsoft.com/en-us/graph/api/driveitem-list-thumbnails?view=graph-rest-1.0)，不得请求 EPUB／PDF 等格式的缩略图。优先选最小满足目标宽高的尺寸，否则选最大可用尺寸；没有安全可用缩略图或缩略图已失效时回退同一封面图片的原内容。缩略图 URL 仅用于当次无授权读取，不进入缓存标识或日志；授权／网络／限流失败仍交给任务调度器，不隐式吞掉。调用方负责流关闭、图像解码与应用私有缓存，验收回调只提供成功打开的缩略图宽高。
 - 单格式副本续传重新解析源身份、cTag 和长度，只向新取得的实际内容 URL 发送 `Range` 与 `Accept-Encoding: identity`，不向 Graph `/content` 发送 Range、不携带 Graph 授权。仅接受匹配断点及总长的 206；200／416 关闭响应并返回无法范围读取，任务层完整重传。网络流中断交给队列重试，响应长度／范围异常归为损坏或冲突，不能拼接。下载 URL 不进入恢复记录。

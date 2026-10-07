@@ -341,6 +341,30 @@ class DurableTaskQueueTest {
     }
 
     @Test
+    fun serverThrottlingBackoffWaitsForThrottlingNotNetwork() = runBlocking<Unit> {
+        var time = 0L
+        var calls = 0
+        val task = created(cover(1, TaskOrigin.USER_DOWNLOAD))
+        val handler = FixtureHandler { _, _ ->
+            calls++
+            StageOutcome.Retry(TaskError.Source(StorageError(StorageErrorKind.THROTTLED)), serverDelayMillis = 2500)
+        }
+        val coordinator = TaskCoordinator(queue, listOf(handler), now = { time })
+        coordinator.drain()
+        assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.THROTTLED))), queue.get(task)!!.record.state)
+        // A claim during backoff keeps the throttling reason instead of reporting a network wait.
+        coordinator.drain()
+        assertEquals(1, calls)
+        assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.THROTTLED))), queue.get(task)!!.record.state)
+        repeat(3) {
+            time = queue.get(task)!!.retryAt
+            coordinator.drain()
+        }
+        assertEquals(StorageErrorKind.THROTTLED, (((queue.get(task)!!.record.state as TaskState.Finished).result
+            as TaskResult.Failed).failure.error as TaskError.Source).error.kind)
+    }
+
+    @Test
     fun transientFailureHasPersistedFiniteBackoffAndPermanentErrorNeedsExplicitRetry() = runBlocking<Unit> {
         var time = 0L
         var calls = 0

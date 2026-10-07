@@ -22,7 +22,7 @@ class CalibreSnapshotParserTest {
             val file = File(directory, "metadata.db").apply { writeBytes(original) }
             val parsed = CalibreSnapshotParser().parse(file)
             assertEquals(UUID.fromString("68bd6f1d-8a36-487a-aff3-f122dbc1f215"), parsed.sourceLibraryUuid)
-            assertEquals(listOf(1L, 2L, 3L), parsed.books.map { it.sourceId })
+            assertEquals(listOf(1L, 4L, 5L), parsed.books.map { it.sourceId })
             val book = parsed.books.first()
             assertEquals(1L, book.sourceId)
             assertEquals(UUID.fromString("ed5e903d-83cb-418c-bbd3-90de61ff46c9"), book.sourceUuid)
@@ -40,20 +40,19 @@ class CalibreSnapshotParserTest {
             assertFalse(column.isMultiple)
             // Desktop sample has an absent value, an explicit yes and an explicit no.
             assertFalse(book.customValues.containsKey(column.id.sourceId))
-            val novel = parsed.books[1]
-            assertEquals("我们在「解读」上犯了错误 第2.5卷(kakuyomu版)", novel.title)
-            assertEquals(UUID.fromString("60f647d6-b94e-4636-b6f4-6876ef672164"), novel.sourceUuid)
-            assertEquals(listOf("水鏡月聖", "ぽりごん。"), novel.authors)
-            assertEquals(listOf("校园", "青春", "恋爱", "悬疑"), novel.tags)
-            assertEquals("我们在「解读」上犯了错误", novel.series)
-            assertEquals(2.5, novel.seriesIndex!!, 0.0)
-            assertEquals(ImportedColumnValue.Bool(true), novel.customValues[column.id.sourceId])
-            val third = parsed.books[2]
-            assertEquals("夜叉池", third.title)
-            assertEquals(UUID.fromString("f3954798-890f-482f-a1e9-3cc26080659b"), third.sourceUuid)
-            assertEquals(listOf("[日]泉镜花"), third.authors)
-            assertEquals(ImportedColumnValue.Bool(false), third.customValues[column.id.sourceId])
-            assertEquals(listOf(51734L, 62776L, 168084L), parsed.books.map { it.formats.single().sizeBytes })
+            val hamlet = parsed.books[1]
+            assertEquals("哈姆莱特", hamlet.title)
+            assertEquals(UUID.fromString("8a4e0ccb-7293-4c3a-bc58-3b130d950359"), hamlet.sourceUuid)
+            assertEquals(listOf("[英]莎士比亚 著"), hamlet.authors)
+            assertTrue(hamlet.tags.isEmpty())
+            assertNull(hamlet.series)
+            assertEquals(ImportedColumnValue.Bool(true), hamlet.customValues[column.id.sourceId])
+            val lear = parsed.books[2]
+            assertEquals("李尔王", lear.title)
+            assertEquals(UUID.fromString("c1e49ea8-507e-4f67-ad93-6249aa9d6d68"), lear.sourceUuid)
+            assertEquals(listOf("[英]莎士比亚 著/朱生豪 译"), lear.authors)
+            assertEquals(ImportedColumnValue.Bool(false), lear.customValues[column.id.sourceId])
+            assertEquals(listOf(51734L, 254235L, 245918L), parsed.books.map { it.formats.single().sizeBytes })
             parsed.books.forEach {
                 assertEquals("EPUB", it.formats.single().format.value)
                 assertTrue(it.hasCover)

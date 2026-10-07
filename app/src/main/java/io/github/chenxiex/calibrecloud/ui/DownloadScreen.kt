@@ -146,7 +146,9 @@ internal fun downloadTaskStatusResource(state: TaskState?, rejected: Boolean): I
         is TaskState.Running -> R.string.download_running
         is TaskState.Waiting -> when {
             WaitingReason.NETWORK in state.reasons -> R.string.onedrive_task_network
+            WaitingReason.THROTTLED in state.reasons -> R.string.task_wait_throttled
             WaitingReason.LOGIN in state.reasons -> R.string.onedrive_relogin
+            WaitingReason.DIRECTORY_AUTHORIZATION in state.reasons -> R.string.local_reauthorize
             else -> R.string.download_waiting
         }
         is TaskState.Paused -> R.string.download_paused
@@ -154,7 +156,8 @@ internal fun downloadTaskStatusResource(state: TaskState?, rejected: Boolean): I
             TaskResult.Completed -> R.string.download_complete
             is TaskResult.Cancelled -> R.string.download_cancelled
             is TaskResult.Failed -> when ((result.failure.error as? TaskError.Source)?.error?.kind) {
-                StorageErrorKind.NO_NETWORK -> R.string.onedrive_task_network
+                StorageErrorKind.NO_NETWORK -> R.string.onedrive_task_network_failed
+                StorageErrorKind.THROTTLED -> R.string.task_error_throttled
                 StorageErrorKind.LOGIN_REQUIRED -> R.string.onedrive_relogin
                 StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.download_permission
                 StorageErrorKind.SOURCE_MISSING -> R.string.download_missing

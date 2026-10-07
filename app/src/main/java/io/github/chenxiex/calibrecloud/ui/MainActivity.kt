@@ -297,7 +297,8 @@ private fun LocalSnapshotControls(model: LocalSnapshotViewModel, authorized: Boo
     val status = when (taskState) {
         TaskState.Queued -> R.string.local_snapshot_queued
         is TaskState.Running -> R.string.local_snapshot_running
-        is TaskState.Waiting -> R.string.local_snapshot_waiting
+        is TaskState.Waiting -> if (io.github.chenxiex.calibrecloud.tasks.api.WaitingReason.DIRECTORY_AUTHORIZATION in taskState.reasons)
+            R.string.local_reauthorize else R.string.local_snapshot_waiting
         is TaskState.Paused -> R.string.local_snapshot_paused
         is TaskState.Finished -> when (val result = taskState.result) {
             TaskResult.Completed -> R.string.local_snapshot_ready
@@ -380,6 +381,7 @@ internal fun oneDriveTaskStatusResource(taskState: TaskState?, operation: String
         is TaskState.Running -> R.string.onedrive_task_running
         is TaskState.Waiting -> when {
             io.github.chenxiex.calibrecloud.tasks.api.WaitingReason.NETWORK in taskState.reasons -> R.string.onedrive_task_network
+            io.github.chenxiex.calibrecloud.tasks.api.WaitingReason.THROTTLED in taskState.reasons -> R.string.task_wait_throttled
             io.github.chenxiex.calibrecloud.tasks.api.WaitingReason.LOGIN in taskState.reasons -> R.string.onedrive_relogin
             else -> R.string.onedrive_task_waiting
         }
@@ -389,7 +391,8 @@ internal fun oneDriveTaskStatusResource(taskState: TaskState?, operation: String
                 OneDriveCandidateTaskHandler.SNAPSHOT) R.string.local_snapshot_ready else R.string.onedrive_browse_completed
             is TaskResult.Cancelled -> R.string.onedrive_task_cancelled
             is TaskResult.Failed -> when ((result.failure.error as? TaskError.Source)?.error?.kind) {
-                StorageErrorKind.NO_NETWORK -> R.string.onedrive_task_network
+                StorageErrorKind.NO_NETWORK -> R.string.onedrive_task_network_failed
+                StorageErrorKind.THROTTLED -> R.string.task_error_throttled
                 StorageErrorKind.LOGIN_REQUIRED -> R.string.onedrive_relogin
                 StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.onedrive_task_permission
                 StorageErrorKind.SOURCE_MISSING -> R.string.local_snapshot_missing

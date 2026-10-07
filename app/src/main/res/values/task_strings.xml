@@ -45,11 +45,10 @@
     <string name="task_type_cover">封面加载</string>
     <string name="task_type_write">已读状态写回</string>
     <string name="task_wait_network">等待网络</string>
+    <string name="task_wait_throttled">等待限流</string>
     <string name="task_wait_login">等待登录</string>
     <string name="task_wait_directory">等待目录授权</string>
     <string name="task_wait_dependency">等待必要依赖完成</string>
-    <string name="task_wait_current">等待当前执行任务完成</string>
-    <string name="task_wait_priority">等待更高优先级请求</string>
     <string name="task_wait_library">等待当前书库激活</string>
     <string name="task_wait_recovery">等待源提交恢复确认</string>
     <string name="task_stage_candidate">验证书库访问</string>
@@ -66,6 +65,10 @@
     <string name="task_stage_write_refetch">重新获取写后元数据</string>
     <string name="task_stage_write_import">导入写后元数据</string>
     <string name="task_stage_recovery">复查恢复状态</string>
+    <string name="task_error_network">网络不可用</string>
+    <string name="task_error_throttled">服务端限流</string>
+    <string name="task_error_login">需要重新登录</string>
+    <string name="task_error_permission">访问权限已失效</string>
     <string name="task_error_column">已读栏目失效</string>
     <string name="task_error_identity">书籍身份已改变</string>
     <string name="task_error_missing">源文件不存在</string>

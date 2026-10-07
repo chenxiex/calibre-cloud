@@ -28,7 +28,6 @@ class TaskContractsTest {
     fun originsMapToUserAndAutomaticPriorities() {
         val high = setOf(TaskOrigin.USER_DOWNLOAD, TaskOrigin.USER_OPEN, TaskOrigin.MANUAL_SYNC, TaskOrigin.USER_READ_STATUS)
         TaskOrigin.entries.forEach { assertEquals(if (it in high) TaskPriority.HIGH else TaskPriority.LOW, it.priority) }
-        assertFalse(StartupSyncSetting().enabled)
     }
 
     @Test

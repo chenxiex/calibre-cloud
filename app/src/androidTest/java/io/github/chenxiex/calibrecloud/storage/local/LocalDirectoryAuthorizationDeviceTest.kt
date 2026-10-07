@@ -14,15 +14,23 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import android.content.Intent
+import org.junit.Assume.assumeTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Run after selecting the dedicated test library through the real system picker. Revokes that grant. */
+/** Opt-in with `-e localSaf true` after selecting the dedicated test library through the real system picker. Revokes that grant. */
 @RunWith(AndroidJUnit4::class)
 class LocalDirectoryAuthorizationDeviceTest {
     @get:Rule
     val compose = createAndroidComposeRule<MainActivity>()
+
+    @Before
+    fun requireExplicitOptIn() {
+        assumeTrue("Real SAF tests require a picker-granted dedicated sample and explicit opt-in",
+            InstrumentationRegistry.getArguments().getString("localSaf") == "true")
+    }
 
     @Test
     fun realPersistedGrantSurvivesRecreationAndRevocationIsVisible() = runBlocking {

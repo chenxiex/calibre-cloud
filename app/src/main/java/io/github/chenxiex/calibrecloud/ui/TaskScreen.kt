@@ -46,9 +46,6 @@ internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFaile
             Text(stringResource(R.string.task_order, pending.indexOf(record) + 1))
         }
         TaskStatus(record)
-        if (record.state == TaskState.Queued && records.any { it.state is TaskState.Running }) {
-            Text(stringResource(R.string.task_wait_current))
-        }
         Spacer(Modifier.height(8.dp))
         val controls = record.controls
         Row {
@@ -150,11 +147,10 @@ internal fun taskTypeResource(request: TaskRequest): Int = when (request) {
 
 internal fun waitingResource(reason: WaitingReason): Int = when (reason) {
     WaitingReason.NETWORK -> R.string.task_wait_network
+    WaitingReason.THROTTLED -> R.string.task_wait_throttled
     WaitingReason.LOGIN -> R.string.task_wait_login
     WaitingReason.DIRECTORY_AUTHORIZATION -> R.string.task_wait_directory
     WaitingReason.DEPENDENCY -> R.string.task_wait_dependency
-    WaitingReason.CURRENT_TASK -> R.string.task_wait_current
-    WaitingReason.HIGHER_PRIORITY -> R.string.task_wait_priority
     WaitingReason.INACTIVE_LIBRARY -> R.string.task_wait_library
     WaitingReason.RECOVERY -> R.string.task_wait_recovery
 }
@@ -180,9 +176,10 @@ internal fun taskErrorResource(error: TaskError): Int = when (error) {
     TaskError.InvalidColumn -> R.string.task_error_column
     is TaskError.BookIdentityChanged -> R.string.task_error_identity
     is TaskError.Source -> when (error.error.kind) {
-        StorageErrorKind.NO_NETWORK -> R.string.task_wait_network
-        StorageErrorKind.LOGIN_REQUIRED -> R.string.task_wait_login
-        StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.task_wait_directory
+        StorageErrorKind.NO_NETWORK -> R.string.task_error_network
+        StorageErrorKind.THROTTLED -> R.string.task_error_throttled
+        StorageErrorKind.LOGIN_REQUIRED -> R.string.task_error_login
+        StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.task_error_permission
         StorageErrorKind.SOURCE_MISSING -> R.string.task_error_missing
         StorageErrorKind.INCOMPATIBLE_DATABASE -> R.string.task_error_incompatible
         StorageErrorKind.VERSION_CONFLICT -> R.string.task_error_version

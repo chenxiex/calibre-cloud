@@ -15,12 +15,11 @@
 - [存储约束](src/main/java/io/github/chenxiex/calibrecloud/storage/AGENTS.md)：完整记录查询、普通读取、句柄生命周期和显式操作边界。
 - [任务约束](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)：固定请求、来源优先级、依赖、新鲜度及提交／刷新证据。
 - [文件提供约束](src/main/java/io/github/chenxiex/calibrecloud/files/AGENTS.md)：私有文件代次、FileProvider 范围和临时只读授权。
-
 - [应用状态约束](src/main/java/io/github/chenxiex/calibrecloud/state/AGENTS.md)：原生 SQLite、候选配置、身份绑定、最小清单及事务。
 
 ## Manifest 与入口
 
-- debug 使用 `.debug` application ID 后缀和可辨认名称，AndroidTest 使用独立测试包。provider authority 均由 `${applicationId}` 派生；书籍 provider 使用 `${applicationId}.books`，只在完整副本读取契约实现时开放。
+- debug 使用 `.debug` application ID 后缀和可辨认名称，AndroidTest 使用独立测试包。provider authority 均由 `${applicationId}` 派生；书籍 provider 使用 `${applicationId}.books`，只开放完整副本目录。
 - OAuth 配置与回调地址验证见 [授权模块](src/main/java/io/github/chenxiex/calibrecloud/auth/AGENTS.md)。缺少完整配置时回调接收器显式禁用，使用各变体独立的 `.disabled` scheme；不能阻止本地构建、发起登录或显示虚构成功。
 - 当前入口已接入本地目录授权，开发约束见 [本地授权](src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md)。本地授权恢复只检查平台授权与私有配置，显式“验证／同步元数据”经持久候选任务调用只读 SAF 后端，快照交给同一元数据导入器原子发布；OneDrive 通过持久候选任务调用个人文件后端，完整目录浏览和只读快照均不在 UI 中直接访问 Graph，目录翻页只操作本地完整结果；授权与有效令牌刷新由应用容器共享组件管理。注册一次性 `QueueWorker`，提交与控制后经 WorkManager 唤醒同一持久队列和执行锁，不创建周期任务。保留默认 initializer 的移除配置，由 Application 的 `Configuration.Provider` 支持按需初始化；配置遵循[官方初始化说明](https://developer.android.com/develop/background-work/background-tasks/persistent/configuration/custom-configuration)。长任务使用 `dataSync` 前台服务与静态通知，权限及类型遵循[官方长任务说明](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/long-running)，平台启动限制和任务配额不能靠注册 worker 消除。
 - 只申请已实现路径需要的权限；检查依赖合并的 Manifest，不因声明依赖而开放网络、广泛存储或后台权限。网络入口使用 HTTPS。
@@ -31,7 +30,7 @@
 
 - 测试随实际功能路径加入，不添加常量或空 Activity 的占位测试；`NO-SOURCE` 或生成 AndroidTest APK 不能记为功能测试通过。
 - 工程与构建配置变更按受影响路径执行 debug/release 构建和 lint；生成依赖锁后再运行不更新锁的构建，核对锁文件未变化。
-- 检查实际 APK 的最低系统、包标识、可调试状态及导出组件；OAuth 未接入时核对回调禁用。release 仅生成未签名产物，不使用正式签名。
+- 检查实际 APK 的最低系统、包标识、可调试状态及导出组件；OAuth 配置缺失时核对回调禁用。release 仅生成未签名产物，不使用正式签名。
 - ADB 安装前先从 APK 核对 debug application ID，只使用测试书库副本；记录结果后卸载 debug 与测试包，不覆盖正式应用或访问正式数据。
 - 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md) 与 [第二阶段记录](verification/phase-2.md)。构建及模拟平台／服务响应不能替代对应阶段的真实设备／上游验证；在目标真机自动执行的测试或 ADB 操作按其实际覆盖范围计为真机证据。
 

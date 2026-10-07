@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.FileVersion
+import io.github.chenxiex.calibrecloud.model.LibraryId
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
@@ -45,6 +46,13 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
 
     suspend fun get(id: TaskId): QueueEntry? = withContext(io) { entries(database.readableDatabase).find { it.record.id == id } }
     internal suspend fun isActive(record: TaskRecord): Boolean = withContext(io) { active(database.readableDatabase, record) }
+
+    /** Library that was current when a candidate was submitted, or that its import activated. */
+    internal suspend fun scopeLibrary(id: TaskId): LibraryId? = withContext(io) {
+        database.readableDatabase.rawQuery("SELECT scope_library_id FROM queued_tasks WHERE task_id = ?", arrayOf(id.value.toString())).use {
+            if (it.moveToFirst() && !it.isNull(0)) LibraryId(UUID.fromString(it.getString(0))) else null
+        }
+    }
 
     suspend fun list(): List<QueueEntry> = withContext(io) { entries(database.readableDatabase).sortedWith { a, b -> compareSchedulingPositions(a.record.scheduling, b.record.scheduling) } }
 
@@ -134,9 +142,16 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 val record = entry.record
                 if (isRevoked(this, record.id) || cacheCleanupPending(this) || record.state is TaskState.Finished || record.state is TaskState.Paused || record.id in excluded) return@forEach
                 val reasons = conditions(record).toMutableSet()
-                if (!active(this, record)) reasons.add(WaitingReason.INACTIVE_LIBRARY)
+                if (!active(this, record)) {
+                    reasons.add(WaitingReason.INACTIVE_LIBRARY)
+                    // An inactive task never runs, so keep the authorization reason its handler recorded.
+                    (record.state as? TaskState.Waiting)?.reasons?.filter {
+                        it == WaitingReason.LOGIN || it == WaitingReason.DIRECTORY_AUTHORIZATION }?.let(reasons::addAll)
+                }
                 if (!supported(record.submission.request)) reasons.add(WaitingReason.DEPENDENCY)
-                if (entry.retryAt > now) reasons.add(WaitingReason.NETWORK)
+                // Backoff keeps the reason recorded by the retry: server throttling or an unreachable network.
+                if (entry.retryAt > now) reasons.add(if ((record.state as? TaskState.Waiting)?.reasons?.contains(WaitingReason.THROTTLED) == true)
+                    WaitingReason.THROTTLED else WaitingReason.NETWORK)
                 if (record.submission.dependencies.any { edge ->
                         val parent = all.find { it.record.id == edge.taskId }?.record
                         parent == null || !satisfies(parent, edge.requirement)

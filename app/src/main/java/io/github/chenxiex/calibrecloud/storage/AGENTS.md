@@ -24,7 +24,7 @@
 
 ## 显式操作和文件提供
 
-`SourceSynchronization` 仅声明任务处理器调用的显式元数据、格式和封面加载入口；`CopyMaintenance` 仅声明精确副本移除和元数据清理。没有一般源上传／删除接口。`ReadStatusIntent` 只表达书籍、动态栏目和固定布尔目标，第四阶段再实现安全准备／提交和写后刷新协议。
+显式源访问由任务处理器经 `FormatSource`、`CoverSource` 及各后端快照接口完成。`CopyMaintenance` 仅声明精确副本移除和元数据清理，由 `CacheMaintenance` 实现。没有一般源上传／删除接口。`ReadStatusIntent` 只表达书籍、动态栏目和固定布尔目标，第四阶段再实现安全准备／提交和写后刷新协议。
 
 文件工厂和 FileProvider 的路径范围、完整文件发布及只读授权规则见 [文件提供开发约束](../files/AGENTS.md)。
 

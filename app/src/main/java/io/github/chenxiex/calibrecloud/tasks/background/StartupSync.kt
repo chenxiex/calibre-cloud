@@ -43,6 +43,9 @@ class StartupSync(
 
     suspend fun manualSync(): Boolean = submit(TaskOrigin.MANUAL_SYNC) != null
 
+    /** Continues a sync that waited for authorization, as a request bound to the current selection and session. */
+    suspend fun resubmit(origin: TaskOrigin): TaskId? = submit(origin)
+
     private suspend fun submit(origin: TaskOrigin): TaskId? {
         val selected = state.current() ?: return null
         if (selected.location == null) return null

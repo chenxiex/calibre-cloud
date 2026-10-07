@@ -20,8 +20,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
-/** Provider metadata is a locator/capability hint, never content-version evidence. */
-data class LocalDocument(val id: String, val name: String, val directory: Boolean, val writable: Boolean)
+/** Provider metadata is a locator/capability/size hint, never content-version or integrity evidence. */
+data class LocalDocument(val id: String, val name: String, val directory: Boolean, val writable: Boolean, val sizeBytes: Long? = null)
 
 /** Read-only source surface. Implementations must verify the actual grant and selected local provider. */
 interface LocalDocumentAccess {
@@ -69,6 +69,11 @@ class LocalSourceBackend(
     suspend fun resolve(treeUri: String, path: RelativeSourcePath): LocalSourceResult<LocalSourceFile> = operation {
         val document = resolveDocument(treeUri, path)
         LocalSourceFile(SourceFileLocator.Local(document.id), document.writable)
+    }
+
+    /** Provider-reported size for progress and space pre-checks only; null when the provider omits it. */
+    suspend fun size(treeUri: String, path: RelativeSourcePath): LocalSourceResult<Long?> = operation {
+        resolveDocument(treeUri, path).sizeBytes?.takeIf { it > 0 }
     }
 
     /** The returned stream is owned by the caller; subsequent reads must remain off the UI thread. */

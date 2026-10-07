@@ -14,12 +14,20 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.Assert.*
+import org.junit.Assume.assumeTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
-/** Run separately after the system picker grants the dedicated repository-sample test copy. Revokes it. */
+/** Opt-in with `-e localSaf true` after the system picker grants the dedicated repository-sample test copy. Revokes it. */
 @RunWith(AndroidJUnit4::class)
 class LocalSourceBackendDeviceTest {
+    @Before
+    fun requireExplicitOptIn() {
+        assumeTrue("Real SAF tests require a picker-granted dedicated sample and explicit opt-in",
+            InstrumentationRegistry.getArguments().getString("localSaf") == "true")
+    }
+
     /** Requires a granted dedicated sample; does not revoke the grant or modify source data. */
     @Test
     fun realSafRangeMatchesFullSourceSuffix() = runBlocking {
@@ -33,6 +41,8 @@ class LocalSourceBackendDeviceTest {
         val complete = (backend.openRead(tree, path) as LocalSourceResult.Available).value
         val bytes = withContext(Dispatchers.IO) { complete.use { it.readBytes() } }
         assertTrue(bytes.size > 4096)
+        // The provider's document size drives the copy precheck and progress total.
+        assertEquals(bytes.size.toLong(), (backend.size(tree, path) as LocalSourceResult.Available).value)
         val suffix = (backend.openRange(tree, path, 4096, before) as LocalSourceResult.Available).value
         assertNotNull("The supported system external-storage provider should support direct seek", suffix)
         val actual = withContext(Dispatchers.IO) { suffix!!.use { it.readBytes() } }
@@ -77,7 +87,8 @@ class LocalSourceBackendDeviceTest {
             LocalSnapshotTaskHandler.OPERATION), TaskOrigin.MANUAL_SYNC)) as SubmissionResult.Created
         dependencies.taskCoordinator.drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), dependencies.taskQueue.get(submitted.taskId)!!.record.state)
-        assertNull(dependencies.state.current()!!.identity)
+        // A completed sync imports the snapshot and binds the selected directory to a library identity.
+        assertEquals(AndroidDirectoryPermissions(context).localLocation(tree), dependencies.state.current()!!.identity?.location)
         assertEquals(before, (backend.version(tree, path) as LocalSourceResult.Available).value)
         AndroidDirectoryPermissions(context).release(tree)
         assertEquals(StorageErrorKind.AUTHORIZATION_EXPIRED,

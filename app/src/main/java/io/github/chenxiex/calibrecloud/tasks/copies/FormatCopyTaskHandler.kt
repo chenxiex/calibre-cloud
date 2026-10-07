@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks.copies
 
+import android.annotation.SuppressLint
 import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.model.*
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
@@ -31,7 +32,9 @@ import java.util.zip.ZipFile
  * A fsynced validated staging file is renamed before the manifest and terminal task state commit in
  * one transaction. Unpublished generations are collected on the next transfer; old open handles
  * retain their generation until close. No ordinary read invokes this handler.
+ * The space check deliberately uses usableSpace: without allocateBytes, clearable cache is not free yet.
  */
+@SuppressLint("UsableSpace")
 class FormatCopyTaskHandler(
     private val state: ApplicationStateRepository,
     private val metadata: MetadataRepository,
@@ -100,6 +103,10 @@ class FormatCopyTaskHandler(
             if (entry.stage == TaskStage.FORMAT_TRANSFER) {
                 state.collectUnreferenced(key.book.libraryId)
                 val size = source.size(location, path)
+                // Display and space pre-check only: local integrity rests on the complete SHA-256.
+                val expected = size ?: try { source.estimatedSize(location, path) } catch (_: FormatSourceFailure) { null }
+                    ?: format.sizeBytes
+                fun progress(done: Long) = TaskProgress(done, expected?.takeIf { it >= done })
                 var checkpoint = entry.checkpoint?.takeIf { it.version == version }
                 var evidence = checkpoint?.let { readEvidence(entry.record.id, it) }
                 if (evidence != null && (evidence.total != size || (size != null && evidence.offset > size))) evidence = null
@@ -122,8 +129,8 @@ class FormatCopyTaskHandler(
                 }
                 var durableOffset = transferred
                 try {
-                    requireSpace(if (size == null) 0 else size - transferred)
-                    execution.checkpoint(checkpoint, TaskProgress(transferred, size))
+                    requireSpace(if (expected == null) 0 else maxOf(0, expected - transferred))
+                    execution.checkpoint(checkpoint, progress(transferred))
                     val digest = MessageDigest.getInstance("SHA-256")
                     if (transferred > 0) {
                         hashPrefix(target, transferred, digest, ::check)
@@ -152,7 +159,7 @@ class FormatCopyTaskHandler(
                                         output.fd.sync()
                                         durableOffset = transferred
                                         saveEvidence(entry.record.id, checkpoint, target, transferred, size, false)
-                                        execution.checkpoint(checkpoint, TaskProgress(transferred, size))
+                                        execution.checkpoint(checkpoint, progress(transferred))
                                         lastProgress = System.nanoTime()
                                     }
                                 }
@@ -175,7 +182,7 @@ class FormatCopyTaskHandler(
                     }
                     check()
                     saveEvidence(entry.record.id, checkpoint, target, transferred, size, true)
-                    execution.checkpoint(checkpoint, TaskProgress(transferred, size))
+                    execution.checkpoint(checkpoint, progress(transferred))
                     return@withContext StageOutcome.Advance(TaskStage.FORMAT_PUBLISH)
                 } finally {
                     try { input?.close() } finally {
@@ -219,7 +226,9 @@ class FormatCopyTaskHandler(
             if (failure.error.kind in setOf(StorageErrorKind.VERSION_CONFLICT, StorageErrorKind.CORRUPT_CONTENT,
                     StorageErrorKind.SOURCE_MISSING)) retainTransfer = false
             if (failure.error.kind == StorageErrorKind.SOURCE_MISSING) state.confirmSource(key, SourceAvailability.CONFIRMED_MISSING)
+            val wait = authorizationWait(location.backend, failure.error.kind)
             when {
+                wait != null -> StageOutcome.Wait(wait)
                 failure.transient || failure.error.kind == StorageErrorKind.NO_NETWORK -> StageOutcome.Retry(TaskError.Source(failure.error), failure.retryDelayMillis)
                 else -> StageOutcome.Fail(TaskError.Source(failure.error))
             }

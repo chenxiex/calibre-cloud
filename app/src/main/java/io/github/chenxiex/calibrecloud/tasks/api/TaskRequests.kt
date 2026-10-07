@@ -124,9 +124,6 @@ data class TaskSubmission(
     }
 }
 
-/** Initially off; only a configured library's first user-opened main screen per process may enqueue. */
-data class StartupSyncSetting(val enabled: Boolean = false)
-
 /** Separate from request equivalence: opposite targets on overlapping books still serialize. */
 data class RelatedWriteKey(val book: BookKey, val column: CustomColumnId)
 

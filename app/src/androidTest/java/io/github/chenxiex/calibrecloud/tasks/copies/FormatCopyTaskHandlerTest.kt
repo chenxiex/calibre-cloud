@@ -611,6 +611,47 @@ class FormatCopyTaskHandlerTest {
     }
 
     @Test
+    fun localAuthorizationLossWaitsForDirectoryAndContinuesAfterReauthorization() = runBlocking<Unit> {
+        val source = Source(epub("waiting")).apply { failure = StorageErrorKind.AUTHORIZATION_EXPIRED }
+        val task = submit()
+        coordinator(source).drain()
+        assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.DIRECTORY_AUTHORIZATION))), queue.get(task)!!.record.state)
+        assertNull(state.find(key()))
+        source.failure = null
+        coordinator(source).drain()
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertArrayEquals(source.bytes, readBytes())
+    }
+
+    @Test
+    fun estimatedSourceSizeDrivesSpacePrecheckAndProgressButNotIntegrity() = runBlocking<Unit> {
+        val reserve = 1024L * 1024
+        val tooSmall = Source(epub("estimated")).apply { estimate = bytes.size.toLong() }
+        val refused = submit()
+        coordinator(tooSmall, availableBytes = { reserve + tooSmall.bytes.size - 1 }).drain()
+        assertEquals(StorageErrorKind.INSUFFICIENT_SPACE, failedKind(refused))
+        assertEquals(0, tooSmall.opens.get())
+        val totals = java.util.Collections.synchronizedList(mutableListOf<Long?>())
+        val collector = launch(Dispatchers.Default, start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            queue.events.collect { event ->
+                ((event as? TaskEvent.Changed)?.record?.state as? TaskState.Running)?.progress?.let { totals.add(it.total) }
+            }
+        }
+        val source = Source(epub("estimated")).apply { estimate = bytes.size.toLong() }
+        val task = submit()
+        coordinator(source).drain()
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertTrue(totals.contains(source.bytes.size.toLong()))
+        // An inaccurate provider size is only a hint; the content hash still decides integrity.
+        val inaccurate = Source(epub("inaccurate")).apply { estimate = 10L }
+        val second = submit()
+        coordinator(inaccurate).drain()
+        collector.cancel()
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(second)!!.record.state)
+        assertArrayEquals(inaccurate.bytes, readBytes())
+    }
+
+    @Test
     fun sourceStreamFailureAfterPartialReadClosesStreamAndKeepsOldBytes() = runBlocking<Unit> {
         val original = Source(epub("old"))
         submit()
@@ -879,6 +920,7 @@ class FormatCopyTaskHandlerTest {
 
     private class Source(@Volatile var bytes: ByteArray, @Volatile var token: String = hash(bytes)) : FormatSource {
         @Volatile var knownSize: Long? = null
+        @Volatile var estimate: Long? = null
         @Volatile var failure: StorageErrorKind? = null
         @Volatile var rangeFailure: StorageErrorKind? = null
         @Volatile var changeAfterOpen = false
@@ -898,6 +940,7 @@ class FormatCopyTaskHandlerTest {
             return FileVersion(location.backend, token)
         }
         override suspend fun size(location: LibraryLocation, path: RelativeSourcePath): Long? = knownSize
+        override suspend fun estimatedSize(location: LibraryLocation, path: RelativeSourcePath): Long? = estimate ?: knownSize
         override suspend fun open(location: LibraryLocation, path: RelativeSourcePath): InputStream {
             failure?.let { throw FormatSourceFailure(StorageError(it)) }
             opens.incrementAndGet()

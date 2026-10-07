@@ -2,6 +2,7 @@ package io.github.chenxiex.calibrecloud.storage.cache
 
 import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
+import androidx.core.database.sqlite.transaction
 import io.github.chenxiex.calibrecloud.model.*
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
@@ -26,6 +27,7 @@ import java.util.UUID
 
 enum class CleanupKind { COPIES, METADATA, OTHER_LIBRARIES }
 
+@ConsistentCopyVisibility
 data class CleanupPlan internal constructor(
     val kind: CleanupKind,
     val selectionToken: UUID,
@@ -98,8 +100,7 @@ class CacheMaintenance(
 
     suspend fun execute(plan: CleanupPlan): Boolean = withContext(io) { maintenance.withLock {
         val db = database.writableDatabase
-        db.beginTransaction()
-        try {
+        db.transaction {
             val selected = state.current(db) ?: return@withLock false
             val current = selected.identity?.id
             if (selected.token != plan.selectionToken || current != plan.currentLibrary) return@withLock false
@@ -129,8 +130,7 @@ class CacheMaintenance(
                     (it.book in plan.books && (plan.formats == null || it.format in plan.formats)) }
                 keys.forEach { db.delete("downloaded_copies", COPY_KEY, copyArgs(it)) }
             }
-            db.setTransactionSuccessful()
-        } finally { db.endTransaction() }
+        }
         queue.invalidateObservers()
         try {
             queue.executionLock.withLock { recoverLocked() }
@@ -187,8 +187,7 @@ class CacheMaintenance(
      * be reconstructed; never infer a library or touch complete metadata/books/protection domains.
      */
     private fun journalAbandonedInputs(db: SQLiteDatabase) {
-        db.beginTransaction()
-        try {
+        db.transaction {
             if (DurableTaskQueue.cacheCleanupPending(db)) return
             val token = state.current(db)?.token
             val tasks = db.rawQuery("SELECT task_id,record FROM queued_tasks WHERE scope_library_id IS NULL AND revoked = 0", null).use {
@@ -207,8 +206,7 @@ class CacheMaintenance(
                 put("cleanup_id", UUID.randomUUID().toString()); put("payload", payload.toString())
             })
             tasks.forEach { DurableTaskQueue.revoke(db, it) }
-            db.setTransactionSuccessful()
-        } finally { db.endTransaction() }
+        }
     }
 
     private fun affectedTasks(db: SQLiteDatabase, plan: CleanupPlan): Set<TaskId> = db.rawQuery("SELECT record,scope_library_id FROM queued_tasks", null).use {

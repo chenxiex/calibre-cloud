@@ -156,7 +156,7 @@ class OneDriveSourceBackendTest {
         fixture.thumbnails = listOf(mapOf("medium" to thumbnail(200, 300, "image")))
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         for (target in listOf("/thumbnails", "thumbnail.example")) {
-            for ((code, kind) in listOf(403 to StorageErrorKind.AUTHORIZATION_EXPIRED, 429 to StorageErrorKind.NO_NETWORK, 503 to StorageErrorKind.NO_NETWORK)) {
+            for ((code, kind) in listOf(403 to StorageErrorKind.AUTHORIZATION_EXPIRED, 429 to StorageErrorKind.THROTTLED, 503 to StorageErrorKind.THROTTLED)) {
                 fixture.requests.clear()
                 fixture.onRequest = { request ->
                     if (request.url.encodedPath.endsWith(target) || request.url.host == target) fixture.response(request, code, headers = mapOf("Retry-After" to "12")) else null
@@ -485,7 +485,7 @@ class OneDriveSourceBackendTest {
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         fixture.onRequest = { fixture.response(it, 503) }
         val unavailable = backend.discover() as OneDriveSourceResult.Failed
-        assertEquals(StorageErrorKind.NO_NETWORK, unavailable.error.kind)
+        assertEquals(StorageErrorKind.THROTTLED, unavailable.error.kind)
         assertTrue(unavailable.transient)
         assertEquals(30_000L, unavailable.retryDelayMillis)
         fixture.onRequest = { fixture.response(it, 404) }
@@ -496,6 +496,7 @@ class OneDriveSourceBackendTest {
             .format(java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
         fixture.onRequest = { fixture.response(it, 429, headers = mapOf("Retry-After" to retryDate)) }
         val limited = backend.discover() as OneDriveSourceResult.Failed
+        assertEquals(StorageErrorKind.THROTTLED, limited.error.kind)
         assertTrue(limited.retryDelayMillis!! in 110_000L..120_000L)
     }
 

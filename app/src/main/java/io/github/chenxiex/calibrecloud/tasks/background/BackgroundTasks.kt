@@ -9,6 +9,8 @@ import io.github.chenxiex.calibrecloud.ApplicationDependencies
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.tasks.api.*
+import io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
@@ -31,9 +33,27 @@ class BackgroundTasks(private val context: Context, private val dependencies: Ap
     suspend fun setStartupEnabled(enabled: Boolean) = startup.setStartupEnabled(enabled)
     suspend fun onMainOpened() {
         startup.onMainOpened()
-        wake()
+        resumeAuthorizationWaits()
     }
     suspend fun manualSync() = startup.manualSync()
+
+    private val authorizationResume by lazy { AuthorizationResume(dependencies.taskQueue, dependencies.state,
+        oneDriveReady = { dependencies.oneDriveAuthorization.sessionId() != null },
+        localReady = { dependencies.localAuthorization.restore().status in setOf(
+            DirectoryAuthorizationStatus.AUTHORIZED, DirectoryAuthorizationStatus.READ_ONLY) },
+        resubmitSync = startup::resubmit, browse = { dependencies.oneDriveTasks.browse(it) }) }
+
+    /** Called after a successful login, directory re-authorization and each main-screen opening. */
+    suspend fun resumeAuthorizationWaits() {
+        try {
+            authorizationResume.resume()
+            wake()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            android.util.Log.w("BackgroundTasks", "stage=authorization_resume reason=${failure.javaClass.simpleName}")
+        }
+    }
 
     suspend fun wake(): Unit = enqueue(WAKE_NAME, false, 0)
 
@@ -41,7 +61,8 @@ class BackgroundTasks(private val context: Context, private val dependencies: Ap
         val pending = dependencies.taskQueue.list().filter {
             it.record.state is TaskState.Waiting && dependencies.taskQueue.isActive(it.record)
         }
-        val network = pending.filter { WaitingReason.NETWORK in (it.record.state as TaskState.Waiting).reasons }
+        val network = pending.filter { (it.record.state as TaskState.Waiting).reasons.any { reason ->
+            reason == WaitingReason.NETWORK || reason == WaitingReason.THROTTLED } }
         if (network.isEmpty()) return false
         if (retryWake) return true
         val delay = network.minOf { (it.retryAt - System.currentTimeMillis()).coerceAtLeast(10_000) }
