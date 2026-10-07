@@ -41,6 +41,11 @@ class LibraryQueryService(
         index.query(request, copies.list(index.revision.identity.id))
     }
 
+    /** Null when there is no complete import. */
+    suspend fun overview(): LibraryOverview? = withContext(compute) {
+        index()?.let { LibraryOverview(it.revision, it.importedAt, it.categoryColumns) }
+    }
+
     private suspend fun index(): LibraryIndex? = lock.withLock {
         val revision = imports.currentRevision() ?: return@withLock null.also { cached = null }
         cached?.takeIf { it.revision == revision }?.let { return@withLock it }

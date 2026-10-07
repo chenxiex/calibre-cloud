@@ -16,6 +16,7 @@
 - [任务约束](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)：固定请求、来源优先级、依赖、新鲜度及提交／刷新证据。
 - [文件提供约束](src/main/java/io/github/chenxiex/calibrecloud/files/AGENTS.md)：私有文件代次、FileProvider 范围和临时只读授权。
 - [图书馆查询约束](src/main/java/io/github/chenxiex/calibrecloud/library/AGENTS.md)：本地索引、搜索、筛选、分类、排序与默认格式。
+- [界面约束](src/main/java/io/github/chenxiex/calibrecloud/ui/AGENTS.md)：分页容器、无动画、测试标签与图书馆页面状态。
 - [应用状态约束](src/main/java/io/github/chenxiex/calibrecloud/state/AGENTS.md)：原生 SQLite、候选配置、身份绑定、最小清单及事务。
 
 ## Manifest 与入口

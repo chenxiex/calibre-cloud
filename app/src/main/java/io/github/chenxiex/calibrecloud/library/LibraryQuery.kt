@@ -40,11 +40,14 @@ enum class BookSortKey { TITLE, ADDED, RATING, SERIES_INDEX }
 /** A missing rating or series index sorts after present values in either direction. */
 data class BookSort(val key: BookSortKey, val ascending: Boolean) {
     companion object {
-        val Default = BookSort(BookSortKey.ADDED, ascending = false)
+        val Default = of(BookSortKey.ADDED)
+
+        /** The direction a key starts with when chosen: title and series index ascend, time and rating descend. */
+        fun of(key: BookSortKey): BookSort = BookSort(key, key == BookSortKey.TITLE || key == BookSortKey.SERIES_INDEX)
 
         /** Inside a series folder the series index ascends by default. */
         fun defaultFor(categorization: Categorization, folder: FolderKey?): BookSort =
-            if (categorization == Categorization.Series && folder?.name != null) BookSort(BookSortKey.SERIES_INDEX, true) else Default
+            if (categorization == Categorization.Series && folder?.name != null) of(BookSortKey.SERIES_INDEX) else Default
     }
 }
 
@@ -54,7 +57,8 @@ data class FolderKey(val name: String?)
 /**
  * One immutable, stable-ordered page request. A non-blank [search] always covers the whole library
  * and flattens to books, ignoring [categorization] and [folder]; filters still apply. Otherwise a
- * categorization without a [folder] lists folders, and with a [folder] its books.
+ * categorization without a [folder] lists folders, and with a [folder] its books. Folders follow their
+ * name in the [foldersAscending] direction; the no-value folder stays last either way.
  * [formatPriority] lists the preferred formats first; others follow by name. When [expected] is set
  * and no longer current, the result is [LibraryQueryResult.Stale].
  */
@@ -65,6 +69,7 @@ data class LibraryRequest(
     val categorization: Categorization = Categorization.None,
     val folder: FolderKey? = null,
     val sort: BookSort = BookSort.Default,
+    val foldersAscending: Boolean = true,
     val formatPriority: List<BookFormat> = DEFAULT_FORMAT_PRIORITY,
     val offset: Int = 0,
     val pageSize: Int,
@@ -78,6 +83,11 @@ data class LibraryRequest(
         val DEFAULT_FORMAT_PRIORITY = listOf(BookFormat.parse("EPUB"))
     }
 }
+
+data class CategoryColumn(val id: CustomColumnId, val name: String)
+
+/** What a page needs to describe the current import without reading any rows. */
+data class LibraryOverview(val revision: LibraryRevision, val importedAt: Long, val categoryColumns: List<CategoryColumn>)
 
 /** Stable reasons; pages resolve them to resources. Not a source of translated text. */
 enum class LibraryProblem {

@@ -4,6 +4,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.R
@@ -47,6 +49,8 @@ class LocalDirectoryAuthorizationDeviceTest {
         assertNull(permissions.localLocation("content://com.android.externalstorage.documents/tree/primary%3Alibrary/document/primary%3Aother"))
         assertThrows(SecurityException::class.java) { permissions.persist(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         val authorization = createLocalDirectoryAuthorization(context)
+        // The authorization entry now lives under the bottom bar's "更多" tab, which survives recreation.
+        compose.onNodeWithTag("nav_more").performClick()
         assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.restore().status)
         awaitText(context.getString(R.string.local_authorized))
         compose.activityRule.scenario.recreate()

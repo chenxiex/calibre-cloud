@@ -148,6 +148,9 @@ class LibraryIndexTest {
         val roots = index.query(base.copy(categorization = Categorization.Tags), emptyList()).folders()
         assertEquals(listOf("a", "b", null), roots.map { it.key.name })
         assertEquals(listOf(2, 1, 1), roots.map { it.bookCount })
+        // Descending names reverse the named folders; the fallback stays last.
+        assertEquals(listOf("b", "a", null), index.query(base.copy(categorization = Categorization.Tags, foldersAscending = false),
+            emptyList()).folders().map { it.key.name })
         assertEquals("Newer", roots[0].representative.title)
         assertEquals("Multi", roots[1].representative.title)
         assertEquals(listOf("Multi", "Newer"), index.query(base.copy(categorization = Categorization.Tags, folder = FolderKey("a"),

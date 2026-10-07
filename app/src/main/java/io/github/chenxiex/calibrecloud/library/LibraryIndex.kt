@@ -54,6 +54,13 @@ class LibraryIndex(private val library: ImportedLibrary) {
 
     val revision get() = library.revision
 
+    /** Import time of the generation this index serves, for the last-sync display. */
+    val importedAt get() = library.importedAt
+
+    /** Columns that can classify or limit a search, in the library's column order. */
+    val categoryColumns: List<CategoryColumn> = library.metadata.columns
+        .filter { it.supported && it.datatype in COLUMN_TYPES }.map { CategoryColumn(it.id, it.name) }
+
     fun query(request: LibraryRequest, copies: List<DownloadedCopy>): LibraryQueryResult {
         request.expected?.let { if (it != revision) return LibraryQueryResult.Stale }
         val cached: Map<BookKey, Map<BookFormat, DownloadedCopy>> = copies
@@ -87,12 +94,13 @@ class LibraryIndex(private val library: ImportedLibrary) {
         val folder = request.folder
         if (folder != null) return books(request, groups[folder].orEmpty(), collator, row)
 
-        // Folder level: name order only, the no-value folder last; representative is the newest book.
+        // Folder level: name order only, the no-value folder last in both directions; representative is the newest book.
+        val direction = if (request.foldersAscending) 1 else -1
         val ordered = groups.keys.sortedWith { a, b ->
             when {
                 a.name == null -> if (b.name == null) 0 else 1
                 b.name == null -> -1
-                else -> collator.compare(a.name, b.name).takeIf { it != 0 } ?: a.name.compareTo(b.name)
+                else -> direction * (collator.compare(a.name, b.name).takeIf { it != 0 } ?: a.name.compareTo(b.name))
             }
         }
         val page = ordered.drop(request.offset).take(request.pageSize).map { key ->

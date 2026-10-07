@@ -125,7 +125,7 @@ internal fun BackgroundSettings(model: TaskViewModel, onRequestNotifications: ()
     Spacer(Modifier.height(8.dp))
     Text(stringResource(if (model.notificationsEnabled) R.string.task_notifications_on else R.string.task_notifications_off))
     if (!model.notificationsEnabled && Build.VERSION.SDK_INT >= 33) {
-        StaticButton(stringResource(R.string.task_notifications_request), true, onRequestNotifications)
+        StaticButton(stringResource(R.string.task_notifications_request), true) { onRequestNotifications() }
     }
     if (model.backgroundRestricted) Text(stringResource(R.string.task_background_restricted))
     Text(stringResource(if (model.batteryOptimized) R.string.task_battery_optimized else R.string.task_battery_exempt))

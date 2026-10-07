@@ -50,6 +50,10 @@
     <string name="authorization_page_number">第 %1$d / %2$d 页</string>
     <string name="page_previous">上一页</string>
     <string name="page_next">下一页</string>
+    <string name="page_first">首页</string>
+    <string name="page_last">末页</string>
+    <string name="page_status">%1$d / %2$d</string>
+    <string name="page_status_description">第 %1$d 页，共 %2$d 页</string>
     <string name="onedrive_directory">OneDrive 目录选择</string>
     <string name="onedrive_root_pending">尚未选择书库。点击目录进入，再选择当前目录。</string>
     <string name="onedrive_root_chosen">目录已选择。可在任务页同步，导入状态见“当前书库与导入”页。</string>

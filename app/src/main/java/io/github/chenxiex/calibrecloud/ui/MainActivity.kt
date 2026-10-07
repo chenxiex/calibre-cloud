@@ -27,6 +27,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
 import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
@@ -45,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.launch
@@ -89,6 +91,9 @@ class MainActivity : ComponentActivity() {
     private val cleanupModel by lazy {
         ViewModelProvider(this, CleanupViewModel.factory(applicationContext))[CleanupViewModel::class.java]
     }
+    private val libraryModel by lazy {
+        ViewModelProvider(this, LibraryViewModel.factory(applicationContext))[LibraryViewModel::class.java]
+    }
     private val taskModel by lazy {
         ViewModelProvider(this, TaskViewModel.factory(applicationContext))[TaskViewModel::class.java]
     }
@@ -113,14 +118,17 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel, coverModel, cleanupModel, taskModel,
-                    { if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) },
-                    { oneDriveModel.login { startActivity(it) } }) {
-                    pickerOpen = true
-                    picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
-                        Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
-                            Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
-                    ))
+                MainScreen(libraryModel) { page, onPage ->
+                    AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel, coverModel, cleanupModel, taskModel,
+                        page, onPage,
+                        { if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) },
+                        { oneDriveModel.login { startActivity(it) } }) {
+                        pickerOpen = true
+                        picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
+                        ))
+                    }
                 }
             }
         }
@@ -139,6 +147,7 @@ class MainActivity : ComponentActivity() {
         metadataModel.restore()
         downloadModel.restore()
         coverModel.restore()
+        libraryModel.refresh()
         if (pickerOpen) return
         authorizationModel.refresh()
     }
@@ -161,6 +170,8 @@ private fun AuthorizationPage(
     covers: CoverViewModel,
     cleanup: CleanupViewModel,
     tasks: TaskViewModel,
+    page: Int,
+    onPage: (Int) -> Unit,
     onRequestNotifications: () -> Unit,
     onLogin: () -> Unit,
     onSelect: () -> Unit,
@@ -171,8 +182,7 @@ private fun AuthorizationPage(
             library.restore()
         }
     }
-    // Split authorization entries into explicit pages without scrolling or animated controls.
-    var page by rememberSaveable { mutableIntStateOf(0) }
+    // Temporary verification entries stay reachable from "更多" until the formal pages replace them.
     LaunchedEffect(page, state, busy, snapshot.record, library.record, library.rootChosen, library.submitting) {
         metadata.restore()
         downloads.restore()
@@ -181,15 +191,21 @@ private fun AuthorizationPage(
         covers.setVisible(page == 8)
     }
     LaunchedEffect(page) { tasks.setVisible(page >= 10) }
+    DisposableEffect(Unit) {
+        onDispose {
+            covers.setVisible(false)
+            tasks.setVisible(false)
+        }
+    }
     LaunchedEffect(cleanup.revision) {
         metadata.restore()
         downloads.restore()
     }
     Column(
         modifier = Modifier.fillMaxSize().background(Color.White)
-            .windowInsetsPadding(WindowInsets.safeDrawing).padding(16.dp),
+            .padding(16.dp),
     ) {
-        Text(stringResource(R.string.app_name), style = MaterialTheme.typography.titleLarge)
+        Text(stringResource(R.string.more_title), style = MaterialTheme.typography.titleLarge)
         Spacer(Modifier.height(16.dp))
         Column(Modifier.weight(1f)) {
             if (page == 0) {
@@ -209,7 +225,7 @@ private fun AuthorizationPage(
                     }))
                 }
                 Spacer(Modifier.height(16.dp))
-                StaticButton(stringResource(if (busy) R.string.local_checking else R.string.local_select), !busy, onSelect)
+                StaticButton(stringResource(if (busy) R.string.local_checking else R.string.local_select), !busy) { onSelect() }
                 Spacer(Modifier.height(12.dp))
                 LocalSnapshotControls(snapshot, !busy && state.status in setOf(
                     DirectoryAuthorizationStatus.AUTHORIZED, DirectoryAuthorizationStatus.READ_ONLY))
@@ -239,7 +255,7 @@ private fun AuthorizationPage(
                     if (oneDrive.status == LoginStatus.BROWSER) {
                         StaticButton(stringResource(R.string.onedrive_cancel), !oneDrive.busy) { oneDrive.cancel() }
                     } else {
-                        StaticButton(stringResource(R.string.onedrive_login), !oneDrive.busy, onLogin)
+                        StaticButton(stringResource(R.string.onedrive_login), !oneDrive.busy) { onLogin() }
                         if (oneDrive.status == LoginStatus.AUTHORIZED) {
                             Spacer(Modifier.height(8.dp))
                             StaticButton(stringResource(R.string.onedrive_refresh), !oneDrive.busy) { oneDrive.refresh() }
@@ -272,20 +288,22 @@ private fun AuthorizationPage(
         }
         Text(stringResource(R.string.authorization_page_number, page + 1, 13))
         Row {
-            StaticButton(stringResource(R.string.page_previous), page > 0 && !cleanup.busy) { page-- }
+            StaticButton(stringResource(R.string.page_previous), page > 0 && !cleanup.busy) { onPage(page - 1) }
             Spacer(Modifier.width(8.dp))
-            StaticButton(stringResource(R.string.page_next), page < 12 && !cleanup.busy) { page++ }
+            StaticButton(stringResource(R.string.page_next), page < 12 && !cleanup.busy) { onPage(page + 1) }
         }
     }
 }
 
 @Composable
-internal fun StaticButton(label: String, enabled: Boolean, onClick: () -> Unit) {
-    Box(Modifier.border(1.dp, Color.Black).clickable(
+internal fun StaticButton(label: String, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    // A disabled button is grey with a thinner border so the state does not rely on colour alone.
+    val tint = if (enabled) Color.Black else Color(0xFF8A8A8A)
+    Box(modifier.border(if (enabled) 1.dp else 0.5.dp, tint).clickable(
         interactionSource = remember { MutableInteractionSource() }, indication = null,
-        enabled = enabled, onClick = onClick,
+        enabled = enabled, role = Role.Button, onClick = onClick,
     ).padding(horizontal = 16.dp, vertical = 12.dp)) {
-        Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(label, color = tint, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

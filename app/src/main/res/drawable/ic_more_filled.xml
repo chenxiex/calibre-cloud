@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Drawn for this project: a circle with three dots -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M12,2A10,10 0,1 1,12,22A10,10 0,1 1,12,2z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M7,10.5A1.5,1.5 0,1 1,7,13.5A1.5,1.5 0,1 1,7,10.5zM12,10.5A1.5,1.5 0,1 1,12,13.5A1.5,1.5 0,1 1,12,10.5zM17,10.5A1.5,1.5 0,1 1,17,13.5A1.5,1.5 0,1 1,17,10.5z" />
+</vector>
