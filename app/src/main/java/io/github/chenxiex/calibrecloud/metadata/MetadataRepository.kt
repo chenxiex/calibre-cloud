@@ -17,6 +17,12 @@ import java.util.UUID
 
 enum class ReadColumnStatus { NOT_CONFIGURED, VALID, INVALID }
 
+/**
+ * Identity of the data a derived view was computed from. A new import changes [generation]; saving
+ * the read-column configuration changes [readColumn] without a new import, and both invalidate views.
+ */
+data class LibraryRevision(val identity: LibraryIdentity, val generation: UUID, val readColumn: CustomColumnId?)
+
 data class ImportedLibrary(
     val identity: LibraryIdentity,
     val generation: UUID,
@@ -25,6 +31,8 @@ data class ImportedLibrary(
     val selectedReadColumn: CustomColumnId?,
     val readColumnStatus: ReadColumnStatus,
 ) {
+    val revision: LibraryRevision get() = LibraryRevision(identity, generation, selectedReadColumn)
+
     /** Invalid configuration has no read state; only imported source boolean values supply it. */
     fun isRead(book: ImportedBook): Boolean? = if (readColumnStatus != ReadColumnStatus.VALID) null
         else (book.customValues[selectedReadColumn!!.sourceId] as? ImportedColumnValue.Bool)?.value == true
@@ -136,6 +144,20 @@ class MetadataRepository(
         db.beginTransactionNonExclusive()
         try {
             state.current(db)?.identity?.let { imported(db, it) }
+        } finally { db.endTransaction() }
+    }
+
+    /** Cheap identity of the current import; reads no payload. Null while no complete import exists. */
+    suspend fun currentRevision(): LibraryRevision? = withContext(io) {
+        val db = database.readableDatabase
+        db.beginTransactionNonExclusive()
+        try {
+            val identity = state.current(db)?.identity ?: return@withContext null
+            db.rawQuery("SELECT import_generation, read_column_id, read_column_lookup FROM metadata_imports WHERE library_id = ?",
+                arrayOf(identity.id.value.toString())).use {
+                if (!it.moveToFirst()) null else LibraryRevision(identity, UUID.fromString(it.getString(0)),
+                    if (it.isNull(1)) null else CustomColumnId(it.getLong(1), it.getString(2)))
+            }
         } finally { db.endTransaction() }
     }
 

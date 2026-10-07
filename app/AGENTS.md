@@ -15,6 +15,7 @@
 - [存储约束](src/main/java/io/github/chenxiex/calibrecloud/storage/AGENTS.md)：完整记录查询、普通读取、句柄生命周期和显式操作边界。
 - [任务约束](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)：固定请求、来源优先级、依赖、新鲜度及提交／刷新证据。
 - [文件提供约束](src/main/java/io/github/chenxiex/calibrecloud/files/AGENTS.md)：私有文件代次、FileProvider 范围和临时只读授权。
+- [图书馆查询约束](src/main/java/io/github/chenxiex/calibrecloud/library/AGENTS.md)：本地索引、搜索、筛选、分类、排序与默认格式。
 - [应用状态约束](src/main/java/io/github/chenxiex/calibrecloud/state/AGENTS.md)：原生 SQLite、候选配置、身份绑定、最小清单及事务。
 
 ## Manifest 与入口
@@ -32,7 +33,7 @@
 - 工程与构建配置变更按受影响路径执行 debug/release 构建和 lint；生成依赖锁后再运行不更新锁的构建，核对锁文件未变化。
 - 检查实际 APK 的最低系统、包标识、可调试状态及导出组件；OAuth 配置缺失时核对回调禁用。release 仅生成未签名产物，不使用正式签名。
 - ADB 安装前先从 APK 核对 debug application ID，只使用测试书库副本；记录结果后卸载 debug 与测试包，不覆盖正式应用或访问正式数据。
-- 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md) 与 [第二阶段记录](verification/phase-2.md)。构建及模拟平台／服务响应不能替代对应阶段的真实设备／上游验证；在目标真机自动执行的测试或 ADB 操作按其实际覆盖范围计为真机证据。
+- 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md)、[第二阶段记录](verification/phase-2.md) 与 [第三阶段记录](verification/phase-3.md)。构建及模拟平台／服务响应不能替代对应阶段的真实设备／上游验证；在目标真机自动执行的测试或 ADB 操作按其实际覆盖范围计为真机证据。
 
 ## 测试设计与共同验收
 
