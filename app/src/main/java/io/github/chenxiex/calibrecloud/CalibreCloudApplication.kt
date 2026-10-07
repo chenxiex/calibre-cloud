@@ -22,6 +22,7 @@ import kotlinx.coroutines.Dispatchers
 /** One process-owned state store and reader; lazy construction performs no source or database I/O. */
 class ApplicationDependencies(context: Context) {
     private val applicationContext = context.applicationContext
+    val applicationScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
     val oneDriveAuthorization by lazy {
         io.github.chenxiex.calibrecloud.auth.OneDriveAuthorization(applicationContext,
             io.github.chenxiex.calibrecloud.auth.OneDriveOAuthConfiguration.fromBuildConfiguration(),
@@ -38,6 +39,7 @@ class ApplicationDependencies(context: Context) {
         applicationContext.filesDir, Dispatchers.IO) }
     val taskQueue: DurableTaskQueue by lazy { DurableTaskQueue(database, Dispatchers.IO).apply {
         beforeDispatch = { maintenance.recoverLocked() }
+        onWake = { backgroundTasks.wake() }
     } }
     val localBackend by lazy {
         LocalSourceBackend(AndroidLocalDocumentAccess(applicationContext),
@@ -67,13 +69,15 @@ class ApplicationDependencies(context: Context) {
         applicationContext.filesDir, Dispatchers.IO) }
     val coverSource by lazy { io.github.chenxiex.calibrecloud.tasks.covers.BackendCoverSource(state, localBackend, oneDriveBackend) }
     val coverService by lazy { io.github.chenxiex.calibrecloud.tasks.covers.CoverService(state, metadata, taskCoordinator) }
+    val backgroundTasks by lazy { io.github.chenxiex.calibrecloud.tasks.background.BackgroundTasks(applicationContext, this) }
+    private val queueConditions by lazy { io.github.chenxiex.calibrecloud.tasks.background.QueueConditions(applicationContext, database) }
     val taskCoordinator by lazy {
         TaskCoordinator(taskQueue, listOf(LocalSnapshotTaskHandler(state, localBackend, metadata, Dispatchers.IO),
             io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler(
                 state, oneDriveAuthorization, oneDriveBackend, oneDriveBrowseStore, metadata),
             io.github.chenxiex.calibrecloud.tasks.copies.FormatCopyTaskHandler(state, metadata, taskQueue, formatSource,
                 applicationContext.filesDir, Dispatchers.IO),
-            io.github.chenxiex.calibrecloud.tasks.covers.CoverTaskHandler(state, metadata, covers, coverSource, formatSource, Dispatchers.IO)))
+            io.github.chenxiex.calibrecloud.tasks.covers.CoverTaskHandler(state, metadata, covers, coverSource, formatSource, Dispatchers.IO)), conditions = queueConditions::waiting)
     }
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO, state.copyAccess) }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }
@@ -85,6 +89,8 @@ class ApplicationDependencies(context: Context) {
     }
 }
 
-class CalibreCloudApplication : Application() {
+class CalibreCloudApplication : Application(), androidx.work.Configuration.Provider {
+    override val workManagerConfiguration: androidx.work.Configuration
+        get() = androidx.work.Configuration.Builder().setMinimumLoggingLevel(android.util.Log.WARN).build()
     val dependencies by lazy { ApplicationDependencies(this) }
 }

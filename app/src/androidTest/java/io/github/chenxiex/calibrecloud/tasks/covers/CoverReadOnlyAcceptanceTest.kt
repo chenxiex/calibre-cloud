@@ -12,6 +12,7 @@ import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
 import io.github.chenxiex.calibrecloud.storage.local.AndroidLocalDocumentAccess
 import io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveSourceResult
 import io.github.chenxiex.calibrecloud.tasks.api.*
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -122,8 +123,18 @@ class CoverReadOnlyAcceptanceTest {
             val submission = dependencies.coverService.submit(key, requireNotNull(dependencies.state.current()).token)
             assertTrue("Acceptance needs a fresh explicit cover task", submission is SubmissionResult.Created)
             val task = (submission as SubmissionResult.Created).taskId
-            dependencies.taskCoordinator.drain()
+            // The submit hook schedules the production WorkManager driver. Fast completion before
+            // this observation is valid; no foreground drain substitutes for background execution.
+            while (true) {
+                assertTrue("Do not execute unrelated unfinished tasks", queue.list()
+                    .filter { it.record.state !is TaskState.Finished }.all { it.record.id == task })
+                if (requireNotNull(queue.get(task)).record.state is TaskState.Finished) break
+                delay(100)
+            }
             assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)?.record?.state)
+            instrumentation.sendStatus(0, Bundle().apply {
+                putString("step07CoverExecution", "production WorkManager driver; real source read-only")
+            })
             val readable = requireNotNull(dependencies.covers.read(key))
             try {
                 assertTrue(readable.width in 1..CoverRepository.WIDTH)

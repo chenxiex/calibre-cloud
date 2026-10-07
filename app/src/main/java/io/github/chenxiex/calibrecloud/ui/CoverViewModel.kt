@@ -163,7 +163,7 @@ class CoverViewModel(
         viewModelScope.launch {
             if (!valid(expected, token)) return@launch
             try {
-                coordinator.drain()
+                coordinator.requestRun()
             } catch (failure: CancellationException) {
                 throw failure
             } catch (_: Exception) {

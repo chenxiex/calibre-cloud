@@ -54,6 +54,7 @@ internal object TaskCodec {
             "resume" to record.controls.canResume, "retry" to record.controls.canRetry,
         ),
         "commit" to commit(record.commit),
+        "restarted_transfer" to record.restartedTransfer,
     ).toString()
 
     fun decode(value: String): TaskRecord {
@@ -76,6 +77,7 @@ internal object TaskCodec {
                 controls.getBoolean("resume"), controls.getBoolean("retry"),
             ),
             commit = readCommit(json.getJSONObject("commit")),
+            restartedTransfer = json.optBoolean("restarted_transfer", false),
         )
     }
 

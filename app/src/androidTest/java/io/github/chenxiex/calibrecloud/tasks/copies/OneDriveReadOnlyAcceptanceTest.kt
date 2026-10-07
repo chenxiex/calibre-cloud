@@ -2,6 +2,7 @@ package io.github.chenxiex.calibrecloud.tasks.copies
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.work.WorkManager
 import io.github.chenxiex.calibrecloud.CalibreCloudApplication
 import io.github.chenxiex.calibrecloud.model.*
 import io.github.chenxiex.calibrecloud.storage.api.*
@@ -9,6 +10,8 @@ import io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveSourceResult
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.sync.withLock
@@ -23,6 +26,7 @@ import java.io.ByteArrayOutputStream
 import java.io.FilterInputStream
 import java.io.InputStream
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 
 /** Explicitly authorized read-only cloud acceptance; writes only the debug app's private copy state. */
 @RunWith(AndroidJUnit4::class)
@@ -85,46 +89,67 @@ class OneDriveReadOnlyAcceptanceTest {
                 version == source.version(location, PATH))
         }
 
-        val interrupted = InterruptOnce(source)
-        val handler = FormatCopyTaskHandler(dependencies.state, dependencies.metadata, queue,
-            interrupted, context.filesDir, Dispatchers.IO)
-        var clock = 0L
-        // Both this test coordinator and the app coordinator use the same queue execution lock.
-        val coordinator = TaskCoordinator(queue, listOf(handler), now = { clock })
-        val submission = coordinator.submit(TaskSubmission(TaskRequest.FormatCopy(
-            FormatResource(key.book, key.format, SourceFileLocator.Relative(location.backend, PATH)), version),
-            TaskOrigin.USER_DOWNLOAD))
-        assertTrue("A fresh acceptance task must be created", submission is SubmissionResult.Created)
-        val task = (submission as SubmissionResult.Created).taskId
-        val previous = dependencies.state.find(key)
-        coordinator.drain()
-        val waiting = requireNotNull(queue.get(task)) { "Acceptance task disappeared" }
-        assertTrue("Injected transient interruption must wait for retry", waiting.record.state is TaskState.Waiting)
-        assertTrue("Unfinished transfer must preserve the previous complete copy", previous == dependencies.state.find(key))
-        assertEquals("Only one full stream should be opened", 1, interrupted.fullOpens)
-        val checkpoint = requireNotNull(waiting.checkpoint) { "Durable checkpoint is missing" }
-        val staging = File(context.filesDir, "book-staging/${task.value}/${checkpoint.generation}.part")
-        val evidence = JSONObject(File(staging.parentFile, "${checkpoint.generation}.resume").readText())
-        assertEquals("Checkpoint must persist the nonzero durable prefix", INTERRUPT_AT, evidence.getLong("offset"))
-        assertArrayEquals("Staged prefix differs from the actual cloud bytes",
-            expected.copyOfRange(0, INTERRUPT_AT.toInt()), staging.inputStream().use { readBounded(it, INTERRUPT_AT.toInt()) })
-        // Advance only the injected retry clock, keeping Wi-Fi and ADB connected.
-        clock = waiting.retryAt
-        coordinator.drain()
-        assertTrue("Recovered production transfer must finish successfully",
-            queue.get(task)?.record?.state == TaskState.Finished(TaskResult.Completed))
-        assertEquals("Recovery must request the saved nonzero range", listOf(INTERRUPT_AT), interrupted.rangeOffsets)
-        assertEquals("Recovery must not open a second full stream", 1, interrupted.fullOpens)
-        val copy = dependencies.copyReader.read(key)
-        assertTrue("Only a complete private copy may become readable", copy is CopyReadResult.Available)
-        (copy as CopyReadResult.Available).handle.use {
-            assertArrayEquals("Recovered private copy must match all original cloud bytes", expected,
-                readBounded(it.input, EXPECTED_SIZE.toInt()))
+        // This path deliberately injects a transport interruption and retry clock; it is not a
+        // WorkManager execution check. Quiesce already-enqueued workers before submitting the
+        // fixture task, so the production handler cannot consume it between the two test drains.
+        val productionWake = queue.onWake
+        queue.onWake = {}
+        try {
+            val manager = WorkManager.getInstance(context)
+            withTimeout(60_000) {
+                while (withContext(Dispatchers.IO) {
+                    manager.getWorkInfosByTag(io.github.chenxiex.calibrecloud.tasks.background.BackgroundTasks.QUEUE_TAG)
+                        .get(10, TimeUnit.SECONDS).any { !it.state.isFinished }
+                }) delay(100)
+            }
+            queue.executionLock.withLock {
+                assertTrue("Finish other private tasks before injected recovery",
+                    queue.list().all { it.record.state is TaskState.Finished })
+            }
+            val interrupted = InterruptOnce(source)
+            val handler = FormatCopyTaskHandler(dependencies.state, dependencies.metadata, queue,
+                interrupted, context.filesDir, Dispatchers.IO)
+            var clock = 0L
+            // Both this test coordinator and the app coordinator use the same queue execution lock.
+            val coordinator = TaskCoordinator(queue, listOf(handler), now = { clock })
+            val submission = coordinator.submit(TaskSubmission(TaskRequest.FormatCopy(
+                FormatResource(key.book, key.format, SourceFileLocator.Relative(location.backend, PATH)), version),
+                TaskOrigin.USER_DOWNLOAD))
+            assertTrue("A fresh acceptance task must be created", submission is SubmissionResult.Created)
+            val task = (submission as SubmissionResult.Created).taskId
+            val previous = dependencies.state.find(key)
+            coordinator.drain()
+            val waiting = requireNotNull(queue.get(task)) { "Acceptance task disappeared" }
+            assertTrue("Injected transient interruption must wait for retry", waiting.record.state is TaskState.Waiting)
+            assertTrue("Unfinished transfer must preserve the previous complete copy", previous == dependencies.state.find(key))
+            assertEquals("Only one full stream should be opened", 1, interrupted.fullOpens)
+            val checkpoint = requireNotNull(waiting.checkpoint) { "Durable checkpoint is missing" }
+            val staging = File(context.filesDir, "book-staging/${task.value}/${checkpoint.generation}.part")
+            val evidence = JSONObject(File(staging.parentFile, "${checkpoint.generation}.resume").readText())
+            assertEquals("Checkpoint must persist the nonzero durable prefix", INTERRUPT_AT, evidence.getLong("offset"))
+            assertArrayEquals("Staged prefix differs from the actual cloud bytes",
+                expected.copyOfRange(0, INTERRUPT_AT.toInt()), staging.inputStream().use { readBounded(it, INTERRUPT_AT.toInt()) })
+            // Advance only the injected retry clock, keeping Wi-Fi and ADB connected.
+            clock = waiting.retryAt
+            coordinator.drain()
+            assertTrue("Recovered production transfer must finish successfully",
+                queue.get(task)?.record?.state == TaskState.Finished(TaskResult.Completed))
+            assertEquals("Recovery must request the saved nonzero range", listOf(INTERRUPT_AT), interrupted.rangeOffsets)
+            assertEquals("Recovery must not open a second full stream", 1, interrupted.fullOpens)
+            val copy = dependencies.copyReader.read(key)
+            assertTrue("Only a complete private copy may become readable", copy is CopyReadResult.Available)
+            (copy as CopyReadResult.Available).handle.use {
+                assertArrayEquals("Recovered private copy must match all original cloud bytes", expected,
+                    readBounded(it.input, EXPECTED_SIZE.toInt()))
+            }
+            queue.executionLock.withLock {
+                assertTrue("Source version changed during recovery", version == source.version(location, PATH))
+            }
+            assertFalse("Successful publication must remove the task staging directory", staging.parentFile!!.exists())
+        } finally {
+            queue.onWake = productionWake
+            productionWake()
         }
-        queue.executionLock.withLock {
-            assertTrue("Source version changed during recovery", version == source.version(location, PATH))
-        }
-        assertFalse("Successful publication must remove the task staging directory", staging.parentFile!!.exists())
     }
 
     /** Deterministic fault at the backend seam; actual content and resumed ranges remain production reads. */

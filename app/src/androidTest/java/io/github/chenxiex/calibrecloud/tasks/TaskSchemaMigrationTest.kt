@@ -92,7 +92,9 @@ class TaskSchemaMigrationTest {
                 queue.update(sync) { it.copy(checkpoint = RecoveryCheckpoint(UUID.randomUUID(), FileVersion(BackendKind.LOCAL, "fixture-checkpoint"))) }
                 val records = queue.list()
                 val selection = state.current()
-                // Remove only the step 05 tables: every remaining table is the shipped v2 schema.
+                // Reconstruct the shipped v2 schema rather than retaining later migration tables.
+                io.github.chenxiex.calibrecloud.state.LegacyCacheSchemaFixture.downgradeToFour(db)
+                db.execSQL("DROP TABLE cover_cache")
                 db.execSQL("DROP TABLE metadata_books")
                 db.execSQL("DROP TABLE metadata_imports")
                 db.version = 2
@@ -101,7 +103,7 @@ class TaskSchemaMigrationTest {
             ApplicationStateDatabase(context, name).use { database ->
                 val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
                 val queue = DurableTaskQueue(database, Dispatchers.IO)
-                assertEquals(3, database.readableDatabase.version)
+                assertEquals(6, database.readableDatabase.version)
                 assertEquals(previous.first, state.current())
                 assertEquals(identity, state.binding(identity.id))
                 assertEquals(previous.second, queue.list())

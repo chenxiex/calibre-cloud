@@ -52,6 +52,7 @@ class FormatCopyTaskHandler(
         if (entry.record.submission.request is TaskRequest.FormatCheck)
             return@withContext RecoveryDecision(TaskStage.FORMAT_CHECK, null)
         val evidence = entry.checkpoint?.let { readEvidence(entry.record.id, it) }
+        if (entry.checkpoint != null && evidence == null) execution.markTransferRestart()
         RecoveryDecision(if (evidence?.complete == true) TaskStage.FORMAT_PUBLISH else TaskStage.FORMAT_TRANSFER,
             if (evidence != null) entry.checkpoint else null)
     }
@@ -103,6 +104,7 @@ class FormatCopyTaskHandler(
                 var evidence = checkpoint?.let { readEvidence(entry.record.id, it) }
                 if (evidence != null && (evidence.total != size || (size != null && evidence.offset > size))) evidence = null
                 if (evidence == null) {
+                    if (entry.checkpoint != null) execution.markTransferRestart()
                     discardStaging(entry.record.id)
                     checkpoint = RecoveryCheckpoint(UUID.randomUUID(), version)
                 }
@@ -114,6 +116,7 @@ class FormatCopyTaskHandler(
                 var input = if (transferred > 0 && (size == null || transferred < size))
                     source.openRange(location, path, transferred, version) else null
                 if (transferred > 0 && (size == null || transferred < size) && input == null) {
+                    execution.markTransferRestart()
                     transferred = 0
                     evidence = null
                 }

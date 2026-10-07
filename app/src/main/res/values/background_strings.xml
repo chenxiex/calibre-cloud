@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="queue_notification_channel">书库后台任务</string>
+    <string name="queue_notification_title">书库任务正在处理</string>
+    <string name="queue_notification_text">同步、下载或封面任务正在执行，点击查看任务状态。</string>
+</resources>

@@ -11,11 +11,12 @@ import android.database.sqlite.SQLiteOpenHelper
  * Version 3 adds atomic imported metadata and book identity indexes without changing prior data.
  * Version 4 adds independent complete cover cache records.
  * Version 5 adds irreversible producer revocation, recoverable cleanup and retained preferences.
+ * Version 6 adds the default-off process startup sync setting.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  */
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
-    SQLiteOpenHelper(context.applicationContext, name, null, 5) {
+    SQLiteOpenHelper(context.applicationContext, name, null, 6) {
     private val privateFiles = context.applicationContext.filesDir
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -69,6 +70,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createMetadata(db)
         createCovers(db)
         createMaintenance(db)
+        createStartupSetting(db)
         // The composite primary key is also the library-scoped ordered manifest index.
         db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, authority, root_id, account_id, drive_id)")
     }
@@ -198,15 +200,26 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         }
     }
 
+    private fun createStartupSetting(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE application_settings (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            startup_sync INTEGER NOT NULL DEFAULT 0 CHECK(startup_sync IN (0, 1))
+        )""".trimIndent())
+        db.execSQL("INSERT INTO application_settings(singleton, startup_sync) VALUES (1, 0)")
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..4 && newVersion == 5)
+        check(oldVersion in 1..5 && newVersion == 6)
         if (oldVersion == 1) {
             db.execSQL("ALTER TABLE current_selection ADD COLUMN authorization_id TEXT")
             createQueue(db)
         }
         if (oldVersion <= 2) createMetadata(db)
         if (oldVersion <= 3) createCovers(db)
-        createMaintenance(db)
-        migrateCandidateScopes(db)
+        if (oldVersion <= 4) {
+            createMaintenance(db)
+            migrateCandidateScopes(db)
+        }
+        createStartupSetting(db)
     }
 }

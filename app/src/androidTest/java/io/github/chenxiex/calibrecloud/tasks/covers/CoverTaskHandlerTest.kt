@@ -194,7 +194,7 @@ class CoverTaskHandlerTest {
         database.writableDatabase.version = 3
         database.close()
         reopen()
-        assertEquals(5, database.readableDatabase.version)
+        assertEquals(6, database.readableDatabase.version)
         assertEquals(imported, metadata.currentImport())
         assertEquals(manifest, state.find(CopyKey(book, BookFormat.parse("EPUB"))))
         assertEquals(queued, queue.get(task))
@@ -265,6 +265,8 @@ class CoverTaskHandlerTest {
         val source = Source(image(64, 96, Color.RED))
         val coordinator = coordinator(source)
         val service = CoverService(state, metadata, coordinator)
+        // Explicit asynchronous fixture driver replaces the production WorkManager wake hook.
+        queue.onWake = { launch(Dispatchers.IO) { coordinator.drain() }; Unit }
         val store = ViewModelStore()
         val viewModel = withContext(Dispatchers.Main) {
             CoverViewModel(state, metadata, covers, queue, coordinator, service::submit).also {
@@ -292,7 +294,10 @@ class CoverTaskHandlerTest {
             withContext(Dispatchers.Main) { viewModel.setVisible(false); viewModel.restore() }
             delay(50)
             assertEquals(2, source.opens.get())
-        } finally { withContext(Dispatchers.Main) { store.clear() } }
+        } finally {
+            queue.onWake = {}
+            withContext(Dispatchers.Main) { store.clear() }
+        }
     }
 
     private fun reopen() {

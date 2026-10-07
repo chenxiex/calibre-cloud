@@ -75,7 +75,7 @@ class LocalSnapshotViewModel(
                 }
                 rejected = false
                 observe(id)
-                coordinator.drain()
+                coordinator.requestRun()
             } finally {
                 submitting = false
             }
@@ -86,7 +86,7 @@ class LocalSnapshotViewModel(
         val id = record?.id ?: return
         viewModelScope.launch {
             if (queue.control(id, command) && command in setOf(TaskControl.RESUME, TaskControl.RETRY)) {
-                coordinator.drain()
+                coordinator.requestRun()
             }
             restore()
         }

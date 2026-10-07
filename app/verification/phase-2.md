@@ -866,3 +866,103 @@ debug 重新启动后，`login-page` 的第 1 页“下一页”点击成功，�
 本次确认不扩大第三阶段真实阅读器／完整批量交互、第四阶段源写回、步骤 09 自动同步／后台执行以及步骤 05 实库／代表性规模补验，原留项保持。用户只需完成本轮指南约定的体验，不需重复已经自动验证的清理／源完整性路径。
 
 用户确认后卸载独立 debug 包返回 `Success`，独立 AndroidTest 包此前已卸载。主 agent 仅删除本轮设备专用 `/sdcard/Download/calibre-step08-acceptance-20261007/`，最终 `pm list packages` 的 debug 前缀查询无输出，确认 debug／测试包均不存在；目录 `test -e` 为 false，输出 `dedicated-step08-directory-absent`。另查 `/data/local/tmp` 的 `calibre-ui-*.xml` 无匹配，helper XML 无残留，设备清理完成。云端测试目录由用户自行决定保留或删除，没有操作正式应用或任何正式书库。此节只记录人工验收与清理完成，未改生产代码，不重复构建。按临时计划的“用户确认通过后 commit”门槛提交本步实现、必要测试及持久文档；提交排除 `plan.md`、`local.properties`、凭据、构建产物、私有状态数据库和调试日志，不开始步骤 09。
+
+## 步骤 09：后台执行、启动同步与阶段联验（2026-10-07）
+
+日期：2026-10-07（Asia/Shanghai）。覆盖 R17–R20、R30–R36；实施前工作区无改动。本步实现、技术检查、真实两后端／系统联验及用户共同体验均已通过，设备收尾完成；最终结论见本节末尾，早期观察和失败记录保留原范围。没有开始第三阶段。准备与体验分工见[步骤 09 指南](step-09-device-guide.md)。
+
+### 实现与验收映射
+
+| 路径 | 实现与证据来源 | 本轮状态 |
+| --- | --- | --- |
+| R17：后台唤醒和提交／结束竞态 | `BackgroundTasks` 使用一次性 `APPEND_OR_REPLACE` 后继唤醒，提交／控制提交事务结束后才注册；worker、前台测试与恢复共用原持久队列及执行锁。网络／平台重试使用独立链，不阻塞新的用户唤醒。真实 WorkManager 与注入竞态平台回归分别记录。 | 真实 WorkManager、注入竞态、后台传输及实际重启恢复通过；SIGKILL 后立即自动恢复未证实 |
+| R18、R20：实际状态和控制 | 第 11 页静态任务列表，显示来源／提升、优先级、阶段、等待与处理器实际控制，任务分页按钮与主页面分页区分；进度更新使用 2 秒闸门，终态立即更新。旧断点不能复用时持久保存重传说明。第 13 页显示通知和系统后台限制，权限显式请求。 | 页面回归、真实任务分页、通知系统记录及用户共同体验通过 |
+| R19：启动同步 | SQLite v6 独立保存默认关闭的应用设置，清理保留；应用级协程执行每进程主界面首次打开的提交，worker 仅恢复队列，不触发新启动同步。低优先候选同步与手动高优先请求使用相同键并可提升。 | 设置／迁移、真实 Activity 生命周期、SAF 启动同步及实际重启恢复通过 |
+| R31–R34：错误、恢复、日志和隔离 | 原处理器在恢复时核验源版本与暂存；网络条件在派发前读取已知本地状态，永久错误不作无限源重放。debug 日志只含任务内部标识、阶段、状态、字节量和次数，通知不含书名／目录／凭据。 | 原故障证据按范围沿用；真实后台中断／暂停／恢复、内容校验及重启取证通过 |
+| AC01–AC03、AC05 及 AC09／AC10 新路径 | 两后端导入、封面／完整副本／更新／清理证据沿用步骤 05–08 未受改动的范围；本步补真实后台、进程／重启、通知与启动生命周期。 | 本阶段已实现路径联验通过；不关闭第三／四阶段或实库／代表性规模补验 |
+
+### 构建、检查与测试修正
+
+执行 `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease`，前一轮稳定构建记录为 `BUILD SUCCESSFUL`（1 分 20 秒），最新完整构建 `build-final.log` 为 `BUILD SUCCESSFUL in 1m 50s`；92 项 JVM 测试，0 失败／错误；debug/release lint 均为 0 错误、14 条既有警告。生命周期测试随后执行 `:app:assembleDebugAndroidTest :app:lintDebug`，当前 `lifecycle-build.log` 为 `BUILD SUCCESSFUL in 25s`。没有更改依赖版本或锁文件。`git diff --check` 通过。日志、报告、APK 与本轮临时产物仅保存在被忽略的 `app/build/verification/step09/` 等构建目录。
+
+前期集成编译因 suspend 函数引用缺少显式返回类型、并行编写时接口尚未到位及 Compose 成员断言的无效 import 失败，均修正后复验；一次 release lint 分析在源码修改期间出现 Kotlin/UAST `ExperimentalDetector` 崩溃，稳定源码后 debug/release lint 正常完成，未禁用检测器或更新工具来跳过检查。新页面原有 Application context lint 提示已改为 `AndroidViewModel`，新增 SharedPreferences 提示已采用 KTX，不新增 lint 警告。
+
+实施时对照 Android 官方[按需初始化](https://developer.android.com/develop/background-work/background-tasks/persistent/configuration/custom-configuration)、[长任务 worker](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/long-running)和[通知权限](https://developer.android.com/develop/ui/compose/notifications/notification-permission)核对：自定义配置移除默认 initializer，长任务在 Manifest 与运行时提供服务类型，未授权通知仍须提供前台服务通知。平台对执行机会和配额的约束保持适用，真实设备证据限 API 34，不将其扩大为所有 Android 版本已验证。
+
+实际 debug APK 核对包名 `io.github.chenxiex.calibrecloud.debug`、min/target 30/36、debuggable、独立 `.debug.books` authority；测试 APK 为 `.debug.test`。Manifest 仅补已实现后台所需的网络状态、wake lock、boot、`FOREGROUND_SERVICE`／`FOREGROUND_SERVICE_DATA_SYNC` 和 `POST_NOTIFICATIONS`；`SystemForegroundService` 非导出且声明 `dataSync`，默认 WorkManager initializer 仍移除，通过 Application `Configuration.Provider` 按需初始化。没有周期请求或一般源写接口；release 为未签名 APK，未使用正式签名。
+
+### 真机平台回归与修正后复验
+
+目标 Android 14／API 34 设备实际执行的初轮平台回归为 **101 项，99 项通过、2 项失败**（`platform-tests.log`，527.271 秒），不是一轮全通过。失败分别为真实 WorkManager 首次成功执行的持久次数断言，以及封面页面测试未接入新增自动唤醒的 fixture。前者两条一次性任务实际均成功，但测试错误地期望 `WorkInfo.runAttemptCount == 0`；实际锁定 2.10.5 的 `WorkerWrapper` 在 ENQUEUED→RUNNING 时递增，成功后保留 1，已核对本地实际依赖实现并改为 1。后者等待旧前台驱动超时，已在测试 fixture 中提供显式唤醒驱动，没有为测试改变生产执行行为。
+
+修正后定向复验 **12 项全部通过**（`platform-retest.log`，59.234 秒）：真实 `QueueWorkerPlatformTest`、任务页面 3 项、封面页面 1 项及副本／恢复 7 项。真实 WorkManager 用生产 Application 的按需配置和 worker、连续两次唤醒后两条一次性 work 成功，未创建源任务、启动同步或周期 work；此项空队列证据不替代真实后台传输、通知与进程中断验收。初轮已通过且未受修正影响的其余平台证据按对应范围沿用；没有把两轮计数合并成一次全量通过。
+
+新增网络条件平台回归 **2 项全部通过**（`network-conditions-device.log`，0.65 秒）：真实 SQLite 的本地／OneDrive 绑定和候选上下文使用可控网络可用性边界，离线条件只使云端等待，本地不受影响；启动同步持久保存一条 NETWORK 等待任务，处理器调用数为 0，手动请求复用并提升，网络条件恢复后才派发一次。此处处理器和网络条件均为确定性注入，不是物理断网、真实 Graph 失败或真实云端恢复证据。
+
+### 真机准备、SAF 与 Activity 生命周期证据
+
+目标设备 PA6，Android 14／API 34，无线 ADB；仅安装独立 debug 与测试包，未操作正式应用数据。本轮专用源副本为 `/sdcard/Download/calibre-step09-acceptance-20261007/library-a/`，从已核对的脱敏 fixture 创建 13 个文件，PDF 在准备阶段扩充为 268,436,064 字节并同步该副本数据库的格式大小；原仓库样本和此前源未改。上传前保存全部 13 个源文件 SHA-256，后续源访问只读。该副本用来提供真实传输中的中断观察窗口，不视为代表性大书库或阅读器渲染证据。
+
+真实生产 SAF 手动同步任务 `9a6c679d-01ef-48aa-aaf8-e45242280453` 已完成，持久状态为 `Completed`、来源 `manual_sync`、高优先级。实际 `BackgroundLifecycleAcceptanceTest` 以 `step09ReadOnly=true` 独立执行 **1 项通过**（`lifecycle-device.log`，19.139 秒），只允许上述专用 SAF 目录及独立 debug 包：开启启动同步后首次真实 MainActivity 启动增加恰好一条低优先任务，关闭 Activity 后由生产 worker 完成；首次任务完成后再打开、重建并多次退后台／返回，均不重复提交。先等待首任务完成再重复生命周期，避免未完成请求去重掩盖错误重复。启动同步任务 `df095193-ff46-4b9b-9d52-c3fec37931d6` 的持久状态为 `Completed`、来源 `startup_sync`、低优先级。
+
+本轮读取导出的独立 debug 私有状态快照核对两条上述完成记录；`application_settings` 的启动设置已恢复为关闭，`downloaded_copies` 数量为 0。当前生命周期证据只覆盖真实 Activity 的启动、关闭、重建与后台返回，不能视为实际进程终止、设备重启或运行中传输持续执行的证据。
+
+### 真实后台传输、进程终止与通知的当前观察
+
+首次复制前实际核对设备专用源副本，13 个文件 SHA-256 均与上传前基线一致（`source-integrity.log`：`13/13 SHA-256 unchanged after SAF sync and lifecycle acceptance`），证明此前 SAF 同步与生命周期验收未改源。上述副本数为 0 的私有状态快照也来自首次复制前；不代表后续复制执行中的最新状态。
+
+通过生产第 7 页选择 268,436,064 字节 PDF 并提交复制，UI 流程 `copy-pdf` 成功，持久任务为 `262cad0c-436e-48e2-8e69-079df626167f`，来源 `user_download`、高优先级。按 HOME 后真实 worker 留在后台：源版本核验及传输约 3 分 7 秒后，观察到 23,855,104 字节的非零进度及持久 checkpoint。首次 60 秒观察尚未捕获断点，没有执行终止；延长到 300 秒观察窗口后才捕获并执行，不把前次观察不足记为功能失败。
+
+2026-10-07 13:33:33（Asia/Shanghai），以 `run-as` 对已核对的独立 debug PID `23684` 执行 `kill -9`（`process-kill-long.log` 保存终止前同任务非零进度、checkpoint 和 `restart=false`）。这是真实进程终止，不是暂停、测试处理器重建或强制停止包。其后 45 秒未观察到新应用进程；`jobs-after-kill.log` 显示系统任务 ready 条件成立且 `Num system stops: 1`，本轮没有证明系统即时自动恢复。13:35:27 重新打开 Main 后新 PID `27331` 的生产 worker 恢复同一个 task ID 并保留 checkpoint／`restart=false`，随后再次 HOME，没有新增启动同步；此时仍在源版本核验，尚未得到恢复后的完整副本结果。
+
+初始 `POST_NOTIFICATIONS` 未授权时，真实同步及长复制仍执行，`foreground-service.log` 记录生产 `SystemForegroundService` 的 `isForeground=true`、`foregroundId=9`、dataSync 类型。其后只对独立 debug 包授予通知权限，`notification-static.log` 记录 `queue-execution` 的低重要度 channel 和实际 id 9 通知，通知 `vibrate=null`、`sound=null`、`defaults=0`，flags 包含 `ONLY_ALERT_ONCE`；内容为生产静态后台任务说明。这些是服务／通知的客观系统记录，尚未代表通知视觉、触控、动画或墨水屏体验通过。
+
+新增真实传输验收测试的 `:app:assembleDebugAndroidTest :app:lintDebug` 构建分别为 `transfer-build.log` **9 秒成功**、延长大 fixture 观察窗口后的 `transfer-window-build.log` **6 秒成功**，支持指定 task ID 后的 `transfer-known-build.log` **6 秒成功**。`BackgroundTransferAcceptanceTest` 以 `step09ReadOnly=true` 和上述 `step09TransferTask` 复用同一生产任务执行真实暂停／恢复及流式内容核对；首次 `transfer-device.log` 执行 177.389 秒后失败：真实任务已经达到持久 Paused，但测试错误地要求暂存长度等于已确认前缀，实际 28,442,624 字节暂存包含 23,855,104 字节已确认前缀及崩溃前未确认尾部。处理器先核验前缀、再截断尾部才续传，在前缀核验阶段暂停可以保留尾部；没有因此改动生产行为。测试改为暂存至少包含完整已确认前缀，并仍严格要求暂停期间稳定、无新副本发布以及最终内容大小／SHA-256 完整匹配。修正后的构建 `transfer-retest-build.log` 5 秒成功；指定已暂停任务的 `transfer-device-retest.log` 正在核对持久暂停及恢复，不提前记为通过。主 agent 另以真实私有状态和文件 stat 检查 3 秒，四次长度均为 28,442,624、状态均为 Paused、完整副本数量均为 0（`paused-stability.log`）。指定模式严格核对当前专用 SAF 目录、完整 BookKey／PDF／源定位和其他任务已完成，不另建复制、不调用前台 drain、不注入源内容或修改源数据。
+
+### 任务页定向审查修正
+
+只读审查发现两项 UI 问题：控制被拒绝的错误由普通读取刷新立即清除，以及暂停项被计入待执行序号。先新增对应回归再修正：操作错误独立保存，后台刷新不清除，下一次控制才清除；仅接受的控制请求继续唤醒。暂停项不显示或占用顺序，排队／等待文案明确优先级顺序和条件满足前提。新增 ViewModel 两项使用独立 SQLite fixture 检查拒绝／异常后的刷新与提示，新增页面两项检查暂停序号与独立错误文案，下文补记实际定向真机结果。
+
+新测试首次构建因重复的 `PrivateBookFiles` import 失败；移除重复并使下次控制断言同时等待真实终态与刷新，避免提前关闭测试数据库。随后完整命令 `:app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease` **45 秒成功**（`build-ui-retest.log`），92 JVM、0 失败／错误，双变体 lint 0 错误、14 既有警告；依赖与锁文件不变。真实传输测试正在运行时没有安装新 APK 或重启测试应用；运行中的验收仍使用原已核对 worker，UI 修正包待该测试结束后安装补验。
+
+### 完整副本、页面回归与重启前状态
+
+修正断点 fixture 后，`BackgroundTransferAcceptanceTest` 指定同一已暂停任务复验 **1 项通过**（`transfer-device-retest.log`，468.292 秒）：实际已确认前缀为 23,855,104 字节，持久暂停及 3 秒不增长通过，生产 worker 恢复后 `restartedTransfer=false`；最终完成私有副本大小 268,436,064 字节，流式 SHA-256 为 `df5090b32a623aa8494529236ec42d5f1a5463850607c10d9d00afb178e71e9d`，与专用源基线完全一致，暂存目录清理。初轮真实 PAUSE 已达到安全边界但 fixture 断言失败，复验从真实已暂停记录开始，不宣称复验再次新发起 PAUSE。持久记录为 `Completed`、checkpoint 清除，完整副本数量为 1。`queue-worker.log` 有最终 `Finished/result=Completed/bytes=268436064` 脱敏日志，关闭此前只观察恢复中阶段的留项；不把这个人为扩充 fixture 的耗时视为代表性性能验收。
+
+随后安装 UI 修正的独立 debug／测试包，`TaskScreenTest` 5 项及 `TaskViewModelTest` 2 项 **全部通过**（`ui-device-retest.log`，129.799 秒），覆盖新增错误保留及暂停项顺序，关闭前节页面回归尚未执行的状态。
+
+有已下载 PDF 时再以真实 MainActivity 和生产 worker 执行生命周期联动，**1 项通过**（`lifecycle-with-copy-device.log`，21.246 秒）：每进程仍只新增一条低优先启动同步 `f5e57689-e4a2-4427-9a04-efb7ae3e55d0` 并完成，设置恢复关闭；导入后实际产生低优先已下载格式检查 `eb704459-551b-49bf-8ea4-9b4d160f36a8`，阶段 `format_check` 尚未完成，旧完整副本保留为 1。这次联动验证同步会交给同一后台队列检查已下载格式，不提前把尚未完成的版本检查记为通过。
+
+重启前再次核对全部 13 个设备源文件 SHA-256 均保持原基线（`source-integrity-after-copy.log`），覆盖实际传输中断、暂停／恢复、完整发布及带缓存同步之后，源文件未改。保存完整副本的内部身份／代次／大小／版本摘要和队列快照用于重连后比对。最初导出时测试进程已退出，没有活跃 PID；主 agent 重开独立 debug 随即 HOME 后，再保存 `before-reboot.json`：debug PID `29362`、boot_count `26`、同一未完成格式检查的持久 `Running` 记录、完整副本 1。没有在重启前成功取得新的前台服务 dump，因此这里不以持久 Running 记录冒称重启瞬间已经观察到活跃传输。
+
+`adb reboot` 命令返回 0 后无线 ADB 断开。旧地址重连返回 `Connection refused`，mDNS 无发现，设备列表仅旧地址 offline；本轮尚无重启后的 boot_count、队列／副本或 worker 日志。实际重启恢复验收保持未完成，需要用户提供无线调试页的新连接地址后继续核对同一任务、完整副本代次、源完整性及后台恢复，不需要用户手工计时或反复断网。
+
+### 重连后的真实重启恢复
+
+用户重新连接无线 ADB 后，主 agent 在打开 Main 之前取证：系统 boot_count 从重启前 26 增为 27，同一个低优先 `downloaded_format_update` 任务 `eb704459-551b-49bf-8ea4-9b4d160f36a8` 已由生产 worker 完成。`queue-worker-after-reboot.log` 记录重启后 PID `4600` 在 13:56:01 开始 `format_check`，13:59:14 得到 `Finished/result=Completed`（193,605 毫秒）。全部原 5 条任务均完成，task ID 集合没有增加；这次是实际重启后系统后台恢复，关闭之前重连取证未完成的留项，不扩大先前 SIGKILL 后 45 秒无即时恢复的结论。
+
+`after-reboot.json` 核对原完整 PDF 的书库／书籍／格式、文件代次、大小和保存版本与 `copy-before-reboot.json` 完全一致，仍只有 1 个副本，没有重复发布。独立 debug 私有 PDF 的 SHA-256 仍为 `df5090b32a623aa8494529236ec42d5f1a5463850607c10d9d00afb178e71e9d`、大小 268,436,064 字节；全部 13 个设备源文件也保持上传前 SHA-256，恢复没有改写源或删除完整副本。取证完成后才打开 Main 准备个人 OneDrive 登录入口。
+
+### OneDrive 生产后台与清理联验
+
+用户完成个人账号登录及专用测试目录选择后，主 agent 从第 4 页生产入口执行“验证／同步元数据”，实际同步任务 `1d5d99c1-3593-4d9b-801a-e43fa762d701` 为高优先级 `manual_sync`、Completed，独立云端身份激活且本地导入保留。随后通过真实设备执行 `adb shell am instrument -w -e step08ReadOnly true -e class io.github.chenxiex.calibrecloud.storage.cache.CacheReadOnlyAcceptanceTest io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner`，**1 项通过**（`cloud-worker-readonly.log`，279.89 秒）。测试严格限定独立 debug 与专用 `library-a`，调用生产副本／封面服务提交任务并等待真实 WorkManager，不直接 drain，不进行 UI 操作，不注入源响应。
+
+EPUB、PDF 与封面任务分别为 `98307cec-66ca-48e2-b8c1-f0691344cabe`、`c004dbec-750e-44f2-9ddc-c42e48d404d3`、`ffb91c51-2f5c-4ace-ad98-57eb86ff8f6c`，均 Completed。EPUB 为 51,734 字节、SHA-256 `ba999028397cc788894686459a59e196299e123d74617ca501218afa456b15b5`，PDF 为 608 字节、SHA-256 `634540ec54cc3a5ffd6698d5673134e85f46e4b4cd34549d3ed001190039e888`。真实封面完整发布后清除；精确移除 EPUB 保留 PDF，清除当前云端元数据／封面后 PDF 私有内容仍可读、源可用性为未确认，配置和偏好保持。测试前后云端格式与源数据库的字节及版本一致，数据库 SHA-256 为 `2a84bdeae960a0d8af1be06825f8739876dadf9c79360fa8cb6d94dfa35f12b1`，没有上传、删除、改名或写入源。
+
+测试后主 agent 独立比对真实清单（`cloud-isolation.log`）：当前两个完整 PDF 分属不同书库，本地 268,436,064 字节 PDF 的完整身份、文件代次、大小和版本与重启前完全一致，云端 608 字节 PDF 保留。上述清理使云端元数据暂不可用符合既有规则，体验前由生产入口重新同步，不要求用户重复清理联验。
+
+体验前重新从第 4 页生产入口同步成功：高优先级手动任务 `6c768bbb-e249-4b2d-ae08-e10f08dba974` Completed，恢复云端导入，实际派生低优先级已下载格式检查 `384ae127-5c0a-466c-9191-aa6cd62abe58`，也由生产 worker Completed；真实快照 `cloud-refresh-state.json` 为 13 条全部完成、两个书库导入、两个完整 PDF。闭合云端“清元数据 → 重新同步 → 自动检查已有下载”联动，未重复发布副本。本轮只追加真实集成和文档记录，沿用此前稳定源码的完整构建及定向回归，没有把尚未完成的用户体验记为通过。导航曾发生 ADB 查询超时，helper 明确记录未点击，按确认的剩余步骤继续，最终第 4 页同步后置条件成功。
+
+随后导航经过第 9 页，页面按需创建一条新的低优先级封面请求 `6274a149-cb55-45da-9f4f-8df1f2c436b5`，生产 worker 已完成，因此体验准备时实际为 14 条完成任务。这是重新导入后新的可见封面请求，不是清理前旧结果复活。任务分页准备初次按先前 13 条快照设定前置条件，helper 因实际总数 14 拒绝且未点击；按真实节点重新核对后继续，没有为测试改变生产状态。
+
+真实第 11 页使用独立任务翻页按钮，从“任务 1 / 14”连续完成 13 次到“任务 14 / 14”（`task-pagination14` helper 成功）。首项的“上一项任务”可点击父节点为禁用。页面状态为已完成，用户请求／自动任务标签实际可辨识；灰度、残影、动画和触控体验仍交用户确认，元素查询不替代体验。
+
+第 12 页真实后置条件确认“启动应用时自动同步：关闭”，第 13 页确认“系统通知：开启”，然后按页导航回第 11 页（`settings-experience-retry` 完成第 1 步，`settings-experience-remaining2` 完成剩余 3 步）。查询超时均为 `action_may_have_executed=false`，没有重复未知执行结果的点击。第 11–13 页已准备供共同体验；指南仅要求任务翻页、开关／立即同步及通知抽屉体验，不要求重复客观数据验证。上述文档更新后 `git diff --check` 通过。
+
+### 最终共同验收与设备收尾
+
+用户于 2026-10-07 在第 11–13 页体验指南与真实结果交付后明确回复“通过”，确认任务分页、同步设置、通知／后台提示及灰度、动画、残影、触控的共同体验。本步对应 R17–R20、R30–R36 的实现、必要自动检查、真实本地／OneDrive 后台联验及共同验收完成，第二阶段已实现路径完成；AC01–AC03、AC05 及 AC09／AC10 保持上述本阶段证据边界，没有开始第三阶段。
+
+已保存验收后的脱敏任务快照 `accepted-final-state.json`。实际执行 `adb uninstall io.github.chenxiex.calibrecloud.debug.test` 与 `adb uninstall io.github.chenxiex.calibrecloud.debug`，两项均返回 `Success`；随后仅删除核对过真实路径、根目录只含 `library-a` 且含本轮数据库的 `/sdcard/Download/calibre-step09-acceptance-20261007`，检查该目录不存在、两个包已卸载，其他匹配包清单保持不变（`cleanup.json`）。没有操作正式应用、真实书库或云端测试目录，云端目录由用户自行决定保留或删除。原始日志／APK／设备产物保持在忽略的构建目录，`plan.md` 与本地配置不加入提交。
+
+代表性实库／规模、无相应样本的存储卷／提供方、第三阶段阅读器和第四阶段真实源写回保留原未完成范围；本轮没有证明 SIGKILL 后系统即时自动恢复，不扩大为所有 Android 版本或代表性性能通过。历史失败的 fixture 已按本节实际定向复验关闭，不将多轮计数写成一次全量通过。

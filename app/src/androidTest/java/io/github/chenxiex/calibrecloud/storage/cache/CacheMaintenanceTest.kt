@@ -300,9 +300,11 @@ class CacheMaintenanceTest {
         LegacyCacheSchemaFixture.downgradeToFour(database.writableDatabase)
         database.close()
         reopen()
-        assertEquals(5, database.readableDatabase.version)
+        assertEquals(6, database.readableDatabase.version)
         assertEquals(column, metadata.currentImport()!!.selectedReadColumn)
+        state.setStartupEnabled(true)
         assertTrue(maintenance.execute(requireNotNull(maintenance.previewMetadata())))
+        assertTrue(state.startupEnabled())
         val source = CalibreFixture.create(File(root, "migrated-reload.db"),
             libraryUuid = requireNotNull(imported.metadata.sourceLibraryUuid), bookUuid = book.sourceUuid)
         assertEquals(imported.identity, metadata.importSnapshot(state.current()!!.token, source))

@@ -104,6 +104,8 @@ data class TaskRecord(
     val state: TaskState,
     val controls: TaskControls,
     val commit: CommitState = CommitState.NotCommitted,
+    /** A previously retained prefix could not be reused; survives process and stage changes. */
+    val restartedTransfer: Boolean = false,
 ) {
     val libraryId get() = submission.request.libraryId
     val originalOrigin get() = submission.origin

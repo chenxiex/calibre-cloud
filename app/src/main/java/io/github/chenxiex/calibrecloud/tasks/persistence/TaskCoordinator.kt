@@ -52,6 +52,12 @@ class TaskExecution internal constructor(private val queue: DurableTaskQueue, va
         }
     }
 
+    /** Record actual fallback to a full transfer, never inferred by the UI from a zero offset. */
+    suspend fun markTransferRestart() {
+        checkControl()
+        queue.update(id) { entry -> entry.copy(record = entry.record.copy(restartedTransfer = true)) }
+    }
+
     /** Persist immediately after source outcome is established, before refetch or any next selection. */
     suspend fun recordCommit(commit: CommitState) {
         queue.update(id) { entry ->
@@ -67,7 +73,7 @@ class TaskExecution internal constructor(private val queue: DurableTaskQueue, va
  * All foreground/background wakeups share queue.executionLock. A full resource workflow retains
  * execution until complete/pause/wait/failure; the next resource is selected afresh. No preemption.
  * Unknown or confirmed-but-unrefreshed writes reserve dispatch, including across process recovery.
- * WorkManager integration and UI wakeup hooks are deliberately deferred to step 09.
+ * WorkManager wakes this same coordinator; its scheduling does not determine resource order.
  */
 class TaskCoordinator(
     private val queue: DurableTaskQueue,
@@ -87,7 +93,10 @@ class TaskCoordinator(
         try { queue.beforeDispatch(); queue.recover() } finally { queue.executionLock.unlock() }
     }
 
-    /** Explicit foreground driver; returns when no currently executable work remains. */
+    /** UI requests persistent platform execution rather than owning a lifecycle-bound drain. */
+    suspend fun requestRun() = queue.onWake()
+
+    /** Shared foreground/test/background driver; returns when no currently executable work remains. */
     suspend fun drain() = queue.executionLock.withLock {
         queue.beforeDispatch()
         queue.list().filter { it.record.state is TaskState.Finished &&

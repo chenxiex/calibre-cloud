@@ -100,6 +100,20 @@ class ApplicationStateRepository(
 
     suspend fun current(): LibrarySelection? = withContext(ioDispatcher) { current(database.readableDatabase) }
 
+    /** Global R19 setting; retained independently of library selection and cache cleanup. */
+    suspend fun startupEnabled(): Boolean = withContext(ioDispatcher) {
+        database.readableDatabase.rawQuery("SELECT startup_sync FROM application_settings WHERE singleton = 1", null).use {
+            it.moveToFirst() && it.getInt(0) == 1
+        }
+    }
+
+    suspend fun setStartupEnabled(enabled: Boolean): Unit = withContext(ioDispatcher) {
+        transaction {
+            update("application_settings", ContentValues().apply { put("startup_sync", if (enabled) 1 else 0) },
+                "singleton = 1", null)
+        }
+    }
+
     suspend fun binding(id: LibraryId): LibraryIdentity? = withContext(ioDispatcher) {
         binding(database.readableDatabase, id)
     }

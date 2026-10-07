@@ -145,6 +145,16 @@ class FormatCopyTaskHandlerTest {
     }
 
     @Test
+    fun restartTransferEvidenceRoundTripsAndLegacyPayloadDefaultsFalse() = runBlocking<Unit> {
+        val task = submit()
+        val original = queue.get(task)!!.record
+        val restarted = original.copy(restartedTransfer = true)
+        assertEquals(restarted, TaskCodec.decode(TaskCodec.encode(restarted)))
+        val legacy = JSONObject(TaskCodec.encode(restarted)).apply { remove("restarted_transfer") }
+        assertEquals(original, TaskCodec.decode(legacy.toString()))
+    }
+
+    @Test
     fun pauseAndResumeReacquireVersionAndRestartWhenSourceChanges() = runBlocking<Unit> {
         val source = Source(epub("old")).apply { blockAfterChunk = true }
         val task = submit()
@@ -163,6 +173,7 @@ class FormatCopyTaskHandlerTest {
         assertTrue(queue.control(task, TaskControl.RESUME))
         coordinator(source).drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertTrue(queue.get(task)!!.record.restartedTransfer)
         assertArrayEquals(source.bytes, readBytes())
         assertEquals(2, source.opens.get())
         assertTrue(source.rangeOffsets.isEmpty())
@@ -177,6 +188,7 @@ class FormatCopyTaskHandlerTest {
         assertTrue(queue.control(task, TaskControl.RESUME))
         coordinator(source).drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertFalse(queue.get(task)!!.record.restartedTransfer)
         assertEquals(listOf(64L), source.rangeOffsets)
         assertEquals(1, source.opens.get())
         assertEquals(source.bytes.size.toLong(), source.bytesRead.get())
@@ -243,6 +255,7 @@ class FormatCopyTaskHandlerTest {
         assertTrue(queue.control(task, TaskControl.RESUME))
         coordinator(source).drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertTrue(queue.get(task)!!.record.restartedTransfer)
         assertTrue(source.rangeOffsets.isEmpty())
         assertEquals(2, source.opens.get())
         assertArrayEquals(source.bytes, readBytes())
@@ -259,6 +272,7 @@ class FormatCopyTaskHandlerTest {
         assertTrue(queue.control(task, TaskControl.RESUME))
         coordinator(source).drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertTrue(queue.get(task)!!.record.restartedTransfer)
         assertTrue(source.rangeOffsets.isEmpty())
         assertEquals(2, source.opens.get())
         assertArrayEquals(source.bytes, readBytes())
@@ -272,6 +286,7 @@ class FormatCopyTaskHandlerTest {
         assertTrue(queue.control(task, TaskControl.RESUME))
         coordinator(source).drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertTrue(queue.get(task)!!.record.restartedTransfer)
         assertEquals(listOf(64L), source.rangeOffsets)
         assertEquals(2, source.opens.get())
         assertArrayEquals(source.bytes, readBytes())
@@ -492,6 +507,7 @@ class FormatCopyTaskHandlerTest {
         val source = Source(epub("fresh"))
         coordinator(source).drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertTrue(queue.get(task)!!.record.restartedTransfer)
         assertNull(queue.get(task)!!.checkpoint)
         assertArrayEquals(source.bytes, readBytes())
         assertTrue(source.opens.get() > 0)

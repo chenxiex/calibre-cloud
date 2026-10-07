@@ -151,7 +151,7 @@ class DownloadViewModel(
     private fun wake() {
         viewModelScope.launch {
             try {
-                coordinator.drain()
+                coordinator.requestRun()
             } catch (failure: CancellationException) {
                 throw failure
             } catch (_: Exception) {

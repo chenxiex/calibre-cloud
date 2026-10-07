@@ -20,6 +20,7 @@ import io.github.chenxiex.calibrecloud.tasks.api.SubmissionResult
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
 import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -101,14 +102,14 @@ class CacheReadOnlyAcceptanceTest {
             assertIdle(dependencies)
             assertEquals(selected, dependencies.state.current())
             val task = created(dependencies.copyService.submit(key, selected.token))
-            drainOnly(dependencies, task)
+            awaitOnly(dependencies, task)
             assertArrayEquals(sources.getValue(if (key == epub) EPUB_PATH else PDF_PATH).bytes,
                 copyBytes(dependencies, key))
         }
         if (book.hasCover) {
             assertIdle(dependencies)
             val task = created(dependencies.coverService.submit(bookKey, selected.token))
-            drainOnly(dependencies, task)
+            awaitOnly(dependencies, task)
             requireNotNull(dependencies.covers.read(bookKey)) { "Real cover task must publish a readable cache" }.recycle()
         }
 
@@ -146,7 +147,7 @@ class CacheReadOnlyAcceptanceTest {
             verifySources(dependencies, location, sources)
         }
         instrumentation.sendStatus(0, Bundle().apply {
-            putString("step08Integration", "production read-only service integration; no UI interactions")
+            putString("step08Integration", "production WorkManager read-only service integration; no UI interactions")
             putString("step08Backend", location.backend.toString())
             putString("step08EPUBSHA256", hash(sources.getValue(EPUB_PATH).bytes))
             putString("step08PDFSHA256", hash(sources.getValue(PDF_PATH).bytes))
@@ -166,10 +167,16 @@ class CacheReadOnlyAcceptanceTest {
         return (result as SubmissionResult.Created).taskId
     }
 
-    private suspend fun drainOnly(dependencies: ApplicationDependencies, task: TaskId) {
-        assertEquals("Do not execute unrelated unfinished tasks", setOf(task), dependencies.taskQueue.list()
-            .filter { it.record.state !is TaskState.Finished }.map { it.record.id }.toSet())
-        dependencies.taskCoordinator.drain()
+    private suspend fun awaitOnly(dependencies: ApplicationDependencies, task: TaskId) {
+        // Submission already wakes the real production worker. It may complete before the first
+        // observation; an empty unfinished set is valid, but an unrelated task is never eligible.
+        while (true) {
+            assertTrue("Do not execute unrelated unfinished tasks", dependencies.taskQueue.list()
+                .filter { it.record.state !is TaskState.Finished }.all { it.record.id == task })
+            val state = requireNotNull(dependencies.taskQueue.get(task)).record.state
+            if (state is TaskState.Finished) break
+            delay(100)
+        }
         assertEquals(TaskState.Finished(TaskResult.Completed), dependencies.taskQueue.get(task)?.record?.state)
         assertIdle(dependencies)
     }

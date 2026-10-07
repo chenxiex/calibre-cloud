@@ -1,6 +1,8 @@
 package io.github.chenxiex.calibrecloud.ui
 
 import android.content.Intent
+import android.os.Build
+import android.Manifest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -45,6 +47,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.ViewModelProvider
+import kotlinx.coroutines.launch
 import io.github.chenxiex.calibrecloud.metadata.ReadColumnStatus
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import java.text.DateFormat
@@ -86,6 +89,12 @@ class MainActivity : ComponentActivity() {
     private val cleanupModel by lazy {
         ViewModelProvider(this, CleanupViewModel.factory(applicationContext))[CleanupViewModel::class.java]
     }
+    private val taskModel by lazy {
+        ViewModelProvider(this, TaskViewModel.factory(applicationContext))[TaskViewModel::class.java]
+    }
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        taskModel.refreshCapabilities()
+    }
     private var pickerOpen by mutableStateOf(false)
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pickerOpen = false
@@ -99,10 +108,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         pickerOpen = savedInstanceState?.getBoolean("picker_open") ?: false
         intent.data?.toString()?.let { oneDriveModel.callback(it); intent.data = null }
+        val dependencies = (application as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies
+        dependencies.applicationScope.launch { dependencies.backgroundTasks.onMainOpened() }
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel, coverModel, cleanupModel,
+                AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel, coverModel, cleanupModel, taskModel,
+                    { if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) },
                     { oneDriveModel.login { startActivity(it) } }) {
                     pickerOpen = true
                     picker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
@@ -148,6 +160,8 @@ private fun AuthorizationPage(
     downloads: DownloadViewModel,
     covers: CoverViewModel,
     cleanup: CleanupViewModel,
+    tasks: TaskViewModel,
+    onRequestNotifications: () -> Unit,
     onLogin: () -> Unit,
     onSelect: () -> Unit,
 ) {
@@ -166,6 +180,7 @@ private fun AuthorizationPage(
     LaunchedEffect(page, state, busy, snapshot.record, library.record, library.rootChosen, library.submitting) {
         covers.setVisible(page == 8)
     }
+    LaunchedEffect(page) { tasks.setVisible(page >= 10) }
     LaunchedEffect(cleanup.revision) {
         metadata.restore()
         downloads.restore()
@@ -245,15 +260,21 @@ private fun AuthorizationPage(
                 DownloadList(downloads)
             } else if (page == 8) {
                 CoverScreen(covers)
-            } else {
+            } else if (page == 9) {
                 CleanupScreen(cleanup)
+            } else if (page == 10) {
+                TaskScreen(tasks)
+            } else if (page == 11) {
+                TaskSettings(tasks)
+            } else {
+                BackgroundSettings(tasks, onRequestNotifications)
             }
         }
-        Text(stringResource(R.string.authorization_page_number, page + 1, 10))
+        Text(stringResource(R.string.authorization_page_number, page + 1, 13))
         Row {
             StaticButton(stringResource(R.string.page_previous), page > 0 && !cleanup.busy) { page-- }
             Spacer(Modifier.width(8.dp))
-            StaticButton(stringResource(R.string.page_next), page < 9 && !cleanup.busy) { page++ }
+            StaticButton(stringResource(R.string.page_next), page < 12 && !cleanup.busy) { page++ }
         }
     }
 }

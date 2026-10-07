@@ -36,6 +36,8 @@ enum class TaskControl(val code: String) { PAUSE("pause"), CANCEL("cancel"), RES
 class DurableTaskQueue(private val database: ApplicationStateDatabase, private val io: CoroutineDispatcher) : TaskQueue {
     internal val executionLock = Mutex()
     internal var beforeDispatch: suspend () -> Unit = {}
+    /** Installed by the process container; called after durable submission/control, never inside a transaction. */
+    var onWake: suspend () -> Unit = {}
     private val revision = MutableStateFlow(0L)
     private val eventBus = MutableSharedFlow<TaskEvent>(extraBufferCapacity = 64)
     override val events: Flow<TaskEvent> = eventBus.asSharedFlow()
@@ -102,6 +104,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             SubmissionResult.Created(id)
         }
         changed.forEach { publish(it) }
+        if (result !is SubmissionResult.Rejected) onWake()
         result
     }
 
@@ -193,6 +196,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             true
         }
         changed?.let { publish(it) }
+        if (accepted) onWake()
         accepted
     }
 

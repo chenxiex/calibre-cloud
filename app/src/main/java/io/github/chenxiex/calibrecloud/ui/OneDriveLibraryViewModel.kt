@@ -104,7 +104,7 @@ class OneDriveLibraryViewModel(private val service: OneDriveCandidateService) : 
         if (submitting) return
         submitting = true
         viewModelScope.launch {
-            try { service.coordinator.drain(); refresh() } finally { submitting = false }
+            try { service.coordinator.requestRun(); refresh() } finally { submitting = false }
         }
     }
 
@@ -112,7 +112,7 @@ class OneDriveLibraryViewModel(private val service: OneDriveCandidateService) : 
         val id = record?.id ?: return
         viewModelScope.launch {
             if (service.queue.control(id, command) && command in setOf(TaskControl.RESUME, TaskControl.RETRY)) {
-                service.coordinator.drain()
+                service.coordinator.requestRun()
             }
             refresh()
         }
@@ -128,7 +128,7 @@ class OneDriveLibraryViewModel(private val service: OneDriveCandidateService) : 
                 if (id != null) {
                     if (navigation != null) pendingNavigation = id to navigation
                     observe(id)
-                    service.coordinator.drain()
+                    service.coordinator.requestRun()
                 }
                 refresh()
             } finally {
