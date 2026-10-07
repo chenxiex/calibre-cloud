@@ -194,7 +194,7 @@ class CoverTaskHandlerTest {
         database.writableDatabase.version = 3
         database.close()
         reopen()
-        assertEquals(6, database.readableDatabase.version)
+        assertEquals(7, database.readableDatabase.version)
         assertEquals(imported, metadata.currentImport())
         assertEquals(manifest, state.find(CopyKey(book, BookFormat.parse("EPUB"))))
         assertEquals(queued, queue.get(task))

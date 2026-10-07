@@ -103,7 +103,7 @@ class TaskSchemaMigrationTest {
             ApplicationStateDatabase(context, name).use { database ->
                 val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
                 val queue = DurableTaskQueue(database, Dispatchers.IO)
-                assertEquals(6, database.readableDatabase.version)
+                assertEquals(7, database.readableDatabase.version)
                 assertEquals(previous.first, state.current())
                 assertEquals(identity, state.binding(identity.id))
                 assertEquals(previous.second, queue.list())

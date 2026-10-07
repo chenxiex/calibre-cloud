@@ -23,9 +23,11 @@ import io.github.chenxiex.calibrecloud.library.LibraryProblem
 import io.github.chenxiex.calibrecloud.library.LibraryQueryResult
 import io.github.chenxiex.calibrecloud.library.LibraryQueryService
 import io.github.chenxiex.calibrecloud.library.LibraryRequest
+import io.github.chenxiex.calibrecloud.library.SearchScope
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.state.LibrarySelection
+import io.github.chenxiex.calibrecloud.state.SearchHistoryStore
 import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
 import io.github.chenxiex.calibrecloud.tasks.api.SubmissionResult
 import io.github.chenxiex.calibrecloud.tasks.api.TaskEvent
@@ -55,6 +57,18 @@ sealed interface LibraryContent {
     data class Books(val total: Int, val offset: Int, val rows: List<BookRow>) : LibraryContent
     data class Folders(val total: Int, val offset: Int, val rows: List<FolderRow>) : LibraryContent
 }
+
+/**
+ * One visit of the search page. View, sort and filters start as the library's and changes stay here;
+ * [query] is the last executed search, null until the search key is pressed.
+ */
+data class SearchSession(
+    val viewMode: LibraryViewMode,
+    val sort: BookSort,
+    val filters: LibraryFilters,
+    val scope: SearchScope = SearchScope.All,
+    val query: String? = null,
+)
 
 /** Cover access of the visible page; the production implementation uses the cover cache and task queue. */
 interface LibraryCovers {
@@ -96,19 +110,24 @@ class QueueLibraryCovers(
  * measured [capacity], so a resize keeps the first visible item on the shown page. Queries run on
  * the query service's dispatcher and never contact a backend; only the covers of the shown page are
  * enqueued, once per displayed page, and a result for an older request, import or selection is dropped.
+ *
+ * While [search] is open the page shows the search session instead: the library's categorization,
+ * folder and page stay as they were and are shown again by [closeSearch]. Only executed queries enter
+ * the per-library history.
  */
 class LibraryViewModel(
     private val selection: suspend () -> LibrarySelection?,
     private val queries: LibraryQueryService,
     private val covers: LibraryCovers,
     private val events: Flow<TaskEvent>,
+    private val historyStore: SearchHistoryStore,
 ) : ViewModel() {
     var content by mutableStateOf<LibraryContent>(LibraryContent.Loading)
         private set
     var overview by mutableStateOf<LibraryOverview?>(null)
         private set
-    var viewMode by mutableStateOf(LibraryViewMode.GRID)
-        private set
+    private var libraryViewMode by mutableStateOf(LibraryViewMode.GRID)
+    val viewMode: LibraryViewMode get() = search?.viewMode ?: libraryViewMode
     var categorization by mutableStateOf<Categorization>(Categorization.None)
         private set
     /** The open folder; null at the root. */
@@ -123,11 +142,26 @@ class LibraryViewModel(
         private set
     private var rootSort by mutableStateOf(BookSort.Default)
     private var folderSort by mutableStateOf(BookSort.Default)
-    val sort: BookSort get() = if (folder != null) folderSort else rootSort
+    val sort: BookSort get() = search?.sort ?: if (folder != null) folderSort else rootSort
     /** Name direction of the folder level; the fallback folder stays last either way. */
     var foldersAscending by mutableStateOf(true)
         private set
-    val filters: LibraryFilters = LibraryFilters()
+    private var libraryFilters by mutableStateOf(LibraryFilters())
+    /** Filters of the shown page: the search session's while it is open, otherwise the library's. */
+    val filters: LibraryFilters get() = search?.filters ?: libraryFilters
+
+    /** The open search page; null while the library is shown. */
+    var search by mutableStateOf<SearchSession?>(null)
+        private set
+    /** Text of the search input; kept here so it survives Activity recreation and starts empty per visit. */
+    var searchInput by mutableStateOf("")
+        private set
+    /** Executed queries of the current library, newest first. */
+    var history by mutableStateOf<List<String>>(emptyList())
+        private set
+
+    /** The library page lists folders: a categorized root outside the search page. */
+    val showsFolders: Boolean get() = search == null && folder == null && categorization != Categorization.None
 
     val coverImages = mutableStateMapOf<BookKey, Bitmap>()
 
@@ -136,6 +170,7 @@ class LibraryViewModel(
     private var loading: Job? = null
     private var listening: Job? = null
     private var rootFirstVisible = 0
+    private var libraryFirstVisible = 0
     private val requested = mutableSetOf<BookKey>()
     private val waiting = mutableMapOf<BookKey, Job>()
     private var pageKey: Any? = null
@@ -186,7 +221,8 @@ class LibraryViewModel(
 
     fun showAs(mode: LibraryViewMode) {
         if (mode == viewMode) return
-        viewMode = mode
+        val session = search
+        if (session != null) search = session.copy(viewMode = mode) else libraryViewMode = mode
         // The grid and list capacities differ; the first visible item stays on the shown page.
         reload()
     }
@@ -220,7 +256,12 @@ class LibraryViewModel(
     fun sortBy(key: BookSortKey) {
         val current = sort
         val value = if (current.key == key) current.copy(ascending = !current.ascending) else BookSort.of(key)
-        if (folder != null) folderSort = value else rootSort = value
+        val session = search
+        when {
+            session != null -> search = session.copy(sort = value)
+            folder != null -> folderSort = value
+            else -> rootSort = value
+        }
         firstVisible = 0
         reload()
     }
@@ -230,6 +271,89 @@ class LibraryViewModel(
         foldersAscending = !foldersAscending
         firstVisible = 0
         reload()
+    }
+
+    /** Changes the filters of the shown page and starts again from its first page. */
+    fun updateFilters(change: (LibraryFilters) -> LibraryFilters) {
+        val session = search
+        if (session != null) search = session.copy(filters = change(session.filters)) else libraryFilters = change(libraryFilters)
+        firstVisible = 0
+        reload()
+    }
+
+    /** Opens the search page with the library's view, book sort and filters; the library position is kept. */
+    fun openSearch() {
+        if (search != null) return
+        libraryFirstVisible = pageStart(firstVisible, capacity)
+        // A flat result has no series to order by.
+        search = SearchSession(viewMode, sort.takeIf { it.key != BookSortKey.SERIES_INDEX } ?: BookSort.Default, filters)
+        searchInput = ""
+        firstVisible = 0
+        reload()
+    }
+
+    /** Returns false when no search is open so the caller can fall through to the system back action. */
+    fun closeSearch(): Boolean {
+        if (search == null) return false
+        search = null
+        firstVisible = libraryFirstVisible
+        reload()
+        return true
+    }
+
+    /** Limits the next executed query to one field; it does not run a search by itself. */
+    fun chooseScope(scope: SearchScope) {
+        search = search?.copy(scope = scope)
+    }
+
+    /** Editing never runs a search; emptying the input returns to the history. */
+    fun editSearch(text: String) {
+        searchInput = text
+        if (text.isBlank()) clearQuery()
+    }
+
+    /** Runs [text] as an executed query and saves it to the history; blank text is ignored. */
+    fun submitSearch(text: String) {
+        val session = search ?: return
+        val query = text.trim()
+        if (query.isEmpty()) return
+        searchInput = text
+        search = session.copy(query = query)
+        firstVisible = 0
+        reload()
+        viewModelScope.launch {
+            val id = selection()?.identity?.id ?: return@launch
+            try {
+                historyStore.record(id, query)
+                history = historyStore.list(id)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // The search still ran; the history shows what was saved.
+            }
+        }
+    }
+
+    private fun clearQuery() {
+        val session = search ?: return
+        if (session.query == null) return
+        search = session.copy(query = null)
+        firstVisible = 0
+        reload()
+    }
+
+    fun clearHistory() {
+        viewModelScope.launch {
+            val id = selection()?.identity?.id ?: return@launch
+            try {
+                historyStore.clear(id)
+                history = historyStore.list(id)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // The remaining history stays visible.
+            }
+        }
     }
 
     private fun reload() {
@@ -267,7 +391,22 @@ class LibraryViewModel(
                 resetCovers(selected.token)
                 return
             }
+            val session = search
+            if (session != null && session.query == null) {
+                // The search page shows its field choices and history until a query is executed.
+                val saved = selected.identity?.let { historyStore.list(it.id) }.orEmpty()
+                if (selection()?.token != selected.token || generation != loadGeneration) return
+                overview = current
+                history = saved
+                // A field of a column that is no longer supported is not offered any more.
+                val scope = session.scope
+                if (scope is SearchScope.Column && current.categoryColumns.none { it.id == scope.id }) {
+                    search = search?.copy(scope = SearchScope.All)
+                }
+                return
+            }
             val request = LibraryRequest(
+                search = session?.query.orEmpty(), searchScope = session?.scope ?: SearchScope.All,
                 categorization = categorization, folder = folder, sort = sort, foldersAscending = foldersAscending, filters = filters,
                 offset = pageStart(firstVisible, capacity), pageSize = capacity, expected = current.revision,
             )
@@ -288,7 +427,8 @@ class LibraryViewModel(
             overview = current
             content = shown
             if (coverToken != selected.token) resetCovers(selected.token)
-            val key = listOf(selected.token, current.revision, categorization, folder, request.sort, request.foldersAscending, request.offset)
+            val key = listOf(selected.token, current.revision, request.search, request.searchScope, request.filters, categorization, folder,
+                request.sort, request.foldersAscending, request.offset)
             if (key != pageKey) {
                 pageKey = key
                 requested.clear()
@@ -359,7 +499,7 @@ class LibraryViewModel(
                 return modelClass.cast(LibraryViewModel(
                     dependencies.state::current, dependencies.libraryQuery,
                     QueueLibraryCovers(dependencies.covers, dependencies.coverService, dependencies.taskQueue, dependencies.taskCoordinator),
-                    dependencies.taskQueue.events,
+                    dependencies.taskQueue.events, dependencies.searchHistory,
                 ))!!
             }
         }

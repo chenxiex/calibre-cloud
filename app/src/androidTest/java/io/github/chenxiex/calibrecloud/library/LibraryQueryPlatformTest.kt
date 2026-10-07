@@ -98,10 +98,10 @@ class LibraryQueryPlatformTest {
         val imported = metadata.currentImport()!!
         assertTrue(metadata.selectReadColumn(imported, CustomColumnId(1, "#finished")))
         assertEquals(LibraryQueryResult.Stale, service.query(LibraryRequest(pageSize = 10, expected = before)))
-        val read = service.query(LibraryRequest(filters = LibraryFilters(reads = setOf(ReadFilter.READ)), pageSize = 10)) as LibraryQueryResult.Books
+        val read = service.query(LibraryRequest(filters = LibraryFilters(read = ReadFilter.READ), pageSize = 10)) as LibraryQueryResult.Books
         assertEquals(listOf("示例书"), read.rows.map { it.title })
         assertEquals(listOf(true), read.rows.map { it.read })
-        val unread = service.query(LibraryRequest(filters = LibraryFilters(reads = setOf(ReadFilter.UNREAD)), pageSize = 10)) as LibraryQueryResult.Books
+        val unread = service.query(LibraryRequest(filters = LibraryFilters(read = ReadFilter.UNREAD), pageSize = 10)) as LibraryQueryResult.Books
         assertEquals(listOf("未读书"), unread.rows.map { it.title })
     }
 
@@ -113,9 +113,9 @@ class LibraryQueryPlatformTest {
             FileVersion(BackendKind.LOCAL, "v"), SourceAvailability.AVAILABLE)
         File(root, "files/books/${identity.id.value}/${copy.location.fileGeneration}.book").apply { parentFile!!.mkdirs(); writeText("12345") }
         assertTrue(state.publishComplete(copy))
-        val epubOnly = LibraryRequest(filters = LibraryFilters(downloads = setOf(DownloadFilter.DOWNLOADED), formats = setOf(epub)), pageSize = 10)
+        val epubOnly = LibraryRequest(filters = LibraryFilters(download = DownloadFilter.DOWNLOADED, formats = setOf(epub)), pageSize = 10)
         assertTrue((service.query(epubOnly) as LibraryQueryResult.Books).rows.isEmpty())
-        val any = (service.query(LibraryRequest(filters = LibraryFilters(downloads = setOf(DownloadFilter.DOWNLOADED)), pageSize = 10)) as LibraryQueryResult.Books).rows.single()
+        val any = (service.query(LibraryRequest(filters = LibraryFilters(download = DownloadFilter.DOWNLOADED), pageSize = 10)) as LibraryQueryResult.Books).rows.single()
         assertEquals(DefaultFormat(pdf, true, 5, false), any.defaultFormat)
         val plan = maintenance.previewMetadata()!!
         assertTrue(maintenance.execute(plan))

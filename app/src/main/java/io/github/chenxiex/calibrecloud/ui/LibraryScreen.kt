@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -65,7 +66,10 @@ import io.github.chenxiex.calibrecloud.library.BookRow
 import io.github.chenxiex.calibrecloud.library.BookSortKey
 import io.github.chenxiex.calibrecloud.library.Categorization
 import io.github.chenxiex.calibrecloud.library.FolderRow
+import io.github.chenxiex.calibrecloud.library.DownloadFilter
+import io.github.chenxiex.calibrecloud.library.LibraryFilters
 import io.github.chenxiex.calibrecloud.library.LibraryProblem
+import io.github.chenxiex.calibrecloud.library.ReadFilter
 import io.github.chenxiex.calibrecloud.model.BackendKind
 
 /** The "更多" pages that the library hands over to when it needs configuration, sync or downloads. */
@@ -84,11 +88,13 @@ private val MENU_PAGE_BAR_HEIGHT = 40.dp
 private val MENU_CHOICE_HEIGHT = 44.dp
 private val MENU_HEADING_HEIGHT = 40.dp
 private val MENU_RULE_HEIGHT = 9.dp
-private val BAR_HEIGHT = 56.dp
+private val MENU_NOTE_HEIGHT = 56.dp
+internal val BAR_HEIGHT = 56.dp
 
 /**
- * Top bar and the paged content of the library. Nothing here scrolls, animates or
- * waits on the network: the shown page is the view model's last local query result.
+ * Top bar and the paged content of the library, or of the search page while one is open. Nothing
+ * here scrolls, animates or waits on the network: the shown page is the view model's last local
+ * query result. The view menu and the filter panel take the content area and exclude each other.
  */
 @Composable
 internal fun LibraryScreen(model: LibraryViewModel, openMore: (Int) -> Unit) {
@@ -96,33 +102,63 @@ internal fun LibraryScreen(model: LibraryViewModel, openMore: (Int) -> Unit) {
     var menuPage by rememberSaveable { mutableIntStateOf(0) }
     var columnsOpen by rememberSaveable { mutableStateOf(false) }
     var columnsPage by rememberSaveable { mutableIntStateOf(0) }
+    var filterOpen by rememberSaveable { mutableStateOf(false) }
+    var filterPage by rememberSaveable { mutableIntStateOf(0) }
+    var historyPage by rememberSaveable { mutableIntStateOf(0) }
     DisposableEffect(model) {
         model.setVisible(true)
         onDispose { model.setVisible(false) }
     }
-    BackHandler(enabled = menuOpen || model.folder != null) {
+    val closePanels = {
+        menuOpen = false
+        columnsOpen = false
+        filterOpen = false
+    }
+    BackHandler(enabled = menuOpen || filterOpen || model.search != null || model.folder != null) {
         when {
             columnsOpen -> columnsOpen = false
             menuOpen -> menuOpen = false
+            filterOpen -> filterOpen = false
+            model.search != null -> model.closeSearch()
             else -> model.closeFolder()
         }
     }
+    val toggleMenu = {
+        menuOpen = !menuOpen
+        columnsOpen = false
+        filterOpen = false
+        menuPage = 0
+    }
+    val toggleFilter = {
+        filterOpen = !filterOpen
+        menuOpen = false
+        columnsOpen = false
+        filterPage = 0
+    }
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            LibraryTopBar(model, menuOpen) {
-                menuOpen = !menuOpen
-                columnsOpen = false
-                menuPage = 0
+            val search = model.search
+            if (search != null) {
+                SearchTopBar(model, menuOpen, filterOpen, onBack = { closePanels(); model.closeSearch() },
+                    onClosePanels = closePanels, onFilter = toggleFilter, onMenu = toggleMenu)
+            } else {
+                LibraryTopBar(model, menuOpen, filterOpen, onSearch = {
+                    closePanels()
+                    historyPage = 0
+                    model.openSearch()
+                }, onFilter = toggleFilter, onMenu = toggleMenu)
             }
             HorizontalRule()
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                if (menuOpen) {
-                    ViewMenu(model, menuPage, { menuPage = it }) {
+                when {
+                    menuOpen -> ViewMenu(model, menuPage, { menuPage = it }) {
                         columnsOpen = true
                         columnsPage = 0
                     }
-                } else {
-                    LibraryBody(model, openMore)
+                    filterOpen -> FilterPanel(model, filterPage) { filterPage = it }
+                    search != null && search.query == null && model.overview != null ->
+                        SearchHome(model, historyPage, { historyPage = it }, onSubmitted = closePanels)
+                    else -> LibraryBody(model, openMore)
                 }
             }
         }
@@ -133,7 +169,9 @@ internal fun LibraryScreen(model: LibraryViewModel, openMore: (Int) -> Unit) {
 }
 
 @Composable
-private fun LibraryTopBar(model: LibraryViewModel, menuOpen: Boolean, onMenu: () -> Unit) {
+private fun LibraryTopBar(
+    model: LibraryViewModel, menuOpen: Boolean, filterOpen: Boolean, onSearch: () -> Unit, onFilter: () -> Unit, onMenu: () -> Unit,
+) {
     val folder = model.folder
     Row(
         Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(horizontal = 4.dp).testTag("library_top_bar"),
@@ -152,14 +190,34 @@ private fun LibraryTopBar(model: LibraryViewModel, menuOpen: Boolean, onMenu: ()
             Modifier.weight(1f).testTag("library_title"),
             style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
-        // The search page and filter contents arrive with the search step; until then both are visibly unavailable.
-        IconAction(R.drawable.ic_search, stringResource(R.string.library_search), false, Modifier.testTag("library_search_button"),
-            iconSize = 20.dp) {}
-        IconAction(R.drawable.ic_filter, stringResource(R.string.library_filter), false, Modifier.testTag("library_filter_button")) {}
-        IconAction(
-            if (model.viewMode == LibraryViewMode.GRID) R.drawable.ic_view_grid else R.drawable.ic_view_list,
-            stringResource(R.string.library_view), true, Modifier.testTag("library_view_button"), active = menuOpen, onClick = onMenu,
-        )
+        // Searching and filtering need a complete import.
+        val ready = model.overview != null
+        IconAction(R.drawable.ic_search, stringResource(R.string.library_search), ready, Modifier.testTag("library_search_button"),
+            iconSize = 20.dp, onClick = onSearch)
+        FilterButton(model, ready, filterOpen, onFilter)
+        ViewButton(model, menuOpen, onMenu)
+    }
+}
+
+@Composable
+internal fun ViewButton(model: LibraryViewModel, menuOpen: Boolean, onMenu: () -> Unit) {
+    IconAction(
+        if (model.viewMode == LibraryViewMode.GRID) R.drawable.ic_view_grid else R.drawable.ic_view_list,
+        stringResource(R.string.library_view), true, Modifier.testTag("library_view_button"), active = menuOpen, onClick = onMenu,
+    )
+}
+
+/** Applied filters add a dot to the icon and to its description, so the state reads without colour. */
+@Composable
+internal fun FilterButton(model: LibraryViewModel, enabled: Boolean, open: Boolean, onFilter: () -> Unit) {
+    val applied = model.filters != LibraryFilters()
+    Box {
+        IconAction(R.drawable.ic_filter, stringResource(if (applied) R.string.library_filter_active else R.string.library_filter), enabled,
+            Modifier.testTag("library_filter_button"), active = open, onClick = onFilter)
+        if (applied) {
+            Box(Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp).size(8.dp)
+                .background(if (open) Color.White else Color.Black, RoundedCornerShape(4.dp)).border(1.dp, Color.Black, RoundedCornerShape(4.dp)))
+        }
     }
 }
 
@@ -215,7 +273,7 @@ private fun LibraryBody(model: LibraryViewModel, openMore: (Int) -> Unit) {
                     LibraryProblem.NO_METADATA -> R.string.library_no_metadata
                 }))
                 is LibraryContent.Books -> if (content.total == 0) {
-                    Message(stringResource(if (model.filters == io.github.chenxiex.calibrecloud.library.LibraryFilters())
+                    Message(stringResource(if (model.search == null && model.filters == LibraryFilters())
                         R.string.library_empty else R.string.library_empty_filtered))
                 } else {
                     ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Book(it) })
@@ -431,7 +489,7 @@ private fun SourceMissing(modifier: Modifier) {
         fontSize = 11.sp, maxLines = 1)
 }
 
-private sealed interface MenuEntry {
+internal sealed interface MenuEntry {
     val height: Dp
 
     data object Rule : MenuEntry {
@@ -440,6 +498,11 @@ private sealed interface MenuEntry {
 
     class Heading(val label: String) : MenuEntry {
         override val height get() = MENU_HEADING_HEIGHT
+    }
+
+    /** Explains why the choices that follow are unavailable. */
+    class Note(val tag: String, val text: String) : MenuEntry {
+        override val height get() = MENU_NOTE_HEIGHT
     }
 
     /** [mark] is drawn at the row end: a check for a chosen option, an arrow for the chosen sort direction. */
@@ -464,7 +527,7 @@ private fun ViewMenu(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit, 
             check(model.viewMode == LibraryViewMode.GRID), chosen) { model.showAs(LibraryViewMode.GRID) })
         add(MenuEntry.Choice("menu_view_list", stringResource(R.string.library_view_list), R.drawable.ic_view_list,
             check(model.viewMode == LibraryViewMode.LIST), chosen) { model.showAs(LibraryViewMode.LIST) })
-        if (model.folder == null) {
+        if (model.search == null && model.folder == null) {
             add(MenuEntry.Rule)
             add(MenuEntry.Heading(stringResource(R.string.library_menu_category)))
             add(MenuEntry.Choice("menu_category_none", stringResource(R.string.library_category_none),
@@ -487,12 +550,12 @@ private fun ViewMenu(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit, 
         val ascending = stringResource(R.string.library_sort_ascending)
         val descending = stringResource(R.string.library_sort_descending)
         val arrow = { up: Boolean -> if (up) R.drawable.ic_arrow_up else R.drawable.ic_arrow_down }
-        if (model.folder == null && model.categorization != Categorization.None) {
+        if (model.showsFolders) {
             // Folders only sort by name, so the one key is always chosen and only its direction changes.
             add(MenuEntry.Choice("menu_sort_folders", stringResource(R.string.library_sort_name), mark = arrow(model.foldersAscending),
                 markDescription = if (model.foldersAscending) ascending else descending) { model.reverseFolders() })
         } else {
-            val seriesFolder = model.categorization == Categorization.Series && model.folder?.name != null
+            val seriesFolder = model.search == null && model.categorization == Categorization.Series && model.folder?.name != null
             val keys = listOfNotNull(BookSortKey.SERIES_INDEX.takeIf { seriesFolder }, BookSortKey.TITLE, BookSortKey.ADDED, BookSortKey.RATING)
             keys.forEach { key ->
                 val sort = model.sort.takeIf { it.key == key }
@@ -507,9 +570,57 @@ private fun ViewMenu(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit, 
     PagedEntries(entries, page, onPage, Modifier.testTag("library_menu"), "menu")
 }
 
+/**
+ * Filters of the shown page in three groups. Download and read state are single choices: picking a
+ * value replaces the other and picking it again clears it; several formats are alternatives. Choosing
+ * keeps the panel open; the filter button or system back closes it. The read group is unavailable
+ * without a valid read column, but a value chosen earlier can still be removed.
+ */
+@Composable
+private fun FilterPanel(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit) {
+    val chosen = stringResource(R.string.library_menu_chosen)
+    val filters = model.filters
+    val check = { selected: Boolean -> if (selected) R.drawable.ic_check else null }
+    val overview = model.overview
+    val readable = overview?.readFilterAvailable == true
+    val entries = buildList {
+        add(MenuEntry.Heading(stringResource(R.string.filter_downloads)))
+        listOf(DownloadFilter.DOWNLOADED to R.string.filter_downloaded, DownloadFilter.NOT_DOWNLOADED to R.string.filter_not_downloaded)
+            .forEach { (value, label) ->
+                add(MenuEntry.Choice("filter_download_${value.name.lowercase()}", stringResource(label),
+                    mark = check(value == filters.download), markDescription = chosen) {
+                    model.updateFilters { it.copy(download = if (it.download == value) null else value) }
+                })
+            }
+        add(MenuEntry.Rule)
+        add(MenuEntry.Heading(stringResource(R.string.filter_reads)))
+        if (!readable) add(MenuEntry.Note("filter_read_unavailable", stringResource(R.string.filter_read_unavailable)))
+        listOf(ReadFilter.READ to R.string.filter_read, ReadFilter.UNREAD to R.string.filter_unread).forEach { (value, label) ->
+            add(MenuEntry.Choice("filter_read_${value.name.lowercase()}", stringResource(label),
+                mark = check(value == filters.read), markDescription = chosen, enabled = readable || value == filters.read) {
+                model.updateFilters { it.copy(read = if (it.read == value) null else value) }
+            })
+        }
+        // Formats chosen earlier stay listed so they can be removed after a sync drops them.
+        val formats = (overview?.formats.orEmpty() + filters.formats).distinct().sortedBy { it.value }
+        if (formats.isNotEmpty()) {
+            add(MenuEntry.Rule)
+            add(MenuEntry.Heading(stringResource(R.string.filter_formats)))
+            formats.forEach { format ->
+                add(MenuEntry.Choice("filter_format_${format.value}", format.value, mark = check(format in filters.formats), markDescription = chosen) {
+                    model.updateFilters { it.copy(formats = it.formats.toggle(format)) }
+                })
+            }
+        }
+    }
+    PagedEntries(entries, page, onPage, Modifier.testTag("library_filter_panel"), "filter")
+}
+
+private fun <T> Set<T>.toggle(value: T): Set<T> = if (value in this) this - value else this + value
+
 /** Lays out grouped rows by height; the page row only appears when the entries need more than one page. */
 @Composable
-private fun PagedEntries(entries: List<MenuEntry>, page: Int, onPage: (Int) -> Unit, modifier: Modifier, tagPrefix: String) {
+internal fun PagedEntries(entries: List<MenuEntry>, page: Int, onPage: (Int) -> Unit, modifier: Modifier, tagPrefix: String) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val blocks = entries.map { PageBlock(it.height.value, keepWithNext = it is MenuEntry.Heading, separator = it is MenuEntry.Rule) }
         val pages = paginate(blocks, maxHeight.value).takeIf { it.size <= 1 }
@@ -529,6 +640,10 @@ private fun MenuRow(entry: MenuEntry) {
     when (entry) {
         MenuEntry.Rule -> Box(Modifier.fillMaxWidth().height(entry.height), contentAlignment = Alignment.Center) {
             HorizontalRule(Modifier.padding(horizontal = 8.dp))
+        }
+        is MenuEntry.Note -> Box(Modifier.fillMaxWidth().height(entry.height).padding(horizontal = 16.dp).testTag(entry.tag),
+            contentAlignment = Alignment.CenterStart) {
+            Text(entry.text, fontSize = 13.sp, lineHeight = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
         }
         is MenuEntry.Heading -> Box(Modifier.fillMaxWidth().height(entry.height).padding(horizontal = 16.dp), contentAlignment = Alignment.BottomStart) {
             Text(entry.label, Modifier.padding(bottom = 4.dp), fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1)

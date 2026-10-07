@@ -141,3 +141,41 @@ adb -s <PA6> shell am instrument -w -e class io.github.chenxiex.calibrecloud.ui.
 
 - 无配置／无元数据两个入口只有 Compose 测试证据，真机显示未单独核对。
 - 搜索、筛选、上次打开位置、书籍点击打开分别留给步骤 03、04。
+
+## 步骤 03：搜索、筛选与搜索历史（2026-10-07）
+
+对应 R24 的筛选界面、R25（含 Q44 字段徽标）与 R13 的已读筛选可用性。实现位于 `ui/` 的 `LibraryScreen`（筛选面板）、`SearchScreen`（搜索页顶栏与字段／历史）、`LibraryViewModel`（`SearchSession`），以及 `state/SearchHistoryRepository`（schema v7 `search_history`）；约定见[界面约束](../src/main/java/io/github/chenxiex/calibrecloud/ui/AGENTS.md)与[应用状态约束](../src/main/java/io/github/chenxiex/calibrecloud/state/AGENTS.md)。开始前核对了 plan 步骤 03 与 R25：计划原写“筛选在文件夹导航和搜索间保持”，与 Q41“在搜索页的修改只作用于本次搜索”冲突，按用户指示以规格为准修订计划；字段选择位置按用户新决定记为 Q44 并同步 R25。试用中又按用户决定改为：下载状态与已读状态筛选单选、格式仍多选（Q46，R24），筛选模型的这两维由集合改为单值，原“两者并集为全库”一类的同维度多选断言随之删除。改后 JVM 126 tests、0 failures，lint 0 error；PA6 上 `LibraryScreenTest` 20 项、`LibraryQueryPlatformTest` 3 项、`ExtendedLibraryQueryTest` 8 项全部通过。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<受影响的 6 个类>
+./gradlew :app:connectedDebugAndroidTest
+```
+
+- 基线 `BUILD SUCCESSFUL`：JVM **126 tests、0 failures**。`LibraryViewModelTest` 新增 7 项：在文件夹内搜索覆盖全库、平铺并从第一页开始，返回恢复文件夹与页码；搜索页沿用图书馆视图／排序／筛选且修改不回流，再次进入输入为空、字段为“全部”；丛书序号排序不带入平铺搜索；空白查询忽略、只记录执行过的查询、清空输入回到历史、清除历史；字段限定查询且选择字段本身不执行，失效栏目字段退回“全部”；筛选变化回到第一页并在文件夹间保持；已读栏目无效时已读筛选报告原因而非空库。lint 0 error、5 条 warning（均为既有版本提示）。
+- 定向连接测试（PA6，Android 14）：首轮 `CacheMaintenanceTest`、`CoverTaskHandlerTest` 各有一项仍断言 schema 版本 6，`LibraryScreenTest` 一项因页容量不足 11 本、目标书落到第 2 页而超时，均为测试本身问题；修正后 `LibraryScreenTest` 20、`CacheMaintenanceTest` 15、`CoverTaskHandlerTest` 9 项全部通过，`SearchHistoryRepositoryTest` 3、`StartupSyncTest` 5、`TaskSchemaMigrationTest` 2 项首轮即通过。
+    - `SearchHistoryRepositoryTest`：历史跨重开持久、最新在前、重复查询前移、空白不存；按书库隔离，清除只删当前书库；超出上限只保留最新；v6→v7 迁移保留选择与启动同步设置并得到空历史。
+    - `LibraryScreenTest` 新增 5 项（替换原“搜索／筛选置灰”项）：无元数据时两图标禁用；从文件夹进入搜索页，输入框聚焦、视图菜单无分类与丛书序号、键入不执行、搜索键执行并找到其它文件夹的书、清空输入显示历史、点历史重新执行、返回恢复文件夹；字段徽标选中态、输入框内“作者：”、限定字段生效、清空图标仅在有文字时出现且点击后清空输入、回到历史并保持字段与焦点（Q45）；已读筛选单选（选另一项即替换，再点取消，Q46）、筛选面板切换不关闭、按钮描述变为“筛选（已启用）”、与视图菜单互斥、搜索页修改不影响图书馆；已读栏目失效时提示原因、已读选项禁用、全部书籍照常显示。
+- 全量 `connectedDebugAndroidTest`：**225 tests、0 failed、17 skipped**（均为需显式参数的真实 SAF／OneDrive／扩展库用例），`BUILD SUCCESSFUL`，结束后 Gradle 已卸载设备包。
+
+### 真机 ADB 核对（扩展库 286 本）
+
+用 `generate.py` 在会话临时目录生成扩展库，经 `ExtendedLibrarySeedTest` 导入 debug 应用私有状态（不涉及存储授权或源书库），再用 helper 按资源 ID 点击；预期值直接查询生成的 `metadata.db`。设备 PA6，输入法为汉王拼音。
+
+- 标签分类进入“cooking”第 2 页后进入搜索页：输入框聚焦，字段徽标为全部／标题／作者／丛书／标签／简介及主题、书架、备注（整数与计算栏目不出现），历史为空且“清除”禁用。
+- `machine 188` 找到 travel 标签、不在 cooking 中的 book 193；`garden tales`（与标题词序相反）得到 4 本，与 SQL 中标题同时含两词的 37、65、191、287 一致；`machine188` 按字面无结果。键盘回车执行搜索并收起键盘。
+- 在搜索页筛选“已读”后为 65、191、287（37 的已读值为空），筛选按钮描述变为“筛选（已启用）”；返回后回到“cooking”第 2/4 页，图书馆筛选未启用。
+- 选“标签”字段后输入框显示“标签：”，搜索 `travel` 为 4 页、末页 1 本，即 37 本，与 SQL 标签计数一致（标题、简介均不含该词）。
+- 强制停止并重启后搜索历史 4 条仍在，新的搜索页字段回到“全部”。
+- 把 `#read_status` 改名后的副本重新导入（种子测试按预期在选择已读栏目处断言失败，导入已完成）：图书馆仍为 24 页、无已读斜幅，筛选面板显示失效原因，已读／未读禁用。随后重新导入原副本恢复有效栏目，供用户试用。
+- 设备汉王输入法用 `input text` 时会吞掉 `%s` 空格、把 `\` 转成“、”，第一次空格只提交拼音组合；ADB 输入空格需连按两次空格键。这是测试输入方式的限制，用户手动输入不受影响，仍需在共同验收中确认。
+
+### 用户验收
+
+- 2026-10-07 用户在 PA6 上试用搜索页输入与清空图标、字段徽标、历史与筛选面板（含 Q45、Q46 调整）后确认通过，步骤 03 提交；随后已卸载 debug 与测试包，`/data/local/tmp` 无本项目遗留文件。
+
+### 未完成
+
+- 书籍点击打开、上次打开位置留步骤 04；选择模式下的搜索／筛选限制留步骤 05。

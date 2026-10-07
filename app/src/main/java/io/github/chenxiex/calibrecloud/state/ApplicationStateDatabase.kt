@@ -12,11 +12,12 @@ import android.database.sqlite.SQLiteOpenHelper
  * Version 4 adds independent complete cover cache records.
  * Version 5 adds irreversible producer revocation, recoverable cleanup and retained preferences.
  * Version 6 adds the default-off process startup sync setting.
+ * Version 7 adds per-library search history.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  */
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
-    SQLiteOpenHelper(context.applicationContext, name, null, 6) {
+    SQLiteOpenHelper(context.applicationContext, name, null, 7) {
     private val privateFiles = context.applicationContext.filesDir
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -71,6 +72,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createCovers(db)
         createMaintenance(db)
         createStartupSetting(db)
+        createSearchHistory(db)
         // The composite primary key is also the library-scoped ordered manifest index.
         db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, authority, root_id, account_id, drive_id)")
     }
@@ -208,8 +210,18 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         db.execSQL("INSERT INTO application_settings(singleton, startup_sync) VALUES (1, 0)")
     }
 
+    /** Executed queries only; [sequence] orders them newest first within one library. */
+    private fun createSearchHistory(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE search_history (
+            library_id TEXT NOT NULL REFERENCES library_bindings(library_id),
+            query TEXT NOT NULL CHECK(length(query) > 0),
+            sequence INTEGER NOT NULL,
+            PRIMARY KEY(library_id, query)
+        )""".trimIndent())
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..5 && newVersion == 6)
+        check(oldVersion in 1..6 && newVersion == 7)
         if (oldVersion == 1) {
             db.execSQL("ALTER TABLE current_selection ADD COLUMN authorization_id TEXT")
             createQueue(db)
@@ -220,6 +232,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
             createMaintenance(db)
             migrateCandidateScopes(db)
         }
-        createStartupSetting(db)
+        if (oldVersion <= 5) createStartupSetting(db)
+        createSearchHistory(db)
     }
 }

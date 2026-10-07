@@ -45,4 +45,27 @@
     <string name="library_sort_ascending">升序</string>
     <string name="library_sort_descending">降序</string>
     <string name="library_menu_chosen">已选择</string>
+    <string name="library_filter_active">筛选（已启用）</string>
+    <string name="filter_downloads">下载状态</string>
+    <string name="filter_downloaded">已下载</string>
+    <string name="filter_not_downloaded">未下载</string>
+    <string name="filter_reads">已读状态</string>
+    <string name="filter_read">已读</string>
+    <string name="filter_unread">未读</string>
+    <string name="filter_read_unavailable">已读栏目未配置或已失效，可在设置中选择已读栏目。</string>
+    <string name="filter_formats">格式</string>
+    <string name="search_back">返回图书馆</string>
+    <string name="search_input">搜索书库</string>
+    <string name="search_clear">清空输入</string>
+    <string name="search_scope_prefix">%1$s：</string>
+    <string name="search_scope_all">全部</string>
+    <string name="search_scope_title">标题</string>
+    <string name="search_scope_authors">作者</string>
+    <string name="search_scope_series">丛书</string>
+    <string name="search_scope_tags">标签</string>
+    <string name="search_scope_comments">简介</string>
+    <string name="search_history">搜索历史</string>
+    <string name="search_history_clear">清除</string>
+    <string name="search_history_clear_description">清除搜索历史</string>
+    <string name="search_history_empty">暂无搜索历史</string>
 </resources>

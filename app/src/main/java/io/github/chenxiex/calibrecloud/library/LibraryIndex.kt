@@ -61,6 +61,13 @@ class LibraryIndex(private val library: ImportedLibrary) {
     val categoryColumns: List<CategoryColumn> = library.metadata.columns
         .filter { it.supported && it.datatype in COLUMN_TYPES }.map { CategoryColumn(it.id, it.name) }
 
+    /** Whether the configured read column is valid, so the read filter can apply. */
+    val readFilterAvailable: Boolean get() = library.readColumnStatus == ReadColumnStatus.VALID
+
+    /** Source formats present in the import, by name; offered as format filters. */
+    val formats: List<BookFormat> = library.metadata.books.flatMap { book -> book.formats.map { it.format } }
+        .distinct().sortedBy { it.value }
+
     fun query(request: LibraryRequest, copies: List<DownloadedCopy>): LibraryQueryResult {
         request.expected?.let { if (it != revision) return LibraryQueryResult.Stale }
         val cached: Map<BookKey, Map<BookFormat, DownloadedCopy>> = copies
@@ -71,7 +78,7 @@ class LibraryIndex(private val library: ImportedLibrary) {
         val categorization = request.categorization
         if (categorization is Categorization.Column && categorization.id !in searchableColumns) return problem(LibraryProblem.CATEGORY_COLUMN_INVALID)
         val filters = request.filters
-        if (filters.reads.isNotEmpty() && library.readColumnStatus != ReadColumnStatus.VALID) {
+        if (filters.read != null && library.readColumnStatus != ReadColumnStatus.VALID) {
             return problem(LibraryProblem.READ_FILTER_UNAVAILABLE)
         }
 
@@ -136,9 +143,8 @@ class LibraryIndex(private val library: ImportedLibrary) {
 
     private fun matchesFilters(entry: Entry, filters: LibraryFilters, resolved: Resolution): Boolean {
         if (filters.formats.isNotEmpty() && resolved.candidates.isEmpty()) return false
-        if (filters.downloads.isNotEmpty() && (resolved.cached.isNotEmpty()) !in
-            filters.downloads.map { it == DownloadFilter.DOWNLOADED }) return false
-        if (filters.reads.isNotEmpty() && entry.read !in filters.reads.map { it == ReadFilter.READ }) return false
+        filters.download?.let { if (resolved.cached.isNotEmpty() != (it == DownloadFilter.DOWNLOADED)) return false }
+        filters.read?.let { if (entry.read != (it == ReadFilter.READ)) return false }
         return true
     }
 

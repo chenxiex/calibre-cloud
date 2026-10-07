@@ -43,7 +43,7 @@ class LibraryQueryService(
 
     /** Null when there is no complete import. */
     suspend fun overview(): LibraryOverview? = withContext(compute) {
-        index()?.let { LibraryOverview(it.revision, it.importedAt, it.categoryColumns) }
+        index()?.let { LibraryOverview(it.revision, it.importedAt, it.categoryColumns, it.readFilterAvailable, it.formats) }
     }
 
     private suspend fun index(): LibraryIndex? = lock.withLock {

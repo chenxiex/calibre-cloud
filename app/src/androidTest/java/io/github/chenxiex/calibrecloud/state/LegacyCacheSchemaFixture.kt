@@ -30,6 +30,7 @@ object LegacyCacheSchemaFixture {
             database.execSQL("DROP TABLE cache_cleanup")
             database.execSQL("DROP TABLE library_preferences")
             database.execSQL("DROP TABLE application_settings")
+            database.execSQL("DROP TABLE search_history")
             database.version = 4
             database.setTransactionSuccessful()
         } finally {

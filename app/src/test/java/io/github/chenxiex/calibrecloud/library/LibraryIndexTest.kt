@@ -92,15 +92,14 @@ class LibraryIndexTest {
         val index = library(listOf(a, b, c))
         val copies = listOf(copy(a, epub), copy(c, pdf))
         fun titles(filters: LibraryFilters) = index.query(base.copy(filters = filters, sort = BookSort(BookSortKey.TITLE, true)), copies).titles()
-        assertEquals(listOf("A", "C"), titles(LibraryFilters(downloads = setOf(DownloadFilter.DOWNLOADED))))
-        assertEquals(listOf("B"), titles(LibraryFilters(downloads = setOf(DownloadFilter.NOT_DOWNLOADED))))
-        assertEquals(listOf("A", "B", "C"), titles(LibraryFilters(downloads = DownloadFilter.entries.toSet())))
-        assertEquals(listOf("A"), titles(LibraryFilters(reads = setOf(ReadFilter.READ))))
-        assertEquals(listOf("B", "C"), titles(LibraryFilters(reads = setOf(ReadFilter.UNREAD))))
+        assertEquals(listOf("A", "C"), titles(LibraryFilters(download = DownloadFilter.DOWNLOADED)))
+        assertEquals(listOf("B"), titles(LibraryFilters(download = DownloadFilter.NOT_DOWNLOADED)))
+        assertEquals(listOf("A"), titles(LibraryFilters(read = ReadFilter.READ)))
+        assertEquals(listOf("B", "C"), titles(LibraryFilters(read = ReadFilter.UNREAD)))
         assertEquals(listOf("A", "B"), titles(LibraryFilters(formats = setOf(epub))))
         assertEquals(listOf("A", "B", "C"), titles(LibraryFilters(formats = setOf(epub, pdf))))
-        assertEquals(listOf("A"), titles(LibraryFilters(downloads = setOf(DownloadFilter.DOWNLOADED), reads = setOf(ReadFilter.READ), formats = setOf(epub))))
-        assertEquals(emptyList<String>(), titles(LibraryFilters(downloads = setOf(DownloadFilter.NOT_DOWNLOADED), reads = setOf(ReadFilter.READ))))
+        assertEquals(listOf("A"), titles(LibraryFilters(download = DownloadFilter.DOWNLOADED, read = ReadFilter.READ, formats = setOf(epub))))
+        assertEquals(emptyList<String>(), titles(LibraryFilters(download = DownloadFilter.NOT_DOWNLOADED, read = ReadFilter.READ)))
     }
 
     @Test
@@ -108,9 +107,9 @@ class LibraryIndexTest {
         val a = book(1, "A", formats = listOf(epub to 1L, pdf to 2L))
         val index = library(listOf(a))
         val onlyPdf = listOf(copy(a, pdf))
-        val epubScope = base.copy(filters = LibraryFilters(downloads = setOf(DownloadFilter.DOWNLOADED), formats = setOf(epub)))
+        val epubScope = base.copy(filters = LibraryFilters(download = DownloadFilter.DOWNLOADED, formats = setOf(epub)))
         assertEquals(emptyList<String>(), index.query(epubScope, onlyPdf).titles())
-        val notDownloaded = base.copy(filters = LibraryFilters(downloads = setOf(DownloadFilter.NOT_DOWNLOADED), formats = setOf(epub)))
+        val notDownloaded = base.copy(filters = LibraryFilters(download = DownloadFilter.NOT_DOWNLOADED, formats = setOf(epub)))
         assertEquals(listOf("A"), index.query(notDownloaded, onlyPdf).titles())
         val row = (index.query(base.copy(filters = LibraryFilters(formats = setOf(epub))), onlyPdf) as LibraryQueryResult.Books).rows.single()
         assertFalse(row.downloaded)
@@ -129,7 +128,7 @@ class LibraryIndexTest {
     @Test
     fun readFilterIsUnavailableForUnconfiguredOrInvalidColumnInsteadOfTreatingEveryBookUnread() {
         val a = book(1, "A", values = mapOf(1L to ImportedColumnValue.Bool(true)))
-        val filter = base.copy(filters = LibraryFilters(reads = setOf(ReadFilter.UNREAD)))
+        val filter = base.copy(filters = LibraryFilters(read = ReadFilter.UNREAD))
         listOf(null, CustomColumnId(9, "#gone"), CustomColumnId(2, "#topic")).forEach { column ->
             val index = library(listOf(a), column)
             assertEquals(LibraryQueryResult.Unavailable(LibraryProblem.READ_FILTER_UNAVAILABLE), index.query(filter, emptyList()))
@@ -158,8 +157,8 @@ class LibraryIndexTest {
         assertEquals(listOf("None"), index.query(base.copy(categorization = Categorization.Tags, folder = FolderKey(null)), emptyList()).titles())
         // A filter that matches only tagged books leaves no fallback; no match leaves no folder at all.
         assertEquals(listOf("a", "b"), index.query(base.copy(categorization = Categorization.Tags, search = "", filters = LibraryFilters(
-            downloads = setOf(DownloadFilter.DOWNLOADED))), listOf(copy(multi, epub))).folders().map { it.key.name })
-        assertTrue(index.query(base.copy(categorization = Categorization.Tags, filters = LibraryFilters(downloads = setOf(DownloadFilter.DOWNLOADED))), emptyList()).folders().isEmpty())
+            download = DownloadFilter.DOWNLOADED)), listOf(copy(multi, epub))).folders().map { it.key.name })
+        assertTrue(index.query(base.copy(categorization = Categorization.Tags, filters = LibraryFilters(download = DownloadFilter.DOWNLOADED)), emptyList()).folders().isEmpty())
         // Folder search flattens to books and ignores categorization.
         assertEquals(listOf("None"), index.query(base.copy(categorization = Categorization.Tags, search = "none"), emptyList()).titles())
     }

@@ -116,12 +116,13 @@ class StartupSyncTest {
     fun versionFiveMigrationRetainsSelectionAndDefaultsOff() = runBlocking<Unit> {
         val selected = state.select(LibraryLocation.Local("test.documents", "fixture-root"))
         database.writableDatabase.execSQL("DROP TABLE application_settings")
+        database.writableDatabase.execSQL("DROP TABLE search_history")
         database.writableDatabase.version = 5
         database.close()
         reopen()
         assertEquals(selected, state.current())
         assertFalse(startup.startupEnabled())
-        assertEquals(6, database.readableDatabase.version)
+        assertEquals(7, database.readableDatabase.version)
     }
 
     private fun reopen() {

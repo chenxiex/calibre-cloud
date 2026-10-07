@@ -194,12 +194,10 @@ class ExtendedLibraryQueryTest {
         val everyBook = idsOf("SELECT id FROM books")
         val empty = everyBook - read - no
         assertTrue("library has yes, no and empty values", read.isNotEmpty() && no.isNotEmpty() && empty.isNotEmpty())
-        fun matches(filter: ReadFilter) = everything(LibraryRequest(filters = LibraryFilters(reads = setOf(filter)), pageSize = 1000), 1000)
+        fun matches(filter: ReadFilter) = everything(LibraryRequest(filters = LibraryFilters(read = filter), pageSize = 1000), 1000)
         assertEquals(read, matches(ReadFilter.READ).map { it.key.sourceId }.toSet())
         // R13: an empty value is unread, like "no".
         assertEquals(no + empty, matches(ReadFilter.UNREAD).map { it.key.sourceId }.toSet())
-        assertEquals(everyBook, books(LibraryRequest(filters = LibraryFilters(reads = ReadFilter.entries.toSet()), pageSize = 1000))
-            .rows.map { it.key.sourceId }.toSet())
         assertTrue(everything(LibraryRequest(pageSize = 1000), 1000).all { it.read != null })
     }
 
@@ -261,7 +259,7 @@ class ExtendedLibraryQueryTest {
             "search" to LibraryRequest(search = "tales harbor", pageSize = 20),
             "tag-folders" to LibraryRequest(categorization = Categorization.Tags, pageSize = 20),
             "title-sort" to LibraryRequest(sort = BookSort(BookSortKey.TITLE, true), pageSize = 20),
-            "read-filter" to LibraryRequest(filters = LibraryFilters(reads = setOf(ReadFilter.UNREAD)), pageSize = 20),
+            "read-filter" to LibraryRequest(filters = LibraryFilters(read = ReadFilter.UNREAD), pageSize = 20),
         ).map { (name, request) ->
             val start = System.nanoTime()
             query(request)

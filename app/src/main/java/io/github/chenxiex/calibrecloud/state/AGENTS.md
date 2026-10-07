@@ -20,4 +20,5 @@
 - Schema v5 非破坏性增加 `cache_cleanup` journal、任务的 `revoked`／`scope_library_id` 和独立 `library_preferences`。迁移从既有私有导入保存源书库 UUID、已读栏目身份及最后导入时间；清元数据不删除这些身份／配置证据。候选任务仅按可核对的位置、选择代号或无歧义私有快照证据补归属，不凭目录名称推断；没有充分证据的旧任务不能宣称已准确归属。
 - 清理事务同时保存冻结范围、待删私有路径、待 retire 文件代次及任务撤销标记，并移除相应元数据／清单引用。生产发布须在同一事务拒绝 revoked 任务。保留的完整副本在元数据清理后仍可读取，源状态改为 `UNCONFIRMED`；配置、绑定及保护资料不随普通缓存清理删除。具体文件删除和恢复由[缓存维护](../storage/cache/CacheMaintenance.kt)负责，不在状态库操作中访问源。
 
+- Schema v7 非破坏性增加 `search_history`（书库 ID、查询文字、顺序号），由 [SearchHistoryRepository](SearchHistoryRepository.kt) 读写：只保存执行过的非空查询，重复查询移到最前，每库保留最近 50 条。历史属于书库绑定，清元数据、移除副本和清理其它书库缓存都不删除它，清除历史只删当前书库的记录；查询文字不得写入日志。
 - Schema v6 非破坏性增加独立 `application_settings`，启动自动同步默认关闭；设置与书库代次无关，清元数据、移除副本和其它书库清理均保留它。读取／更新通过共享 repository 在 I/O dispatcher 上执行，不在 Activity 或 worker 另建状态库。

@@ -20,10 +20,13 @@ sealed interface SearchScope {
 enum class DownloadFilter { DOWNLOADED, NOT_DOWNLOADED }
 enum class ReadFilter { READ, UNREAD }
 
-/** Values within one dimension are alternatives (or); non-empty dimensions combine with and. */
+/**
+ * Download and read state take at most one value each; several formats are alternatives (or). Set
+ * dimensions combine with and.
+ */
 data class LibraryFilters(
-    val downloads: Set<DownloadFilter> = emptySet(),
-    val reads: Set<ReadFilter> = emptySet(),
+    val download: DownloadFilter? = null,
+    val read: ReadFilter? = null,
     val formats: Set<BookFormat> = emptySet(),
 )
 
@@ -86,8 +89,18 @@ data class LibraryRequest(
 
 data class CategoryColumn(val id: CustomColumnId, val name: String)
 
-/** What a page needs to describe the current import without reading any rows. */
-data class LibraryOverview(val revision: LibraryRevision, val importedAt: Long, val categoryColumns: List<CategoryColumn>)
+/**
+ * What a page needs to describe the current import without reading any rows. [categoryColumns] also
+ * limit a search; [formats] are the source formats present in the import, by name; the read filter is
+ * offered only when [readFilterAvailable].
+ */
+data class LibraryOverview(
+    val revision: LibraryRevision,
+    val importedAt: Long,
+    val categoryColumns: List<CategoryColumn>,
+    val readFilterAvailable: Boolean,
+    val formats: List<BookFormat>,
+)
 
 /** Stable reasons; pages resolve them to resources. Not a source of translated text. */
 enum class LibraryProblem {

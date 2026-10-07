@@ -9,4 +9,5 @@
 - 文案、无障碍描述和动态值使用字符串／数量资源及完整占位参数；作者、大小等未知字段不显示占位文字，不以零值伪装。
 - 关键控件设置稳定的 `testTag`，`MainScreen` 根节点开启 `testTagsAsResourceId`，使 UI 测试和 ADB helper 按资源 ID 选择，不依赖页码或位置；重复条目的标签含稳定标识（如 `book_<书籍 ID>`）。
 - `LibraryViewModel` 只通过 `LibraryQueryService` 读本地索引，页面请求带 `expected` 修订，过期结果丢弃；只为当前页（含文件夹代表书籍）缺失的封面经 `CoverService` 入队，同一显示页不重复入队，不预取隐藏页；选中书库或导入变化后清空旧封面。视图状态保存在 ViewModel，Activity 重建后保持，不扩展为跨进程持久化。
+- 搜索页是 `LibraryViewModel` 的 `SearchSession`：进入时复制图书馆的视图、书籍排序（丛书序号除外）与筛选，修改只写入会话；图书馆的分类、文件夹和页码不变，`closeSearch` 恢复。输入文字保存在 ViewModel，只有键盘搜索键（或点历史项）调用 `submitSearch` 执行并经 `SearchHistoryStore` 记录；输入清空回到字段徽标与历史。筛选面板和视图菜单都占用内容区、互斥，切换选项后保持打开。
 - 第二阶段临时验证页保留在“更多”下，供后端、清理和任务能力使用；正式更多页在步骤 06 替换它们。

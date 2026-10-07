@@ -69,6 +69,7 @@ class ApplicationDependencies(context: Context) {
             io.github.chenxiex.calibrecloud.library.MetadataLibraryImports(metadata),
             io.github.chenxiex.calibrecloud.library.StateLibraryCopies(state), Dispatchers.Default)
     }
+    val searchHistory by lazy { io.github.chenxiex.calibrecloud.state.SearchHistoryRepository(database, Dispatchers.IO) }
     val copyService by lazy { io.github.chenxiex.calibrecloud.tasks.copies.CopyService(state, metadata, taskCoordinator, taskQueue) }
     val covers by lazy { io.github.chenxiex.calibrecloud.storage.covers.CoverRepository(database, state,
         applicationContext.filesDir, Dispatchers.IO) }
