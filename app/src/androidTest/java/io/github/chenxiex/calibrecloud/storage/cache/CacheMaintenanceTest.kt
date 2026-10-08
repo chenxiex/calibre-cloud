@@ -13,7 +13,19 @@ import io.github.chenxiex.calibrecloud.state.StateSchemaHistory
 import io.github.chenxiex.calibrecloud.storage.api.*
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
+import io.github.chenxiex.calibrecloud.library.LibraryFilters
+import io.github.chenxiex.calibrecloud.library.LibraryQueryService
+import io.github.chenxiex.calibrecloud.library.MetadataLibraryImports
+import io.github.chenxiex.calibrecloud.library.StateLibraryCopies
+import io.github.chenxiex.calibrecloud.state.SearchHistoryStore
+import io.github.chenxiex.calibrecloud.tasks.copies.CopyService
+import io.github.chenxiex.calibrecloud.ui.LibraryContent
+import io.github.chenxiex.calibrecloud.ui.LibraryCovers
+import io.github.chenxiex.calibrecloud.ui.LibraryViewModel
+import io.github.chenxiex.calibrecloud.ui.QueueLibraryBatch
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -92,6 +104,64 @@ class CacheMaintenanceTest {
         assertEquals(pdf, state.find(pdf.key))
         assertEquals(pdfEntry, queue.get(pdfTask))
         assertEquals("PDF pending bytes", pendingPdfFile.readText())
+    }
+
+    /** R26 through the library page: the format filter at preview is the removal scope, whatever happens after. */
+    @Test
+    fun selectionRemovalUnderAnEpubFilterKeepsThePdfCopyAndItsTask() = runBlocking<Unit> {
+        val epub = publish(book, "EPUB")
+        val pdf = publish(book, "PDF")
+        val epubTask = pendingCopy(epub.key)
+        val pdfTask = pendingCopy(pdf.key)
+        val pdfEntry = queue.get(pdfTask)
+        val queries = LibraryQueryService(MetadataLibraryImports(metadata), StateLibraryCopies(state), Dispatchers.Default)
+        val batch = QueueLibraryBatch(CopyService(state, metadata, TaskCoordinator(queue, emptyList()), queue),
+            TaskCoordinator(queue, emptyList()), maintenance)
+        val model = withContext(Dispatchers.Main) {
+            LibraryViewModel(state::current, queries, NoCovers, emptyFlow(), NoHistory, batch).apply {
+                setVisible(true)
+                onMeasured(10)
+                updateFilters { LibraryFilters(formats = setOf(epub.key.format)) }
+            }
+        }
+        suspend fun <T> onMain(read: LibraryViewModel.() -> T) = withContext(Dispatchers.Main) { model.read() }
+        suspend fun until(condition: LibraryViewModel.() -> Boolean) = withTimeout(10_000) {
+            while (!onMain(condition)) delay(20)
+        }
+        until { (content as? LibraryContent.Books)?.rows?.size == 1 }
+        onMain { toggleBook(book) }
+        until { selectedBooks == 1 }
+        onMain { prepareRemoval() }
+        until { removal != null }
+        val shown = onMain { requireNotNull(removal) }
+        assertEquals(setOf(epub.key), shown.plan.copies)
+        assertEquals(setOf(epub.key.format), shown.formats)
+        onMain { confirmRemoval() }
+        until { selected == null && !batchBusy }
+        assertNull(state.find(epub.key))
+        assertFalse(copyFile(epub).exists())
+        assertCancelled(epubTask)
+        assertEquals(pdf, state.find(pdf.key))
+        assertEquals("PDF bytes", copyFile(pdf).readText())
+        assertEquals(pdfEntry, queue.get(pdfTask))
+        // Without the filter the kept PDF is the book's downloaded default again.
+        onMain { updateFilters { LibraryFilters() } }
+        until { (content as? LibraryContent.Books)?.rows?.singleOrNull()?.defaultFormat?.format == pdf.key.format }
+        assertTrue(onMain { (content as LibraryContent.Books).rows.single().downloaded })
+        withContext(Dispatchers.Main) { model.setVisible(false) }
+    }
+
+    private object NoCovers : LibraryCovers {
+        override suspend fun read(book: BookKey): android.graphics.Bitmap? = null
+        override suspend fun request(book: BookKey, selectionToken: UUID): TaskId? = null
+        override suspend fun awaitFinished(task: TaskId) {}
+        override suspend fun wake() {}
+    }
+
+    private object NoHistory : SearchHistoryStore {
+        override suspend fun list(libraryId: LibraryId) = emptyList<String>()
+        override suspend fun record(libraryId: LibraryId, query: String) {}
+        override suspend fun clear(libraryId: LibraryId) {}
     }
 
     @Test

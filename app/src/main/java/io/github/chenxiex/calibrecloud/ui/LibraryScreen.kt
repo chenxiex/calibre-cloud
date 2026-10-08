@@ -9,6 +9,8 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,6 +51,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -76,6 +79,8 @@ import io.github.chenxiex.calibrecloud.library.DownloadFilter
 import io.github.chenxiex.calibrecloud.library.LibraryFilters
 import io.github.chenxiex.calibrecloud.library.LibraryProblem
 import io.github.chenxiex.calibrecloud.library.ReadFilter
+import io.github.chenxiex.calibrecloud.library.ReadMarkAction
+import io.github.chenxiex.calibrecloud.library.ReadMarkBlock
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
@@ -124,6 +129,9 @@ internal fun LibraryScreen(
     var filterOpen by rememberSaveable { mutableStateOf(false) }
     var filterPage by rememberSaveable { mutableIntStateOf(0) }
     var historyPage by rememberSaveable { mutableIntStateOf(0) }
+    var batchOpen by rememberSaveable { mutableStateOf(false) }
+    val selecting = model.selected != null
+    LaunchedEffect(selecting) { if (!selecting) batchOpen = false }
     DisposableEffect(model) {
         model.setVisible(true)
         onDispose { model.setVisible(false) }
@@ -133,8 +141,11 @@ internal fun LibraryScreen(
         columnsOpen = false
         filterOpen = false
     }
-    BackHandler(enabled = menuOpen || filterOpen || model.search != null || model.folder != null) {
+    BackHandler(enabled = selecting || menuOpen || filterOpen || model.search != null || model.folder != null) {
         when {
+            model.removal != null -> model.cancelRemoval()
+            batchOpen -> batchOpen = false
+            selecting -> model.finishSelection()
             columnsOpen -> columnsOpen = false
             menuOpen -> menuOpen = false
             filterOpen -> filterOpen = false
@@ -157,7 +168,9 @@ internal fun LibraryScreen(
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             val search = model.search
-            if (search != null) {
+            if (selecting) {
+                SelectionTopBar(model, batchOpen) { batchOpen = !batchOpen }
+            } else if (search != null) {
                 SearchTopBar(model, menuOpen, filterOpen, onBack = { closePanels(); model.closeSearch() },
                     onClosePanels = closePanels, onFilter = toggleFilter, onMenu = toggleMenu)
             } else {
@@ -177,7 +190,8 @@ internal fun LibraryScreen(
                     filterOpen -> FilterPanel(model, filterPage) { filterPage = it }
                     search != null && search.query == null && model.overview != null ->
                         SearchHome(model, historyPage, { historyPage = it }, onSubmitted = closePanels)
-                    else -> LibraryBody(model, BookMarks(mark, downloads, onCancelDownload, onCancelTask), openMore) { row ->
+                    else -> LibraryBody(model, BookMarks(mark, downloads, onCancelDownload, onCancelTask, !selecting), openMore,
+                        onSelect = { closePanels(); model.toggleItem(it) }) { row ->
                         val format = row.defaultFormat?.format
                         if (format == null) onNoFormat(row.key, row.title) else onOpen(CopyKey(row.key, format), row.title)
                     }
@@ -187,6 +201,8 @@ internal fun LibraryScreen(
         if (menuOpen && columnsOpen) {
             ColumnPicker(model, columnsPage, { columnsPage = it }) { columnsOpen = false }
         }
+        if (selecting && batchOpen) BatchMenu(model) { batchOpen = false }
+        model.removal?.let { RemovalDialog(model, it) }
     }
 }
 
@@ -255,7 +271,9 @@ private fun columnName(model: LibraryViewModel, value: Categorization.Column) =
     model.overview?.categoryColumns?.firstOrNull { it.id == value.id }?.name
 
 @Composable
-private fun LibraryBody(model: LibraryViewModel, marks: BookMarks, openMore: (Int) -> Unit, openBook: (BookRow) -> Unit) {
+private fun LibraryBody(
+    model: LibraryViewModel, marks: BookMarks, openMore: (Int) -> Unit, onSelect: (LibraryItem) -> Unit, openBook: (BookRow) -> Unit,
+) {
     val content = model.content
     val shown = (content as? LibraryContent.Books)?.let { it.offset to it.total }
         ?: (content as? LibraryContent.Folders)?.let { it.offset to it.total }
@@ -298,12 +316,12 @@ private fun LibraryBody(model: LibraryViewModel, marks: BookMarks, openMore: (In
                     Message(stringResource(if (model.search == null && model.filters == LibraryFilters())
                         R.string.library_empty else R.string.library_empty_filtered))
                 } else {
-                    ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Book(it) }, marks, openBook)
+                    ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Book(it) }, marks, onSelect, openBook)
                 }
                 is LibraryContent.Folders -> if (content.total == 0) {
                     Message(stringResource(R.string.library_empty))
                 } else {
-                    ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Folder(it) }, marks, openBook)
+                    ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Folder(it) }, marks, onSelect, openBook)
                 }
             }
         }
@@ -312,25 +330,41 @@ private fun LibraryBody(model: LibraryViewModel, marks: BookMarks, openMore: (In
 
 /**
  * What replaces a book's download check: the open in progress, otherwise any unfinished download of
- * the book; and how a tap on it cancels that download.
+ * the book; and how a tap on it cancels that download. In selection mode ([cancellable] false) the
+ * mark only shows the state and a tap selects the book.
  */
 private class BookMarks(
     val mark: OpenMark?,
     val downloads: Map<BookKey, DownloadingMark>,
     val onCancelOpen: () -> Unit,
     val onCancelTask: (TaskId) -> Unit,
+    val cancellable: Boolean,
 ) {
     fun of(row: BookRow) = mark?.takeIf { it.book == row.key }
         ?: downloads[row.key]?.let { OpenMark(row.key, it.fraction, warning = false, cancellable = true) }
 
-    fun cancel(row: BookRow) {
-        if (mark?.book == row.key) onCancelOpen() else downloads[row.key]?.let { onCancelTask(it.task) }
+    /** Null in selection mode, where the mark does not take taps. */
+    fun cancelOf(row: BookRow): (() -> Unit)? = if (!cancellable) null else {
+        { if (mark?.book == row.key) onCancelOpen() else downloads[row.key]?.let { onCancelTask(it.task) } }
     }
 }
 
-private sealed interface LibraryItem {
+internal sealed interface LibraryItem {
     data class Book(val row: BookRow) : LibraryItem
     data class Folder(val row: FolderRow) : LibraryItem
+}
+
+private fun LibraryViewModel.toggleItem(item: LibraryItem) = when (item) {
+    is LibraryItem.Book -> toggleBook(item.row.key)
+    is LibraryItem.Folder -> toggleFolder(item.row.key)
+}
+
+private fun LibraryViewModel.isSelected(item: LibraryItem): Boolean {
+    val set = selected ?: return false
+    return when (item) {
+        is LibraryItem.Book -> item.row.key in set.books
+        is LibraryItem.Folder -> item.row.key in set.folders
+    }
 }
 
 @Composable
@@ -346,13 +380,15 @@ private fun Message(text: String, actions: @Composable () -> Unit = {}) {
 @Composable
 private fun ItemPage(
     model: LibraryViewModel, geometry: PageGeometry, width: Dp, height: Dp, items: List<LibraryItem>, marks: BookMarks,
-    openBook: (BookRow) -> Unit,
+    onSelect: (LibraryItem) -> Unit, openBook: (BookRow) -> Unit,
 ) {
     val shown = items.take(geometry.capacity)
-    val open = { item: LibraryItem ->
-        when (item) {
-            is LibraryItem.Folder -> model.openFolder(item.row.key)
-            is LibraryItem.Book -> openBook(item.row)
+    // A long press starts selection; while selecting, a tap toggles instead of opening.
+    val open = Activation(onSelect) { item: LibraryItem ->
+        when {
+            model.selected != null -> onSelect(item)
+            item is LibraryItem.Folder -> model.openFolder(item.row.key)
+            item is LibraryItem.Book -> openBook(item.row)
         }
     }
     if (model.viewMode == LibraryViewMode.GRID) {
@@ -376,6 +412,22 @@ private fun ItemPage(
     }
 }
 
+private class Activation(val longPress: (LibraryItem) -> Unit, val tap: (LibraryItem) -> Unit)
+
+@Composable
+private fun Modifier.activation(item: LibraryItem, activation: Activation, selected: Boolean?): Modifier {
+    val description = selected?.let { stringResource(if (it) R.string.selection_chosen else R.string.selection_not_chosen) }
+    return combinedClickable(
+        interactionSource = remember { MutableInteractionSource() }, indication = null,
+        onLongClick = { activation.longPress(item) },
+    ) { activation.tap(item) }.semantics {
+        if (selected != null) {
+            this.selected = selected
+            stateDescription = requireNotNull(description)
+        }
+    }
+}
+
 private fun tagOf(item: LibraryItem) = when (item) {
     is LibraryItem.Book -> "book_${item.row.key.sourceId}"
     is LibraryItem.Folder -> "folder_${item.row.key.name ?: ""}"
@@ -387,20 +439,21 @@ private fun representative(item: LibraryItem) = when (item) {
 }
 
 @Composable
-private fun GridCell(model: LibraryViewModel, item: LibraryItem, marks: BookMarks, open: (LibraryItem) -> Unit) {
+private fun GridCell(model: LibraryViewModel, item: LibraryItem, marks: BookMarks, open: Activation) {
     val row = representative(item)
     val cover = model.coverImages[row.key]
-    Box(Modifier.fillMaxSize().testTag(tagOf(item)).clickable(
-        interactionSource = remember { MutableInteractionSource() }, indication = null,
-    ) { open(item) }) {
-        CoverBox(cover, if (item is LibraryItem.Book) row.title else "", Modifier.fillMaxSize())
+    val selected = model.selected?.let { model.isSelected(item) }
+    Box(Modifier.fillMaxSize().testTag(tagOf(item)).activation(item, open, selected)) {
+        // A chosen item is framed thickly as well as ticked, so the state survives greyscale.
+        CoverBox(cover, if (item is LibraryItem.Book) row.title else "",
+            Modifier.fillMaxSize().then(if (selected == true) Modifier.border(SELECTED_FRAME, Color.Black) else Modifier))
         when (item) {
             is LibraryItem.Book -> {
                 if (item.row.read == true) ReadRibbon(Modifier.align(Alignment.TopEnd))
                 val open = marks.of(item.row)
                 when {
                     // The touch area reaches the cell corner; the drawn ring keeps the check's inset.
-                    open != null -> OpenMarkIcon(item.row, open, { marks.cancel(item.row) }, Modifier.align(Alignment.BottomEnd))
+                    open != null -> OpenMarkIcon(item.row, open, marks.cancelOf(item.row), Modifier.align(Alignment.BottomEnd))
                     item.row.downloaded -> DownloadMark(Modifier.align(Alignment.BottomEnd).padding(MARK_INSET))
                 }
                 if (item.row.defaultFormat?.sourceMissing == true) {
@@ -410,6 +463,8 @@ private fun GridCell(model: LibraryViewModel, item: LibraryItem, marks: BookMark
             // Without a cover the name and count fill the placeholder; with one they form the bottom label.
             is LibraryItem.Folder -> FolderLabel(item.row, cover == null, Modifier.align(if (cover == null) Alignment.Center else Alignment.BottomStart))
         }
+        // Top left stays free: the read ribbon is top right and the download mark bottom right.
+        if (selected != null) SelectionBox(selected, Modifier.align(Alignment.TopStart).padding(MARK_INSET))
     }
 }
 
@@ -430,13 +485,18 @@ private fun FolderLabel(folder: FolderRow, placeholder: Boolean, modifier: Modif
 }
 
 @Composable
-private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, marks: BookMarks, open: (LibraryItem) -> Unit) {
+private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, marks: BookMarks, open: Activation) {
     val row = representative(item)
+    val selected = model.selected?.let { model.isSelected(item) }
     Row(
         Modifier.fillMaxWidth().height(height).padding(horizontal = 8.dp, vertical = 4.dp).testTag(tagOf(item))
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { open(item) },
+            .activation(item, open, selected),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (selected != null) {
+            SelectionBox(selected, Modifier)
+            Spacer(Modifier.width(8.dp))
+        }
         CoverBox(model.coverImages[row.key], if (item is LibraryItem.Book) row.title else "",
             Modifier.fillMaxHeight().aspectRatio(1f / COVER_ASPECT))
         Spacer(Modifier.width(12.dp))
@@ -459,7 +519,7 @@ private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, mark
         val open = (item as? LibraryItem.Book)?.let { marks.of(it.row) }
         if (item is LibraryItem.Book && (open != null || item.row.downloaded)) {
             Spacer(Modifier.width(4.dp))
-            if (open != null) OpenMarkIcon(item.row, open, { marks.cancel(item.row) }, Modifier)
+            if (open != null) OpenMarkIcon(item.row, open, marks.cancelOf(item.row), Modifier)
             else DownloadMark(Modifier.padding(MARK_INSET))
         }
     }
@@ -553,7 +613,7 @@ private fun DownloadMark(modifier: Modifier) {
  * full disc with no arc and no action of its own, so a tap reaches the book and opens it again.
  */
 @Composable
-private fun OpenMarkIcon(row: BookRow, mark: OpenMark, onCancel: () -> Unit, modifier: Modifier) {
+private fun OpenMarkIcon(row: BookRow, mark: OpenMark, onCancel: (() -> Unit)?, modifier: Modifier) {
     val description = stringResource(when {
         !mark.cancellable -> R.string.open_warning
         mark.warning -> R.string.open_warning_cancel
@@ -566,10 +626,11 @@ private fun OpenMarkIcon(row: BookRow, mark: OpenMark, onCancel: () -> Unit, mod
     Box(
         if (!mark.cancellable) area.testTag("open_warning_${row.key.sourceId}").semantics { contentDescription = description }
         else area.testTag("download_progress_${row.key.sourceId}")
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onCancel)
+            .then(if (onCancel == null) Modifier else
+                Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onCancel))
             .semantics {
                 contentDescription = description
-                role = Role.Button
+                if (onCancel != null) role = Role.Button
                 if (progress != null) stateDescription = progress
             },
         contentAlignment = Alignment.Center,
@@ -827,4 +888,135 @@ private fun sortLabel(key: BookSortKey): Int = when (key) {
     BookSortKey.ADDED -> R.string.library_sort_added
     BookSortKey.RATING -> R.string.library_sort_rating
     BookSortKey.SERIES_INDEX -> R.string.library_sort_series
+}
+
+private val SELECTED_FRAME = 3.dp
+
+/** A square tick box: white with a frame when not chosen, black with a white tick when chosen. */
+@Composable
+private fun SelectionBox(selected: Boolean, modifier: Modifier) {
+    Box(
+        modifier.size(MARK_SIZE).background(if (selected) Color.Black else Color.White, RoundedCornerShape(3.dp))
+            .border(2.dp, if (selected) Color.White else Color.Black, RoundedCornerShape(3.dp))
+            .testTag(if (selected) "selection_box_checked" else "selection_box"),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (selected) Icon(painterResource(R.drawable.ic_check), null, Modifier.size(MARK_ICON), tint = Color.White)
+    }
+}
+
+/**
+ * Selection mode replaces the title or folder back with "完成" and offers only download and more, so
+ * search, filters and view cannot change the level the selection belongs to. The count is the
+ * expanded, deduplicated number of books.
+ */
+@Composable
+private fun SelectionTopBar(model: LibraryViewModel, moreOpen: Boolean, onMore: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(horizontal = 4.dp).testTag("selection_top_bar"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.height(ICON_TOUCH_SIZE).clickable(
+                interactionSource = remember { MutableInteractionSource() }, indication = null, role = Role.Button,
+            ) { model.finishSelection() }.padding(horizontal = 12.dp).testTag("selection_done"),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(stringResource(R.string.selection_done), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+        val count = model.selectedBooks
+        Text(
+            if (count == null) stringResource(R.string.selection_counting) else pluralStringResource(R.plurals.selection_books, count, count),
+            Modifier.weight(1f).testTag("selection_count"), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        val idle = !model.batchBusy
+        IconAction(R.drawable.ic_download, stringResource(R.string.selection_download), idle && count != 0,
+            Modifier.testTag("selection_download")) { model.downloadSelection() }
+        IconAction(R.drawable.ic_more_vert, stringResource(R.string.selection_more), idle,
+            Modifier.testTag("selection_more"), active = moreOpen, onClick = onMore)
+    }
+}
+
+/**
+ * The selection's "more" menu, a small popup under the top bar's right end over the still visible page:
+ * the one read-state mark R26 offers (disabled with its reason while it cannot be submitted) and removing
+ * downloads, which asks for confirmation first. A tap outside or system back closes it.
+ */
+@Composable
+private fun BatchMenu(model: LibraryViewModel, close: () -> Unit) {
+    val choice = model.readMark
+    val entries = buildList {
+        val reason = when (choice?.blocked) {
+            ReadMarkBlock.NO_BOOKS -> R.string.selection_mark_no_books
+            ReadMarkBlock.COLUMN_UNAVAILABLE -> R.string.selection_mark_no_column
+            ReadMarkBlock.WRITE_UNAVAILABLE -> R.string.selection_mark_no_write
+            null -> null
+        }
+        if (reason != null) add(MenuEntry.Note("selection_mark_reason", stringResource(reason)))
+        val unread = choice?.action == ReadMarkAction.MARK_UNREAD
+        add(MenuEntry.Choice(if (unread) "selection_mark_unread" else "selection_mark_read",
+            stringResource(if (unread) R.string.selection_mark_unread else R.string.selection_mark_read),
+            enabled = choice != null && choice.blocked == null) {
+            // Source write-back arrives in phase 4; until then the choice is never enabled.
+        })
+        add(MenuEntry.Rule)
+        add(MenuEntry.Choice("selection_remove", stringResource(R.string.selection_remove), enabled = !model.batchBusy) {
+            close()
+            model.prepareRemoval()
+        })
+    }
+    // The dismissing layer is a sibling, not a parent: a clickable parent would merge the rows' semantics.
+    Box(Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = close))
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopEnd) {
+        Column(
+            Modifier.padding(top = BAR_HEIGHT, end = 4.dp).width(BATCH_MENU_WIDTH).background(Color.White).border(2.dp, Color.Black)
+                // Taps between rows must not fall through to the dismissing layer; a clickable here would
+                // merge the rows into one node as well, so the taps are consumed without semantics.
+                .pointerInput(Unit) { detectTapGestures {} }
+                .testTag("selection_menu"),
+        ) {
+            entries.forEach { MenuRow(it) }
+        }
+    }
+}
+
+private val BATCH_MENU_WIDTH = 240.dp
+
+/** Confirmation over the page: the frozen books, formats, copies and bytes; nothing is removed until confirmed. */
+@Composable
+private fun RemovalDialog(model: LibraryViewModel, removal: RemovalConfirmation) {
+    val context = LocalContext.current
+    Box(
+        Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { model.cancelRemoval() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier.fillMaxWidth(0.86f).background(Color.White).border(2.dp, Color.Black)
+                // Taps inside the panel must not fall through to the dismissing background.
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
+                .padding(16.dp).testTag("removal_dialog"),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(stringResource(R.string.removal_title), fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text(pluralStringResource(R.plurals.removal_books, removal.books, removal.books), Modifier.testTag("removal_books"))
+            val formats = removal.formats
+            Text(
+                if (formats == null) stringResource(R.string.removal_all_formats)
+                else stringResource(R.string.removal_formats, formats.map { it.value }.sorted().joinToString(stringResource(R.string.removal_format_separator))),
+                Modifier.testTag("removal_formats"),
+            )
+            val copies = removal.plan.copies.size
+            Text(
+                if (copies == 0) stringResource(R.string.removal_no_copies)
+                else pluralStringResource(R.plurals.removal_copies, copies, copies, Formatter.formatShortFileSize(context, removal.plan.bytes)),
+                Modifier.testTag("removal_copies"),
+            )
+            Text(stringResource(R.string.removal_scope_note), fontSize = 13.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                StaticButton(stringResource(R.string.removal_cancel), !model.batchBusy, Modifier.testTag("removal_cancel")) { model.cancelRemoval() }
+                Spacer(Modifier.width(12.dp))
+                StaticButton(stringResource(R.string.removal_confirm), !model.batchBusy, Modifier.testTag("removal_confirm")) { model.confirmRemoval() }
+            }
+        }
+    }
 }

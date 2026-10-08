@@ -90,7 +90,7 @@ class Adb:
         command = 'other'
         for prefix, category in ((['uiautomator', 'dump'], 'ui_dump'),
                 (['exec-out', 'cat'], 'ui_read'), (['dumpsys', 'window'], 'focus'),
-                (['rm', '-f'], 'ui_cleanup'), (['input', 'tap'], 'tap'),
+                (['rm', '-f'], 'ui_cleanup'), (['input', 'tap'], 'tap'), (['input', 'swipe'], 'long_press'),
                 (['exec-out', 'screencap'], 'screenshot'), (['dumpsys', 'input'], 'device_profile'),
                 (['getprop'], 'device_profile'), (['wm'], 'device_profile'),
                 (['settings', 'get'], 'device_profile')):
@@ -161,6 +161,10 @@ class Adb:
     def tap(self, x, y):
         self.shell('input', 'tap', str(x), str(y), timeout=15)
 
+    def long_press(self, x, y, hold_ms):
+        # A swipe that starts and ends on the same point holds it for the given duration.
+        self.shell('input', 'swipe', str(x), str(y), str(x), str(y), str(hold_ms), timeout=15 + hold_ms / 1000)
+
     def screenshot(self):
         if not self.artifacts:
             raise UiError('screenshot_requires_artifacts')
@@ -216,7 +220,7 @@ def bounds(node):
     return [x1, y1, x2, y2]
 
 
-def choose(root, selector, clickable=False):
+def choose(root, selector, clickable=False, actionable='clickable'):
     found = matches(root, selector)
     if 'index' in selector:
         if selector['index'] >= len(found):
@@ -234,7 +238,7 @@ def choose(root, selector, clickable=False):
         if target.tag == 'node' and target.get('enabled') != 'true':
             raise UiError('node_disabled')
         bounds(target) if target.tag == 'node' else None
-        if not clickable or target.get('clickable') == 'true':
+        if not clickable or target.get(actionable) == 'true':
             break
         target = parents.get(target)
         if target is None or target.tag != 'node':
@@ -360,9 +364,9 @@ def checked_snapshot(adb, package):
     return root
 
 
-def action_target(root, selector):
+def action_target(root, selector, actionable='clickable'):
     leaf = choose(root, selector)
-    target = choose(root, selector, clickable=True)
+    target = choose(root, selector, clickable=True, actionable=actionable)
     parents = {child: parent for parent in root.iter() for child in parent}
     lineage = []
     current = leaf
@@ -380,7 +384,7 @@ def action_target(root, selector):
         if other in lineage:
             continue
         # Reject any overlapping interactive/foreign node, regardless of tree ordering.
-        if other.get('clickable') != 'true' and other.get('package') == selector['package']:
+        if other.get('clickable') != 'true' and other.get('long-clickable') != 'true' and other.get('package') == selector['package']:
             continue
         box = bounds(other)
         if box[0] <= x < box[2] and box[1] <= y < box[3]:
@@ -388,18 +392,28 @@ def action_target(root, selector):
     return (x, y), tuple(signature(n) for n in lineage), leaf
 
 
-def tap(adb, selector, postcondition=None, timeout=10, precondition=None):
+def validate_hold(hold_ms):
+    if type(hold_ms) is not int or not 500 <= hold_ms <= 5000:
+        raise UiError('hold_ms_must_be_between_500_and_5000')
+    return hold_ms
+
+
+def tap(adb, selector, postcondition=None, timeout=10, precondition=None, hold_ms=None):
+    """Taps the element, or long-presses it for [hold_ms] when given; both use the same guards."""
     validate_tap_conditions(selector, precondition, postcondition)
     validate_timeout(timeout)
+    if hold_ms is not None:
+        validate_hold(hold_ms)
+    actionable = 'clickable' if hold_ms is None else 'long-clickable'
     def precheck():
         first = checked_snapshot(adb, selector['package'])
         pre = choose(first, precondition)
-        point, target_signature, leaf = action_target(first, selector)
+        point, target_signature, leaf = action_target(first, selector, actionable)
         if pre is leaf:
             raise UiError('independent_precondition_required')
         second = checked_snapshot(adb, selector['package'])
         latest_pre = choose(second, precondition)
-        latest_point, latest_signature, latest_leaf = action_target(second, selector)
+        latest_point, latest_signature, latest_leaf = action_target(second, selector, actionable)
         if latest_pre is latest_leaf:
             raise UiError('independent_precondition_required')
         if signature(pre) != signature(latest_pre) or (point, target_signature) != (latest_point, latest_signature):
@@ -410,10 +424,13 @@ def tap(adb, selector, postcondition=None, timeout=10, precondition=None):
     point = read_operation(adb, precheck, 'precheck')
     adb.action_may_have_executed = True
     with query_context(adb, 'input'):
-        adb.tap(*point)
+        if hold_ms is None:
+            adb.tap(*point)
+        else:
+            adb.long_press(*point, hold_ms)
     wait_for(adb, postcondition, timeout, expected_package=postcondition['package'], transition_package=selector['package'])
     adb.action_may_have_executed = False
-    return {'tapped': True, 'postcondition_checked': True}
+    return {'tapped': True, 'postcondition_checked': True} if hold_ms is None else {'long_pressed': True, 'postcondition_checked': True}
 
 
 def validate_profile(profile):
@@ -477,20 +494,23 @@ def run_flow(adb, flow, elements_only=False):
         raise UiError('flow_requires_steps')
     # Validate the entire flow before the first mutation.
     for step in steps:
-        if not isinstance(step, dict) or step.get('action') not in {'tap', 'wait', 'coordinate'}:
+        if not isinstance(step, dict) or step.get('action') not in {'tap', 'long_press', 'wait', 'coordinate'}:
             raise UiError('invalid_flow_action')
         if elements_only and step['action'] == 'coordinate':
             raise UiError('coordinate_forbidden_in_elements_only_flow')
         expected_keys = {'action', 'timeout', 'selector'} if step['action'] == 'wait' else (
             {'action', 'timeout', 'selector', 'precondition', 'postcondition'} if step['action'] == 'tap' else
+            {'action', 'timeout', 'selector', 'precondition', 'postcondition', 'hold_ms'} if step['action'] == 'long_press' else
             {'action', 'timeout', 'profile', 'postcondition'})
         if set(step) - expected_keys:
             raise UiError('unknown_flow_field')
         validate_timeout(step.get('timeout', 10))
-        if step['action'] in {'tap', 'wait'}:
+        if step['action'] in {'tap', 'long_press', 'wait'}:
             validate_selector(step.get('selector'))
-        if step['action'] == 'tap':
+        if step['action'] in {'tap', 'long_press'}:
             validate_tap_conditions(step.get('selector'), step.get('precondition'), step.get('postcondition'))
+        if step['action'] == 'long_press':
+            validate_hold(step.get('hold_ms', 1000))
         if step['action'] == 'coordinate':
             validate_action_selector(step.get('postcondition'))
         if step['action'] == 'coordinate':
@@ -502,6 +522,8 @@ def run_flow(adb, flow, elements_only=False):
                 wait_for(adb, step['selector'], step.get('timeout', 10))
             elif step['action'] == 'tap':
                 tap(adb, step['selector'], step['postcondition'], step.get('timeout', 10), step['precondition'])
+            elif step['action'] == 'long_press':
+                tap(adb, step['selector'], step['postcondition'], step.get('timeout', 10), step['precondition'], step.get('hold_ms', 1000))
             else:
                 coordinate(adb, step['profile'], step['postcondition'], step.get('timeout', 10))
         except UiError as exc:
@@ -548,7 +570,7 @@ def main():
     parser.add_argument('--save-xml', action='store_true', help='explicitly retain full raw UI XML; requires artifacts and authorized page capture')
     parser.add_argument('--screenshot', action='store_true', help='explicitly save one screenshot after operation')
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('inspect', 'tap', 'wait'):
+    for name in ('inspect', 'tap', 'long-press', 'wait'):
         command = sub.add_parser(name)
         command.add_argument('--selector', required=True)
         if name == 'inspect':
@@ -556,9 +578,11 @@ def main():
             command.add_argument('--limit', type=int, default=20)
         if name != 'inspect':
             command.add_argument('--timeout', type=float, default=10)
-        if name == 'tap':
+        if name in ('tap', 'long-press'):
             command.add_argument('--postcondition', required=True)
             command.add_argument('--precondition', required=True)
+        if name == 'long-press':
+            command.add_argument('--hold-ms', type=int, default=1000, help='press duration in milliseconds (500..5000)')
     flow_command = sub.add_parser('flow')
     flow_command.add_argument('--file', required=True)
     flow_command.add_argument('--elements-only', action='store_true')
@@ -586,7 +610,8 @@ def main():
                     result = wait_for(adb, selector, args.timeout)
                 else:
                     post = json.loads(args.postcondition)
-                    result = tap(adb, selector, post, args.timeout, json.loads(args.precondition))
+                    hold = args.hold_ms if args.command == 'long-press' else None
+                    result = tap(adb, selector, post, args.timeout, json.loads(args.precondition), hold)
             if args.screenshot:
                 result['screenshot'] = adb.screenshot()
         if artifact_path:

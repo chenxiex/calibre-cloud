@@ -16,12 +16,15 @@ helper 自动找可点击父节点，并选择原目标与该父节点交集中�
 
 `inspect` 默认返回匹配数、资源 ID、包名和有限属性，不返回页面文字。需要发现新页面按钮时，按当前包名限定查询，并显式加 `--include-labels --limit 10`；这会返回匹配元素的文字和描述，不用于登录或凭据页面。`wait` 等待唯一匹配且可用的元素，超时返回非零。`tap` 必须同时传 `--precondition` 与 `--postcondition`；轻量角色只执行主 agent 已核对的 `flow`，单次 `tap` 留给主 agent 定向处理。
 
+`long-press` 与 `tap` 使用相同的参数和护栏，另有 `--hold-ms`（默认 1000，允许 500–5000 毫秒）。它沿目标向上寻找 `long-clickable="true"` 的节点（Compose 的 `combinedClickable` 会同时标记 `clickable` 与 `long-clickable`），在同样的交集位置以一次原地 `input swipe x y x y 毫秒` 按住，再检查后置条件；只可点击、不可长按的目标直接拒绝。后置条件应选长按后才出现的元素，例如选择模式的顶栏或计数。判断遮挡时，可长按的其它节点与可点击节点同样视为覆盖。
+
 ```bash
+python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL long-press --hold-ms 1000 --selector '{"package":"io.github.chenxiex.calibrecloud.debug","resource_id":"book_17"}' --precondition '{"package":"io.github.chenxiex.calibrecloud.debug","resource_id":"library_title"}' --postcondition '{"package":"io.github.chenxiex.calibrecloud.debug","resource_id":"selection_top_bar"}'
 python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL wait --selector '{"package":"io.github.chenxiex.calibrecloud.debug","text":"目录已授权（读写）。导入状态见“当前书库与导入”页。"}' --timeout 15
 python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL --artifacts app/build/verification/ui-helper/run-01 flow --elements-only --file app/build/verification/ui-helper/saf-flow.json
 ```
 
-`flow` 文件采用以下结构，连续步骤在同一设备锁内执行，失败就停止，不执行后续点击。`tap` 必须提供 `precondition` 与 `postcondition`；`wait` 不点击。`timeout` 是秒，不表示固定休眠。主 agent 必须预先核对流程和允许包名，子 agent 不得改写该文件。轻量角色必须使用 `--elements-only`，含任何坐标步骤的整个流程都会在第一个动作前被拒绝。
+`flow` 文件采用以下结构，连续步骤在同一设备锁内执行，失败就停止，不执行后续点击。`tap` 和 `long_press` 必须提供 `precondition` 与 `postcondition`，`long_press` 可加整数 `hold_ms`；`wait` 不点击。`timeout` 是秒，不表示固定休眠。主 agent 必须预先核对流程和允许包名，子 agent 不得改写该文件。轻量角色必须使用 `--elements-only`，含任何坐标步骤的整个流程都会在第一个动作前被拒绝。
 
 失败 JSON 的 `action_may_have_executed` 表示是否已有点击发出而结果未确认；为 `true` 时不能重试，应核对现状并交回主 agent。`completed_steps` 只计已确认的流程步骤，不能据此断言失败步骤没有执行。指定 `--artifacts` 时默认保存短结果 JSON，不保存完整 XML；只有主 agent 核对非敏感页面后才可显式启用 `--save-xml`。轻量角色不能使用该选项。
 
@@ -63,7 +66,7 @@ python3 .agents/skills/android-device-verification/scripts/android_ui.py --seria
 
 - `--query-timeout`：单条 ADB 读取命令的预算，默认 30 秒，必须是大于 0、至多 120 的有限数。适用于 UI 树生成、XML 读取、焦点及设备配置查询。它不是一次点击或整个 flow 的总时限；双快照涉及多条查询。
 - `--query-retries`：一次完整只读检查在 `adb_timeout` 后的额外尝试次数，默认 1，允许 0–2。每次恢复前最多等待 0.2 秒。点击前的重试丢弃之前的检查结果，重新核对双快照、页面和焦点；坐标路径还重新核对设备配置。`inspect` 和 `device-profile` 重新执行完整查询。连接失败 `adb_command_failed`、焦点／页面变化、选择器歧义等错误不自动重试。
-- 子命令 `--timeout`／flow 步骤 `timeout`：后置条件的总查询等待预算，默认 10 秒。焦点、UI 树生成、XML 读取、轮询和重试共用该预算，每条查询还受 `--query-timeout` 限制；增加查询预算不会自动增加后置等待。慢设备可在已核对 flow 中设置例如 `timeout: 45`。输入命令单独最多 15 秒，永远只发送一次。
+- 子命令 `--timeout`／flow 步骤 `timeout`：后置条件的总查询等待预算，默认 10 秒。焦点、UI 树生成、XML 读取、轮询和重试共用该预算，每条查询还受 `--query-timeout` 限制；增加查询预算不会自动增加后置等待。慢设备可在已核对 flow 中设置例如 `timeout: 45`。输入命令单独最多 15 秒（长按另加按住时长），永远只发送一次。
 
 超时只终止本地 ADB 等待，不能保证远端 UI 查询进程已经退出。helper 不自动杀远端进程，不因超时切换 serial、不绕过页面检查、不重放整段 flow。重试次数耗尽时停止，由主 agent 根据诊断处理连接或页面状态，避免反复加长时限。
 
@@ -71,7 +74,7 @@ python3 .agents/skills/android-device-verification/scripts/android_ui.py --seria
 
 短结果包含以下诊断，成功和失败都保存；不包含命令参数、屏幕文字、路径、stdout／stderr 或凭据：
 
-- `adb_diagnostics`：最近 20 条 ADB 命令的 `command` 类别（例如 `ui_dump`、`ui_read`、`focus`、`tap`、`ui_cleanup`）、`stage`（例如 `precheck`、`input`、`postcondition`）、`elapsed_seconds`、`timeout_seconds` 和 `status`。
+- `adb_diagnostics`：最近 20 条 ADB 命令的 `command` 类别（例如 `ui_dump`、`ui_read`、`focus`、`tap`、`long_press`、`ui_cleanup`）、`stage`（例如 `precheck`、`input`、`postcondition`）、`elapsed_seconds`、`timeout_seconds` 和 `status`。
 - `last_adb_failure`：最后一次 ADB 失败的同样摘要，避免恢复后被后续成功查询挤出最近列表；没有失败时为 `null`。
 - `read_retries`：本次调用实际安排的只读重试次数。`cleanup_errors` 单独报告最多 20 个清理错误码。
 

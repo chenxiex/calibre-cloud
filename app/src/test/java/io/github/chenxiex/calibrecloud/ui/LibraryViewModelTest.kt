@@ -8,6 +8,7 @@ import io.github.chenxiex.calibrecloud.library.FolderKey
 import io.github.chenxiex.calibrecloud.library.DownloadFilter
 import io.github.chenxiex.calibrecloud.library.LibraryFilters
 import io.github.chenxiex.calibrecloud.library.ReadFilter
+import io.github.chenxiex.calibrecloud.library.ReadMarkBlock
 import io.github.chenxiex.calibrecloud.library.SearchScope
 import io.github.chenxiex.calibrecloud.library.LibraryImports
 import io.github.chenxiex.calibrecloud.library.LibraryIndex
@@ -18,7 +19,16 @@ import io.github.chenxiex.calibrecloud.metadata.ImportedLibrary
 import io.github.chenxiex.calibrecloud.metadata.ParsedLibrary
 import io.github.chenxiex.calibrecloud.metadata.ReadColumnStatus
 import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.BookFormat
 import io.github.chenxiex.calibrecloud.model.BookKey
+import io.github.chenxiex.calibrecloud.model.CopyKey
+import io.github.chenxiex.calibrecloud.model.FileVersion
+import io.github.chenxiex.calibrecloud.metadata.ImportedFormat
+import io.github.chenxiex.calibrecloud.storage.api.CompleteCopyLocation
+import io.github.chenxiex.calibrecloud.storage.api.DownloadedCopy
+import io.github.chenxiex.calibrecloud.storage.api.SourceAvailability
+import io.github.chenxiex.calibrecloud.storage.cache.CleanupKind
+import io.github.chenxiex.calibrecloud.storage.cache.CleanupPlan
 import io.github.chenxiex.calibrecloud.model.CustomColumnId
 import io.github.chenxiex.calibrecloud.model.LibraryId
 import io.github.chenxiex.calibrecloud.model.LibraryIdentity
@@ -41,6 +51,8 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -94,9 +106,30 @@ class LibraryViewModelTest {
 
     private val history = FakeHistory()
 
+    /** Records submissions; [accept] and [removes] decide their outcome. */
+    private class FakeBatch : LibraryBatch {
+        override val readWriteAvailable = false
+        var accept = true
+        var removes = true
+        val downloads = mutableListOf<CopyKey>()
+        val previews = mutableListOf<Pair<Set<BookKey>, Set<BookFormat>?>>()
+        val removed = mutableListOf<CleanupPlan>()
+        override suspend fun download(key: CopyKey, selectionToken: UUID) = accept.also { if (it) downloads += key }
+        override suspend fun wake() {}
+        override suspend fun previewRemoval(books: Set<BookKey>, formats: Set<BookFormat>?): CleanupPlan {
+            previews += books to formats
+            return CleanupPlan(CleanupKind.COPIES, UUID.randomUUID(), setOf(books.first().libraryId),
+                books.map { CopyKey(it, BookFormat.parse("EPUB")) }.toSet(), 10, books, formats, books.first().libraryId)
+        }
+        override suspend fun remove(plan: CleanupPlan) = removes.also { removed += plan }
+    }
+
+    private var copies: List<DownloadedCopy> = emptyList()
+    private val batch = FakeBatch()
+
     private fun TestScope.model(covers: FakeCovers = FakeCovers()): LibraryViewModel {
-        val service = LibraryQueryService(FakeImports { imported }, { emptyList() }, dispatcher)
-        return LibraryViewModel({ selection }, service, covers, emptyFlow(), history).also {
+        val service = LibraryQueryService(FakeImports { imported }, { copies }, dispatcher)
+        return LibraryViewModel({ selection }, service, covers, emptyFlow(), history, batch).also {
             it.setVisible(true)
             advanceUntilIdle()
         }
@@ -360,4 +393,117 @@ class LibraryViewModelTest {
     }
 
     private fun LibraryViewModel.nextPage() = showPage(pageStart(firstVisible, capacity) / capacity + 1)
+
+    private val epub = BookFormat.parse("EPUB")
+    private val pdf = BookFormat.parse("PDF")
+    private fun key(n: Int) = BookKey(libraryId, n.toLong(), UUID(0, n.toLong()))
+
+    /** Book n has the given formats; odd and even books are tagged apart. */
+    private fun formatted(vararg formats: List<BookFormat>) = LibraryIndex(
+        ImportedLibrary(identity, UUID.randomUUID(), 1, ParsedLibrary(null, formats.mapIndexed { i, list ->
+            val n = i + 1L
+            ImportedBook(n, UUID(0, n), "Book $n", emptyList(), "2026-01-01T00:0$n:00+00:00", null, null, null,
+                listOf(if (n % 2 == 0L) "even" else "odd"), "", list.map { ImportedFormat(it, 1, RelativeSourcePath("p$n/b.${it.value}")) },
+                RelativeSourcePath("p$n"), true, emptyMap())
+        }, emptyList()), null, ReadColumnStatus.NOT_CONFIGURED))
+
+    private fun copy(n: Int, format: BookFormat) = DownloadedCopy(CopyKey(key(n), format), CompleteCopyLocation(libraryId, UUID.randomUUID()),
+        "Book $n", 1, FileVersion(BackendKind.LOCAL, "v"), SourceAvailability.AVAILABLE)
+
+    @Test
+    fun selectionCountsTheDistinctBooksOfChosenFoldersAndEndsWhenTheLevelChanges() = runTest(dispatcher) {
+        imported = library(6)
+        val model = model().also { it.onMeasured(10); advanceUntilIdle() }
+        model.categorize(Categorization.Tags); advanceUntilIdle()
+        model.toggleFolder(FolderKey("odd")); advanceUntilIdle()
+        assertEquals(LibrarySelectionSet(folders = setOf(FolderKey("odd"))), model.selected)
+        assertEquals(3, model.selectedBooks)
+        model.toggleFolder(FolderKey("even")); advanceUntilIdle()
+        assertEquals(6, model.selectedBooks)
+        model.toggleFolder(FolderKey("odd")); advanceUntilIdle()
+        assertEquals(3, model.selectedBooks)
+        // Without a read column the mark is offered but disabled with its reason.
+        assertEquals(ReadMarkBlock.COLUMN_UNAVAILABLE, model.readMark?.blocked)
+        // Changing the level can never apply the selection to another result.
+        model.updateFilters { it.copy(download = DownloadFilter.DOWNLOADED) }; advanceUntilIdle()
+        assertNull(model.selected)
+        model.toggleFolder(FolderKey("even")); advanceUntilIdle()
+        model.finishSelection()
+        assertNull(model.selected)
+        assertNull(model.selectedBooks)
+        model.toggleFolder(FolderKey("even")); advanceUntilIdle()
+        // Another library selection drops it as well.
+        selection = LibrarySelection(UUID.randomUUID(), identity.location, identity, BackendKind.LOCAL)
+        model.refresh(); advanceUntilIdle()
+        assertNull(model.selected)
+    }
+
+    @Test
+    fun batchDownloadSubmitsEachBookOnceSkipsCopiesAndBooksWithoutFormatAndThenEndsSelection() = runTest(dispatcher) {
+        imported = formatted(listOf(epub, pdf), listOf(pdf), listOf(epub), emptyList(), listOf(epub))
+        copies = listOf(copy(1, pdf), copy(3, epub))
+        val model = model().also { it.onMeasured(10); advanceUntilIdle() }
+        model.categorize(Categorization.Tags); advanceUntilIdle()
+        model.toggleFolder(FolderKey("odd")); advanceUntilIdle()
+        model.toggleFolder(FolderKey("even")); advanceUntilIdle()
+        model.downloadSelection(); advanceUntilIdle()
+        // Book 1 takes EPUB although PDF is cached; 3 is skipped; 4 has no format.
+        assertEquals(setOf(CopyKey(key(1), epub), CopyKey(key(2), pdf), CopyKey(key(5), epub)), batch.downloads.toSet())
+        assertEquals(3, batch.downloads.size)
+        assertEquals(BatchNotice.Downloads(noFormat = 1, rejected = 0), model.notice)
+        assertNull(model.selected)
+    }
+
+    @Test
+    fun nothingSubmittedKeepsTheSelection() = runTest(dispatcher) {
+        imported = formatted(listOf(epub), emptyList())
+        copies = listOf(copy(1, epub))
+        val model = model().also { it.onMeasured(10); advanceUntilIdle() }
+        model.toggleBook(key(1)); model.toggleBook(key(2)); advanceUntilIdle()
+        model.downloadSelection(); advanceUntilIdle()
+        assertEquals(BatchNotice.Downloads(noFormat = 1, rejected = 0), model.notice)
+        assertNotNull(model.selected)
+        imported = formatted(listOf(epub), listOf(pdf))
+        model.refresh(); advanceUntilIdle()
+        batch.accept = false
+        model.downloadSelection(); advanceUntilIdle()
+        assertEquals(BatchNotice.Downloads(noFormat = 0, rejected = 1), model.notice)
+        assertNotNull(model.selected)
+    }
+
+    @Test
+    fun removalFreezesTheFormatFilterAndOnlyASuccessfulRemovalEndsSelection() = runTest(dispatcher) {
+        imported = formatted(listOf(epub, pdf), listOf(epub, pdf), listOf(pdf))
+        copies = listOf(copy(1, epub), copy(1, pdf), copy(2, epub))
+        val model = model().also { it.onMeasured(10); advanceUntilIdle() }
+        model.updateFilters { it.copy(formats = setOf(epub)) }; advanceUntilIdle()
+        model.toggleBook(key(1)); model.toggleBook(key(2)); advanceUntilIdle()
+        model.prepareRemoval(); advanceUntilIdle()
+        assertEquals(listOf(setOf(key(1), key(2)) to setOf(epub)), batch.previews)
+        val shown = requireNotNull(model.removal)
+        assertEquals(setOf(epub), shown.formats)
+        assertEquals(2, shown.books)
+        batch.removes = false
+        model.confirmRemoval(); advanceUntilIdle()
+        assertEquals(listOf(shown.plan), batch.removed)
+        assertEquals(BatchNotice.RemovalFailed, model.notice)
+        assertNull(model.removal)
+        assertNotNull(model.selected)
+        model.prepareRemoval(); advanceUntilIdle()
+        model.cancelRemoval()
+        assertNull(model.removal)
+        assertNotNull(model.selected)
+        batch.removes = true
+        model.prepareRemoval(); advanceUntilIdle()
+        model.confirmRemoval(); advanceUntilIdle()
+        // Success has no notice; the marks show it.
+        assertNull(model.notice)
+        assertNull(model.selected)
+        // Without a format filter the removal covers all formats.
+        model.updateFilters { LibraryFilters() }; advanceUntilIdle()
+        model.toggleBook(key(3)); advanceUntilIdle()
+        model.prepareRemoval(); advanceUntilIdle()
+        assertEquals(setOf(key(3)) to null, batch.previews.last())
+        assertNull(model.removal!!.formats)
+    }
 }

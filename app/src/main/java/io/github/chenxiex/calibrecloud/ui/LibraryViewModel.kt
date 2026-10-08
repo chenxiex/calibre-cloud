@@ -23,9 +23,13 @@ import io.github.chenxiex.calibrecloud.library.LibraryProblem
 import io.github.chenxiex.calibrecloud.library.LibraryQueryResult
 import io.github.chenxiex.calibrecloud.library.LibraryQueryService
 import io.github.chenxiex.calibrecloud.library.LibraryRequest
+import io.github.chenxiex.calibrecloud.library.ReadMarkChoice
+import io.github.chenxiex.calibrecloud.library.SelectionExpansion
+import io.github.chenxiex.calibrecloud.library.SelectionResult
 import io.github.chenxiex.calibrecloud.library.SearchScope
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.BookKey
+import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.state.LibrarySelection
 import io.github.chenxiex.calibrecloud.state.SearchHistoryStore
 import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
@@ -114,6 +118,10 @@ class QueueLibraryCovers(
  * While [search] is open the page shows the search session instead: the library's categorization,
  * folder and page stay as they were and are shown again by [closeSearch]. Only executed queries enter
  * the per-library history.
+ *
+ * Selection mode ([selected]) collects books and folders of the shown level only; it ends with
+ * [finishSelection], a submitted batch action or a change of library. Every action expands the
+ * selection again under the shown search and filters and acts on that frozen result (R26).
  */
 class LibraryViewModel(
     private val selection: suspend () -> LibrarySelection?,
@@ -121,6 +129,7 @@ class LibraryViewModel(
     private val covers: LibraryCovers,
     private val events: Flow<TaskEvent>,
     private val historyStore: SearchHistoryStore,
+    private val batch: LibraryBatch,
 ) : ViewModel() {
     var content by mutableStateOf<LibraryContent>(LibraryContent.Loading)
         private set
@@ -164,6 +173,25 @@ class LibraryViewModel(
     val showsFolders: Boolean get() = search == null && folder == null && categorization != Categorization.None
 
     val coverImages = mutableStateMapOf<BookKey, Bitmap>()
+
+    /** The selection while selection mode is on; null otherwise. */
+    var selected by mutableStateOf<LibrarySelectionSet?>(null)
+        private set
+    /** Distinct books the selection expands to now; null while unknown. */
+    var selectedBooks by mutableStateOf<Int?>(null)
+        private set
+    /** The read-state operation R26 offers for the selection; null while unknown. */
+    var readMark by mutableStateOf<ReadMarkChoice?>(null)
+        private set
+    var removal by mutableStateOf<RemovalConfirmation?>(null)
+        private set
+    var notice by mutableStateOf<BatchNotice?>(null)
+        private set
+    /** A batch action is running; further actions wait for it. */
+    var batchBusy by mutableStateOf(false)
+        private set
+    private var selectionOwner: UUID? = null
+    private var expanding: Job? = null
 
     private var visible = false
     private var loadGeneration = 0L
@@ -229,6 +257,7 @@ class LibraryViewModel(
 
     fun categorize(value: Categorization) {
         if (value == categorization && folder == null) return
+        finishSelection()
         categorization = value
         folder = null
         firstVisible = 0
@@ -236,6 +265,7 @@ class LibraryViewModel(
     }
 
     fun openFolder(key: FolderKey) {
+        finishSelection()
         rootFirstVisible = pageStart(firstVisible, capacity)
         folder = key
         folderSort = BookSort.defaultFor(categorization, key)
@@ -246,6 +276,7 @@ class LibraryViewModel(
     /** Returns false at the root so the caller can fall through to the system back action. */
     fun closeFolder(): Boolean {
         if (folder == null) return false
+        finishSelection()
         folder = null
         firstVisible = rootFirstVisible
         reload()
@@ -275,6 +306,7 @@ class LibraryViewModel(
 
     /** Changes the filters of the shown page and starts again from its first page. */
     fun updateFilters(change: (LibraryFilters) -> LibraryFilters) {
+        finishSelection()
         val session = search
         if (session != null) search = session.copy(filters = change(session.filters)) else libraryFilters = change(libraryFilters)
         firstVisible = 0
@@ -284,6 +316,7 @@ class LibraryViewModel(
     /** Opens the search page with the library's view, book sort and filters; the library position is kept. */
     fun openSearch() {
         if (search != null) return
+        finishSelection()
         libraryFirstVisible = pageStart(firstVisible, capacity)
         // A flat result has no series to order by.
         search = SearchSession(viewMode, sort.takeIf { it.key != BookSortKey.SERIES_INDEX } ?: BookSort.Default, filters)
@@ -295,6 +328,7 @@ class LibraryViewModel(
     /** Returns false when no search is open so the caller can fall through to the system back action. */
     fun closeSearch(): Boolean {
         if (search == null) return false
+        finishSelection()
         search = null
         firstVisible = libraryFirstVisible
         reload()
@@ -317,6 +351,7 @@ class LibraryViewModel(
         val session = search ?: return
         val query = text.trim()
         if (query.isEmpty()) return
+        finishSelection()
         searchInput = text
         search = session.copy(query = query)
         firstVisible = 0
@@ -337,6 +372,7 @@ class LibraryViewModel(
     private fun clearQuery() {
         val session = search ?: return
         if (session.query == null) return
+        finishSelection()
         search = session.copy(query = null)
         firstVisible = 0
         reload()
@@ -355,6 +391,158 @@ class LibraryViewModel(
             }
         }
     }
+
+    /** A long press starts selection with the book; in selection mode a tap adds or removes it. */
+    fun toggleBook(key: BookKey) = toggle { it.copy(books = it.books.toggle(key)) }
+
+    fun toggleFolder(key: FolderKey) = toggle { it.copy(folders = it.folders.toggle(key)) }
+
+    private fun toggle(change: (LibrarySelectionSet) -> LibrarySelectionSet) {
+        if (batchBusy || removal != null) return
+        val owner = coverToken ?: return
+        val current = selected
+        if (current == null) {
+            selectionOwner = owner
+            notice = null
+        }
+        selected = change(current ?: LibrarySelectionSet())
+        expandSelection()
+    }
+
+    /** Leaves selection mode; the selection is dropped. */
+    fun finishSelection() {
+        expanding?.cancel()
+        selected = null
+        selectedBooks = null
+        readMark = null
+        removal = null
+        selectionOwner = null
+    }
+
+    /** Called once [notice] has been handed to the system notification. */
+    fun noticeHandled(shown: BatchNotice) {
+        if (notice === shown) notice = null
+    }
+
+    /**
+     * Submits a user download of each selected book's batch format (R24): books whose format already
+     * has a complete copy are skipped and books without a format are counted, never submitted. No
+     * reader is opened. Selection ends once anything was submitted.
+     */
+    fun downloadSelection() = runBatch { expansion, owner ->
+        var submitted = 0
+        var noFormat = 0
+        var rejected = 0
+        expansion.books.forEach { book ->
+            val format = book.download
+            when {
+                format == null -> noFormat++
+                book.downloaded -> Unit
+                batch.download(CopyKey(book.key, format), owner) -> submitted++
+                else -> rejected++
+            }
+        }
+        if (submitted > 0) {
+            try { batch.wake() } catch (failure: CancellationException) { throw failure } catch (_: Exception) { }
+            finishSelection()
+        }
+        if (noFormat > 0 || rejected > 0) notice = BatchNotice.Downloads(noFormat, rejected)
+    }
+
+    /** Freezes the selected books and the current format filter (none means all formats) for confirmation. */
+    fun prepareRemoval() = runBatch { expansion, _ ->
+        val formats = filters.formats.takeIf { it.isNotEmpty() }
+        val plan = batch.previewRemoval(expansion.books.map { it.key }.toSet(), formats)
+        if (plan == null) notice = BatchNotice.Unavailable
+        else removal = RemovalConfirmation(plan, expansion.books.size, formats)
+    }
+
+    fun cancelRemoval() {
+        if (!batchBusy) removal = null
+    }
+
+    /** Executes the confirmed plan as frozen; a failure keeps the selection. */
+    fun confirmRemoval() {
+        val shown = removal ?: return
+        if (batchBusy) return
+        batchBusy = true
+        viewModelScope.launch {
+            val removed = try {
+                batch.remove(shown.plan)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                false
+            }
+            removal = null
+            batchBusy = false
+            if (removed) finishSelection() else notice = BatchNotice.RemovalFailed
+            reload()
+        }
+    }
+
+    private fun runBatch(action: suspend (SelectionExpansion, UUID) -> Unit) {
+        val set = selected ?: return
+        val owner = selectionOwner ?: return
+        if (batchBusy || removal != null) return
+        batchBusy = true
+        notice = null
+        viewModelScope.launch {
+            try {
+                val expansion = expand(set)
+                when {
+                    expansion == null -> notice = BatchNotice.Unavailable
+                    expansion.books.isEmpty() -> notice = BatchNotice.NoBooks
+                    else -> action(expansion, owner)
+                }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                notice = BatchNotice.Unavailable
+            } finally {
+                batchBusy = false
+            }
+        }
+    }
+
+    /** Recounts the selection; called on every change and after each page load. */
+    private fun expandSelection() {
+        val set = selected ?: return
+        expanding?.cancel()
+        expanding = viewModelScope.launch {
+            val expansion = try {
+                expand(set)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                null
+            }
+            if (selected != set) return@launch
+            selectedBooks = expansion?.books?.size
+            readMark = expansion?.let { ReadMarkChoice.of(it, batch.readWriteAvailable) }
+        }
+    }
+
+    /** The selection under the shown level's search and filters, or null when that level cannot be read. */
+    private suspend fun expand(set: LibrarySelectionSet): SelectionExpansion? {
+        if (selection()?.token != selectionOwner) return null
+        repeat(MAX_ATTEMPTS) {
+            val current = queries.overview() ?: return null
+            when (val result = queries.expand(levelRequest(0, 1, current), set.folders, set.books)) {
+                SelectionResult.Stale -> return@repeat
+                is SelectionResult.Unavailable -> return null
+                is SelectionResult.Expanded -> return result.expansion
+            }
+        }
+        return null
+    }
+
+    /** The request of the shown level; a selection is expanded with the same search, filters and categorization. */
+    private fun levelRequest(offset: Int, pageSize: Int, overview: LibraryOverview) = LibraryRequest(
+        search = search?.query.orEmpty(), searchScope = search?.scope ?: SearchScope.All,
+        categorization = categorization, folder = folder, sort = sort, foldersAscending = foldersAscending, filters = filters,
+        offset = offset, pageSize = pageSize, expected = overview.revision,
+    )
 
     private fun reload() {
         if (!visible || capacity <= 0) return
@@ -378,6 +566,7 @@ class LibraryViewModel(
             backend = null
             overview = null
             content = LibraryContent.Unconfigured
+            finishSelection()
             resetCovers(null)
             return
         }
@@ -388,6 +577,7 @@ class LibraryViewModel(
                 if (generation != loadGeneration) return
                 overview = null
                 content = LibraryContent.NoMetadata
+                finishSelection()
                 resetCovers(selected.token)
                 return
             }
@@ -405,11 +595,7 @@ class LibraryViewModel(
                 }
                 return
             }
-            val request = LibraryRequest(
-                search = session?.query.orEmpty(), searchScope = session?.scope ?: SearchScope.All,
-                categorization = categorization, folder = folder, sort = sort, foldersAscending = foldersAscending, filters = filters,
-                offset = pageStart(firstVisible, capacity), pageSize = capacity, expected = current.revision,
-            )
+            val request = levelRequest(pageStart(firstVisible, capacity), capacity, current)
             val shown: LibraryContent = when (val result = queries.query(request)) {
                 LibraryQueryResult.Stale -> return@repeat
                 is LibraryQueryResult.Unavailable ->
@@ -427,6 +613,8 @@ class LibraryViewModel(
             overview = current
             content = shown
             if (coverToken != selected.token) resetCovers(selected.token)
+            // A selection belongs to one library; an import or copy change only recounts it.
+            if (selectionOwner != null && selectionOwner != selected.token) finishSelection() else expandSelection()
             val key = listOf(selected.token, current.revision, request.search, request.searchScope, request.filters, categorization, folder,
                 request.sort, request.foldersAscending, request.offset)
             if (key != pageKey) {
@@ -500,8 +688,11 @@ class LibraryViewModel(
                     dependencies.state::current, dependencies.libraryQuery,
                     QueueLibraryCovers(dependencies.covers, dependencies.coverService, dependencies.taskQueue, dependencies.taskCoordinator),
                     dependencies.taskQueue.events, dependencies.searchHistory,
+                    QueueLibraryBatch(dependencies.copyService, dependencies.taskCoordinator, dependencies.maintenance),
                 ))!!
             }
         }
     }
 }
+
+private fun <T> Set<T>.toggle(value: T): Set<T> = if (value in this) this - value else this + value

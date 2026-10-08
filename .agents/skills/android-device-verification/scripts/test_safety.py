@@ -1,4 +1,4 @@
-"""Offline safety regressions: forbidden actions never reach input tap."""
+"""Offline safety regressions: forbidden actions never reach input tap or long press."""
 import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
@@ -38,6 +38,9 @@ class FakeAdb:
 
     def tap(self, *point):
         self.taps.append(point)
+
+    def long_press(self, x, y, hold_ms):
+        self.taps.append((x, y, hold_ms))
 
 
 class SafetyTests(unittest.TestCase):
@@ -97,6 +100,36 @@ class SafetyTests(unittest.TestCase):
             with self.assertRaises(ui.UiError):
                 ui.run_flow(adb, {'steps': [good, bad]})
             self.assertEqual([], adb.taps)
+
+    def test_long_press_targets_a_long_clickable_node_with_the_same_guards(self):
+        long_node = node(inner='').replace('clickable="true"', 'clickable="true" long-clickable="true"')
+        before = screen(long_node)
+        adb = FakeAdb([before, before, screen(node('done'))])
+        result = ui.tap(adb, TARGET, POST, precondition=PRE, hold_ms=1200)
+        self.assertEqual([(50, 40, 1200)], adb.taps)
+        self.assertTrue(result['long_pressed'])
+        # A node that only takes taps, a moving target or a bad duration never gets a press.
+        for screens, hold in (([screen()], 1000), ([before, screen(long_node.replace('[0,0][100,80]', '[20,0][120,80]'))], 1000),
+                ([before], 100), ([before], 1000.0)):
+            adb = FakeAdb(screens)
+            with self.assertRaises(ui.UiError):
+                ui.tap(adb, TARGET, POST, precondition=PRE, hold_ms=hold)
+            self.assertEqual([], adb.taps)
+
+    def test_long_press_flow_is_validated_before_mutation(self):
+        long_node = node().replace('clickable="true"', 'clickable="true" long-clickable="true"')
+        adb = FakeAdb([screen(long_node)])
+        good = {'action': 'long_press', 'selector': TARGET, 'precondition': PRE, 'postcondition': POST}
+        for bad in ({**good, 'hold_ms': 9000}, {**good, 'precondition': TARGET}, {**good, 'profile': {}}):
+            with self.assertRaises(ui.UiError):
+                ui.run_flow(adb, {'steps': [good, bad]}, elements_only=True)
+            self.assertEqual([], adb.taps)
+
+    def test_long_press_sends_one_stationary_swipe(self):
+        adb = ui.Adb('offline')
+        with patch.object(adb, 'run', return_value=b'') as run:
+            adb.long_press(10, 20, 1000)
+        run.assert_called_once_with(['shell', 'input swipe 10 20 10 20 1000'], 16.0)
 
     def test_actual_node_alias_rejected(self):
         root = screen()

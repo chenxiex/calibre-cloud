@@ -68,4 +68,45 @@
     <string name="search_history_clear">清除</string>
     <string name="search_history_clear_description">清除搜索历史</string>
     <string name="search_history_empty">暂无搜索历史</string>
+    <string name="selection_done">完成</string>
+    <string name="selection_counting">正在统计所选书籍</string>
+    <plurals name="selection_books">
+        <item quantity="other">已选 %d 本</item>
+    </plurals>
+    <string name="selection_download">下载所选书籍</string>
+    <string name="selection_more">更多操作</string>
+    <string name="selection_chosen">已选中</string>
+    <string name="selection_not_chosen">未选中</string>
+    <string name="selection_mark_read">标为已读</string>
+    <string name="selection_mark_unread">标为未读</string>
+    <string name="selection_mark_no_books">所选内容在当前搜索和筛选下没有书籍，无法标记阅读状态。</string>
+    <string name="selection_mark_no_column">已读栏目未配置或已失效，无法标记阅读状态。可在设置中选择已读栏目。</string>
+    <string name="selection_mark_no_write">写回 Calibre 书库的功能尚未提供，暂不能标记阅读状态。</string>
+    <string name="selection_remove">移除下载</string>
+    <string name="removal_title">移除下载</string>
+    <plurals name="removal_books">
+        <item quantity="other">涉及 %d 本书</item>
+    </plurals>
+    <string name="removal_all_formats">格式：全部格式</string>
+    <string name="removal_formats">格式：%1$s</string>
+    <string name="removal_format_separator">、</string>
+    <plurals name="removal_copies">
+        <item quantity="other">将删除 %1$d 个应用内副本，共 %2$s</item>
+    </plurals>
+    <string name="removal_no_copies">范围内没有已下载的副本；范围内未完成的下载仍会停止。</string>
+    <string name="removal_scope_note">范围内未完成的下载和更新会一并停止；其它格式的副本和源书库文件不受影响。</string>
+    <string name="removal_cancel">取消</string>
+    <string name="removal_confirm">移除</string>
+    <string name="notice_channel">批量操作的问题</string>
+    <string name="notice_title">批量操作未全部完成</string>
+    <string name="notice_separator">；</string>
+    <plurals name="notice_downloads_no_format">
+        <item quantity="other">%d 本没有可下载的格式，未下载</item>
+    </plurals>
+    <plurals name="notice_downloads_rejected">
+        <item quantity="other">%d 本无法提交（书库已变化）</item>
+    </plurals>
+    <string name="notice_removal_failed">移除未完成，所选内容已保留，可重试。</string>
+    <string name="notice_no_books">所选内容在当前搜索和筛选下没有书籍。</string>
+    <string name="notice_unavailable">书库已变化，无法完成本次操作，请重新选择。</string>
 </resources>

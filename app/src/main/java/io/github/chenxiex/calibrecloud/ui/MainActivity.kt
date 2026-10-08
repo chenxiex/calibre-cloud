@@ -105,11 +105,11 @@ class MainActivity : ComponentActivity() {
     }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         taskModel.refreshCapabilities()
-        pendingNotice?.let { if (it.status != null) OpenNotifications.post(this, it.status) }
+        pendingNotice?.invoke()
         pendingNotice = null
     }
     /** A notice held back while the notification permission is asked for. */
-    private var pendingNotice: OpenNotice? = null
+    private var pendingNotice: (() -> Unit)? = null
     /** The "更多" page a tapped open notification asks for. */
     private var moreRequest by mutableStateOf<Int?>(null)
     private var pickerOpen by mutableStateOf(false)
@@ -131,7 +131,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                MainScreen(libraryModel, openModel, { launchReader(this, it.copy) }, ::notify, moreRequest, { moreRequest = null }) { page, onPage ->
+                MainScreen(libraryModel, openModel, { launchReader(this, it.copy) }, ::notify, ::notifyBatch, moreRequest, { moreRequest = null }) { page, onPage ->
                     AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel, coverModel, cleanupModel, taskModel, openModel,
                         page, onPage,
                         { if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) },
@@ -167,12 +167,19 @@ class MainActivity : ComponentActivity() {
             OpenNotifications.withdraw(this)
             return
         }
+        withPermission { OpenNotifications.post(this, status) }
+    }
+
+    private fun notifyBatch(notice: BatchNotice) = withPermission { BatchNotifications.post(this, notice) }
+
+    /** Posts now, or after the permission prompt when the first notification still needs it. */
+    private fun withPermission(post: () -> Unit) {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-            pendingNotice = notice
+            pendingNotice = post
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             return
         }
-        OpenNotifications.post(this, status)
+        post()
     }
 
     override fun onStart() {

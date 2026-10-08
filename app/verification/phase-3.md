@@ -363,3 +363,50 @@ Q53／Q54 真实服务验证（2026-10-08）：用户先在应用下载《哈姆
 - 结束后队列全部完成，暂存目录为空。
 
 外部阅读器打开：用户从应用打开下载副本，确认阅读器启动迅速。系统日志记录点击后选择器 407 ms 显示，选择 KOReader 后其主界面 998 ms 显示；本次已下载副本的打开不发网络请求（见上方 `open_existing`）。替换版与原版只差内嵌简介，阅读正文无可见差异；新版本由上文副本内容比对确认，不依赖人工判断。
+
+## 步骤 06：多选与批量操作（2026-10-08）
+
+对应 R26、R12 的移除下载范围、R24 的批量下载格式，覆盖 AC07 中的格式筛选、去重、冻结集合、移除范围与标记按钮判定；写回提交部分留第四阶段。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=io.github.chenxiex.calibrecloud.ui.LibraryScreenTest,io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenanceTest
+```
+
+- 常规基线 `BUILD SUCCESSFUL`；JVM 153 项通过；lint 0 错误，5 项均为依赖／Gradle 新版本提示。
+- `LibraryIndexTest`（JVM）：两个标签文件夹中的同一本书只展开一次；格式筛除的书不进入已选文件夹；兜底文件夹只含无标签书；文件夹内与搜索结果中直接选中的书仅在仍属于该层级且匹配时计入；新导入删去的书被丢弃；失效分类栏目返回原因。批量格式取筛选范围内按优先级的首个源格式（已缓存 PDF 时仍取 EPUB；筛选 PDF 时为 PDF 且计为已下载；优先级改为 PDF 时取 PDF），无格式为 null。标记判定表：全已读为“标为未读”，全未读（含空值）与混合为“标为已读”，空集合、未配置／非布尔栏目、写回不可用分别给出禁用原因。
+- `LibraryViewModelTest`（JVM，假批量端口）：选中文件夹的实际书籍数随选择增减；改变筛选或换书库结束选择；批量下载跳过已有副本、统计无格式书籍、每本只提交一次并退出选择；未提交（全部跳过或被拒）保留选择；移除以当前格式筛选（EPUB）冻结预览，确认执行同一计划，失败保留选择，取消不执行，成功后退出；无格式筛选时范围为全部格式。
+- `LibraryScreenTest`（PA6，30 项全部通过，含新增 4 项）：长按进入选择后顶栏无搜索／筛选／视图入口，短按切换而不打开书，跨页选择保留，“完成”与系统返回结束选择；选中项为已选择语义；文件夹选择计数 4，混合集合只显示禁用的“标为已读”并显示写回不可用原因，全已读单本只显示“标为未读”；批量下载只提交未下载的一本（结果反馈见下文用户反馈后的修改）；移除确认页显示“涉及 2 本书”“格式：EPUB”和副本数，取消不移除，确认后退出选择。
+- `CacheMaintenanceTest.selectionRemovalUnderAnEpubFilterKeepsThePdfCopyAndItsTask`（PA6，真实 SQLite 与私有文件，经生产 `LibraryQueryService`、`QueueLibraryBatch` 与 `LibraryViewModel`）：筛选 EPUB 后选中书籍并确认移除，EPUB 副本与文件删除、EPUB 未完成任务取消且暂存清理；PDF 副本字节、PDF 任务记录与暂存不变；清除筛选后该书默认格式为已下载的 PDF。同类其余 15 项照常通过。
+
+### 真机核对（PA6，扩展库副本）
+
+2026-10-08 在 PA6（Android 14，`192.168.0.72:41899`）以 `adb install -r` 安装 debug 包 `io.github.chenxiex.calibrecloud.debug`；用户授权测试书库副本 `/sdcard/Download/calibre-step04-test-library`（286 本扩展库）并同步。agent 在“更多”临时页把已读栏目设为 `#read_status`，随后用会话临时目录中的 ADB 脚本按资源 ID 操作（helper 不支持长按，长按以原地 `input swipe` 1 秒执行，每步核对后置元素），预期值直接查询该库 `metadata.db`，副本与任务状态读取应用状态库。过程中一次 `uiautomator dump` 超时（只读查询，无未确认点击），核对页面后从该步重跑。移除确认页截图在被忽略的 `app/build/verification/phase3-step06/removal-dialog.png`。
+
+- **单本**（搜索 “Orchard”，书籍 17《A Brief Orchard》，EPUB+PDF、已读）：长按后顶栏为“完成／已选 1 本／下载／更多”，搜索输入框、筛选与视图入口消失；“更多”只显示禁用的“标为未读”及“写回 Calibre 书库的功能尚未提供”。无筛选下载提交 EPUB（1754 字节发布）。筛选 PDF 后该书不显示下载勾（只缓存了 EPUB，AC07），再下载提交 PDF（590 字节）。改为只筛选 EPUB 后移除：确认页“涉及 1 本书／格式：EPUB／将删除 1 个应用内副本，共 1.8 kB”，确认后 EPUB 副本删除、PDF 保留；清除筛选后该书显示下载勾。
+- **多选**（同一搜索结果跨页选中书籍 17、241、239，已读与未读混合）：计数“已选 3 本”；“更多”只显示禁用的“标为已读”。下载提示“已提交 3 本书的下载”：17 已有 PDF 仍按优先级下载 EPUB，241、239 下载 EPUB。无格式筛选移除：确认页“涉及 3 本书／格式：全部格式／将删除 4 个应用内副本”，确认后清单为空。
+- **文件夹展开**（图书馆按标签分类、筛选 PDF，长按“传记”再短按“技术”）：计数“已选 15 本”，与 `metadata.db` 中两标签含 PDF 的书去重结果（8＋10−3，交集为书籍 16、237、277）一致；混合已读状态只显示禁用的“标为已读”。下载提示“已提交 15 本书的下载”，发布的 15 个副本均为 PDF，书籍 ID 与预期集合完全一致。按 PDF 筛选移除：确认页“涉及 15 本书／格式：PDF／将删除 15 个应用内副本”，确认后清单为空，`cache_cleanup` 无残留。
+- 每次成功提交下载或移除后都退出了选择模式。本节下载／移除后的“已提交…”“已移除…”提示行文字来自修改前版本，该提示行已按下文移除。
+- 结束时队列中 20 个副本任务（1＋1＋3＋15）、50 个可见封面任务和 1 个手动同步均为完成，`book-staging` 为空。测试书库 620 个文件操作前后的 SHA-256 列表逐字节相同（`source-before.sha256`／`source-after.sha256`）。
+- 待用户确认：选择模式、确认页与墨水屏体验。debug 包与本轮设备数据在共同验收结束后卸载清理。AC07 写回提交部分留第四阶段。
+
+### 用户反馈后的修改：结果改用系统通知（Q57）
+
+用户在 PA6 上看到下载后的结果横幅，要求移除，如需反馈改用系统通知。改为：页面不显示结果提示行；成功提交下载或移除不另行提示，由书籍标记体现；没有可下载格式、提交被拒绝、移除失败、没有可操作书籍或书库已变化时，以一条可替换的系统通知（渠道“批量操作的问题”）说明原因，权限请求与打开通知共用。结论记入 [Q57](../../questions.md) 与 R26。
+
+同时为 [android-device-verification](../../.agents/skills/android-device-verification/SKILL.md) 的 helper 增加长按（`long-press` 子命令与 flow 的 `long_press` 步骤），与点击使用同样的前后置条件和双快照护栏，只作用于 `long-clickable` 节点。
+
+- 常规基线 `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`：`BUILD SUCCESSFUL`；JVM 153 项通过（`LibraryViewModelTest` 改为断言只有未完成情况产生通知、成功移除无通知）；lint 0 错误、5 项新版本提示。
+- helper 离线回归 `python3 -m unittest discover -s .agents/skills/android-device-verification/scripts -p 'test_*.py'`：69 项通过（新增 3 项：长按只作用于可长按节点并沿用目标稳定性、时长校验，flow 在首个动作前校验长按步骤，ADB 以一次原地 `input swipe` 发送）。
+- PA6（`192.168.0.72:41899`，`adb install -r` 覆盖安装保留授权，`am instrument -w -r`）：`LibraryScreenTest` 与 `CacheMaintenanceTest` **OK，46 tests**（输出 `app/build/verification/phase3-step06-notice/instrument.txt`）。`LibraryScreenTest` 的批量下载用例经 `MainScreen` 收到一条通知“1 本没有可下载的格式，未下载”，页面无提示行；移除用例确认后退出选择且无通知。
+- 真机 helper：`flow --elements-only` 长按书籍 5 后确认“已选”计数出现，再点“完成”回到图书馆，2 步全部确认。随后用 `pm grant` 为 debug 包授予通知权限，搜索 “Archive 38”，以 `long-press` 选中无格式的书籍 43 并点下载：选择保留、页面无横幅，`dumpsys notification` 中 debug 包 id 11、渠道 `batch-problems`，标题“批量操作未全部完成”，正文“1 本没有可下载的格式，未下载”。
+
+### 用户反馈后的修改：“更多”改为右上角弹出菜单
+
+用户认为选择模式的“更多”只有两项，不必占据整页内容区。改为顶栏下方右端的小弹出菜单（宽 240dp，依内容高度，不分页），书籍页面仍可见；点菜单外或系统返回关闭菜单，点外部不会切换被点到的书籍。关闭层与菜单是并列节点，菜单行保持各自的无障碍／测试节点。
+
+- `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`：`BUILD SUCCESSFUL`，lint 无新增问题。
+- PA6 `LibraryScreenTest` **OK，30 tests**（输出 `app/build/verification/phase3-step06-popup/instrument.txt`）。文件夹选择用例新增：菜单宽 240dp、右缘距屏幕 4dp、上缘在顶栏下方，页面内容仍显示；点菜单外关闭且已选数量不变，系统返回同样只关闭菜单。首版把菜单放在可点击的关闭层内，子节点语义被合并、测试找不到菜单，已改为并列结构后通过。
+- 真机 helper：`flow --elements-only` 长按书籍 5 后点“更多操作”，2 步全部确认；截图显示菜单位于右上角，列出写回不可用原因、禁用的“标为已读”和“移除下载”，左侧书籍仍可见。两次系统返回依次关闭菜单、退出选择，回到图书馆标题。

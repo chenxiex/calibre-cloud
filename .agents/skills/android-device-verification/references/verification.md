@@ -56,3 +56,10 @@ ADB 短诊断记录命令类别、阶段、耗时、预算及状态，保留最�
 - helper `--help`：新参数可见；`git diff --check` 通过。
 
 本次没有连接设备、安装 debug 包、采集页面或执行真实点击，因此不宣称真机超时已消除。新版 helper 的实际延迟与恢复效果待下一轮已授权真机验收采集；步骤 09 的既有实机结果不作为新版 helper 的通过证据。已恢复查询问题汇总记录，需要处理连接／未知动作才单独报告。
+
+## 2026-10-08：长按
+
+第三阶段步骤 06 的选择模式需要长按，此前只能在会话临时脚本里用裸 `input swipe` 执行。现为 helper 增加 `long-press` 子命令和 flow 的 `long_press` 步骤：参数与 `tap` 相同，另有 `--hold-ms`／`hold_ms`（默认 1000，500–5000 毫秒）；沿目标向上寻找 `long-clickable` 节点，其余前后置条件、双快照、焦点与遮挡检查与点击共用，输入以一次原地 `input swipe` 发送且不重发。遮挡判断同时把其它可长按节点视为覆盖。
+
+- `python3 -m unittest discover -s .agents/skills/android-device-verification/scripts -p 'test_*.py'`：**69 项通过**（新增 3 项，见 `test_safety.py`）。
+- PA6／API 34 实机：`flow --elements-only` 中长按书籍并确认选择计数出现、再点击“完成”返回，2 步全部确认；单次 `long-press` 命令选中搜索结果中的书籍，后置条件确认。详见[第三阶段记录](../../../../app/verification/phase-3.md)。

@@ -2,6 +2,7 @@ package io.github.chenxiex.calibrecloud.library
 
 import io.github.chenxiex.calibrecloud.metadata.LibraryRevision
 import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
+import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.model.LibraryId
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.storage.api.DownloadedCopy
@@ -39,6 +40,12 @@ class LibraryQueryService(
     suspend fun query(request: LibraryRequest): LibraryQueryResult = withContext(compute) {
         val index = index() ?: return@withContext LibraryQueryResult.Unavailable(LibraryProblem.NO_METADATA)
         index.query(request, copies.list(index.revision.identity.id))
+    }
+
+    /** Expands a selection on the level [request] shows; see [LibraryIndex.expand]. */
+    suspend fun expand(request: LibraryRequest, folders: Set<FolderKey>, books: Set<BookKey>): SelectionResult = withContext(compute) {
+        val index = index() ?: return@withContext SelectionResult.Unavailable(LibraryProblem.NO_METADATA)
+        index.expand(request, folders, books, copies.list(index.revision.identity.id))
     }
 
     /** Null when there is no complete import. */

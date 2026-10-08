@@ -16,6 +16,7 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
@@ -68,6 +69,11 @@ import io.github.chenxiex.calibrecloud.state.SearchHistoryStore
 import io.github.chenxiex.calibrecloud.storage.api.CompleteCopyLocation
 import io.github.chenxiex.calibrecloud.storage.api.DownloadedCopy
 import io.github.chenxiex.calibrecloud.storage.api.SourceAvailability
+import io.github.chenxiex.calibrecloud.storage.cache.CleanupKind
+import io.github.chenxiex.calibrecloud.storage.cache.CleanupPlan
+import io.github.chenxiex.calibrecloud.library.Categorization
+import io.github.chenxiex.calibrecloud.library.LibraryFilters
+import androidx.compose.ui.test.longClick
 import io.github.chenxiex.calibrecloud.tasks.api.FrozenSet
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -79,6 +85,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.emptyFlow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -137,7 +144,23 @@ class LibraryScreenTest {
             override suspend fun awaitFinished(task: TaskId) = finished.await()
             override suspend fun wake() {}
         }
-        return LibraryViewModel({ selection }, LibraryQueryService(imports, LibraryCopies { copies }, Dispatchers.Default), covers, emptyFlow(), history)
+        return LibraryViewModel({ selection }, LibraryQueryService(imports, LibraryCopies { copies }, Dispatchers.Default), covers, emptyFlow(),
+            history, batch)
+    }
+
+    /** Records batch submissions; removal plans cover one EPUB copy per book. */
+    private val batch = object : LibraryBatch {
+        override val readWriteAvailable = false
+        val downloads = mutableListOf<CopyKey>()
+        val previews = mutableListOf<Set<BookFormat>?>()
+        val removed = mutableListOf<CleanupPlan>()
+        override suspend fun download(key: CopyKey, selectionToken: UUID) = true.also { downloads += key }
+        override suspend fun wake() {}
+        override suspend fun previewRemoval(books: Set<BookKey>, formats: Set<BookFormat>?): CleanupPlan {
+            previews += formats
+            return CleanupPlan(CleanupKind.COPIES, token, setOf(libraryId), books.map { CopyKey(it, epub) }.toSet(), 4096, books, formats, libraryId)
+        }
+        override suspend fun remove(plan: CleanupPlan) = true.also { removed += plan }
     }
 
     /** Copies exist for [available] keys; downloads stay queued in [tasks] until a test finishes them. */
@@ -790,5 +813,156 @@ class LibraryScreenTest {
         compose.waitUntil(10_000) { attempts == 2 }
         compose.onNodeWithTag("nav_more").performClick()
         compose.onNodeWithTag("open_warning_1", useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    private fun longPress(tag: String) = compose.onNodeWithTag(tag).performTouchInput { longClick() }
+
+    private fun back() = compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
+
+    @Test
+    fun longPressStartsSelectionTapsToggleAcrossPagesAndDoneOrBackEndsIt() {
+        library((1..20).map { book(it) })
+        val opened = mutableListOf<CopyKey>()
+        val model = model()
+        compose.setContent { Box(Modifier.size(360.dp, 560.dp)) { LibraryScreen(model, onOpen = { key, _ -> opened += key }) {} } }
+        awaitTag("book_20")
+        longPress("book_20")
+        awaitTag("selection_top_bar")
+        // Search, filters and view cannot change the level while selecting.
+        compose.onNodeWithTag("library_search_button").assertDoesNotExist()
+        compose.onNodeWithTag("library_filter_button").assertDoesNotExist()
+        compose.onNodeWithTag("library_view_button").assertDoesNotExist()
+        compose.onNodeWithTag("book_20").assertIsSelected()
+        compose.waitUntil(10_000) { model.selectedBooks == 1 }
+        compose.onNodeWithTag("selection_count").assertTextEquals("已选 1 本")
+        compose.onNodeWithTag("book_19").performClick()
+        compose.waitUntil(10_000) { model.selectedBooks == 2 }
+        compose.onNodeWithTag("book_19").assertIsSelected()
+        compose.onNodeWithTag("library_next_page").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("book_20").fetchSemanticsNodes().isEmpty() }
+        val other = compose.onAllNodes(tagged("book_")).fetchSemanticsNodes().first().config[SemanticsProperties.TestTag]
+        compose.onNodeWithTag(other).assertIsNotSelected()
+        compose.onNodeWithTag(other).performClick()
+        compose.waitUntil(10_000) { model.selectedBooks == 3 }
+        compose.onNodeWithTag(other).performClick()
+        compose.waitUntil(10_000) { model.selectedBooks == 2 }
+        compose.onNodeWithTag("library_previous_page").performClick()
+        awaitTag("book_20")
+        compose.onNodeWithTag("book_20").assertIsSelected()
+        compose.runOnIdle { assertTrue(opened.isEmpty()) }
+        compose.onNodeWithTag("selection_done").performClick()
+        awaitTag("library_title")
+        compose.onNodeWithTag("selection_top_bar").assertDoesNotExist()
+        compose.onNodeWithTag("book_20").performClick()
+        compose.waitUntil(10_000) { opened == listOf(key(20)) }
+        longPress("book_19")
+        awaitTag("selection_top_bar")
+        back()
+        awaitTag("library_title")
+        compose.onNodeWithTag("selection_box").assertDoesNotExist()
+    }
+
+    @Test
+    fun aChosenFolderCountsItsFilteredBooksOnceAndTheMarkFollowsTheirReadState() {
+        // Book 1 is read; every book is on the same shelf and in an odd or even tag.
+        library((1..4).map { book(it) })
+        val model = model()
+        show(model)
+        awaitTag("book_4")
+        compose.runOnIdle { model.categorize(Categorization.Column(shelf)) }
+        awaitTag("folder_架")
+        longPress("folder_架")
+        compose.waitUntil(10_000) { model.selectedBooks == 4 }
+        compose.onNodeWithTag("selection_more").performClick()
+        awaitTag("selection_menu")
+        // Mixed: only "mark read" is offered, disabled until source write-back exists.
+        compose.onNodeWithTag("selection_mark_read").assertIsNotEnabled()
+        compose.onNodeWithTag("selection_mark_unread").assertDoesNotExist()
+        compose.onNode(hasAnyAncestor(hasTestTag("selection_mark_reason")) and hasText("尚未提供", substring = true)).assertExists()
+        // A small popup at the top bar's right end; the page stays visible beside and under it.
+        val menu = compose.onNodeWithTag("selection_menu").getUnclippedBoundsInRoot()
+        assertEquals(240f, (menu.right - menu.left).value, 0.5f)
+        assertEquals(356f, menu.right.value, 0.5f)
+        assertEquals(56f, menu.top.value, 0.5f)
+        compose.onNodeWithTag("folder_架").assertIsDisplayed()
+        // A tap outside closes the menu without toggling what it lands on.
+        compose.onNodeWithTag("folder_架").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("selection_menu").fetchSemanticsNodes().isEmpty() }
+        assertEquals(4, model.selectedBooks)
+        compose.onNodeWithTag("selection_more").performClick()
+        awaitTag("selection_menu")
+        back()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("selection_menu").fetchSemanticsNodes().isEmpty() }
+        assertEquals(4, model.selectedBooks)
+        back()
+        awaitTag("library_title")
+        compose.runOnIdle { model.categorize(Categorization.None) }
+        awaitTag("book_1")
+        longPress("book_1")
+        compose.waitUntil(10_000) { model.selectedBooks == 1 }
+        compose.onNodeWithTag("selection_more").performClick()
+        // All read: "mark unread" replaces "mark read".
+        awaitTag("selection_mark_unread")
+        compose.onNodeWithTag("selection_mark_unread").assertIsNotEnabled()
+        compose.onNodeWithTag("selection_mark_read").assertDoesNotExist()
+    }
+
+    @Test
+    fun downloadingTheSelectionSubmitsEachBookAndNotifiesOnlyWhatWasNotDone() {
+        library(listOf(book(1), book(2), book(3, formats = false)))
+        copies = listOf(copyOf(key(2), "书籍2"))
+        val model = model()
+        val notices = mutableListOf<BatchNotice>()
+        compose.setContent {
+            MainScreen(model, OpenViewModel(opening), { LaunchOutcome.STARTED }, notifyBatch = { notices += it }) { page, _ -> Text("更多页 $page") }
+        }
+        awaitTag("book_3")
+        longPress("book_1")
+        compose.onNodeWithTag("book_2").performClick()
+        compose.onNodeWithTag("book_3").performClick()
+        compose.waitUntil(10_000) { model.selectedBooks == 3 }
+        compose.onNodeWithTag("selection_download").performClick()
+        // Only what was not done reaches a system notification; nothing is shown in the page.
+        compose.waitUntil(10_000) { notices.size == 1 }
+        compose.runOnIdle {
+            assertEquals("1 本没有可下载的格式，未下载", batchNoticeText(compose.activity, notices.single()))
+            assertEquals(listOf(key(1)), batch.downloads)
+            assertNull(model.notice)
+        }
+        compose.onNodeWithTag("selection_top_bar").assertDoesNotExist()
+    }
+
+    @Test
+    fun removalShowsTheFrozenFormatScopeAndOnlyConfirmationRemoves() {
+        library(listOf(book(1), book(2)))
+        copies = listOf(copyOf(key(1), "书籍1"))
+        val model = model()
+        show(model)
+        awaitTag("book_2")
+        compose.runOnIdle { model.updateFilters { LibraryFilters(formats = setOf(epub)) } }
+        longPress("book_1")
+        compose.onNodeWithTag("book_2").performClick()
+        compose.waitUntil(10_000) { model.selectedBooks == 2 }
+        compose.onNodeWithTag("selection_more").performClick()
+        compose.onNodeWithTag("selection_remove").performClick()
+        awaitTag("removal_dialog")
+        compose.onNodeWithTag("removal_books", useUnmergedTree = true).assertTextEquals("涉及 2 本书")
+        compose.onNodeWithTag("removal_formats", useUnmergedTree = true).assertTextEquals("格式：EPUB")
+        compose.onNodeWithTag("removal_copies", useUnmergedTree = true).assertTextContains("将删除 2 个应用内副本", substring = true)
+        compose.onNodeWithTag("removal_cancel").performClick()
+        compose.onNodeWithTag("removal_dialog").assertDoesNotExist()
+        compose.onNodeWithTag("selection_top_bar").assertExists()
+        compose.runOnIdle { assertTrue(batch.removed.isEmpty()) }
+        compose.onNodeWithTag("selection_more").performClick()
+        compose.onNodeWithTag("selection_remove").performClick()
+        awaitTag("removal_confirm")
+        compose.onNodeWithTag("removal_confirm").performClick()
+        compose.waitUntil(10_000) { batch.removed.isNotEmpty() && model.selected == null }
+        compose.runOnIdle {
+            assertNull(model.notice)
+            assertEquals(listOf<Set<BookFormat>?>(setOf(epub), setOf(epub)), batch.previews)
+            assertEquals(setOf(epub), batch.removed.single().formats)
+        }
+        compose.onNodeWithTag("selection_top_bar").assertDoesNotExist()
     }
 }

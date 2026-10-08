@@ -168,3 +168,39 @@ internal object OpenNotifications {
         context.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION)
     }
 }
+
+/** The text of a batch notice: what was not done and why. */
+internal fun batchNoticeText(context: Context, notice: BatchNotice): String = when (notice) {
+    is BatchNotice.Downloads -> listOfNotNull(
+        notice.noFormat.takeIf { it > 0 }?.let { context.resources.getQuantityString(R.plurals.notice_downloads_no_format, it, it) },
+        notice.rejected.takeIf { it > 0 }?.let { context.resources.getQuantityString(R.plurals.notice_downloads_rejected, it, it) },
+    ).joinToString(context.getString(R.string.notice_separator))
+    BatchNotice.RemovalFailed -> context.getString(R.string.notice_removal_failed)
+    BatchNotice.NoBooks -> context.getString(R.string.notice_no_books)
+    BatchNotice.Unavailable -> context.getString(R.string.notice_unavailable)
+}
+
+/** Posts a batch action that was not fully done as one replaceable notification; tapping it brings the app back. */
+internal object BatchNotifications {
+    private const val CHANNEL = "batch-problems"
+    private const val NOTIFICATION = 11
+
+    fun post(context: Context, notice: BatchNotice) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(NotificationChannel(CHANNEL,
+            context.getString(R.string.notice_channel), NotificationManager.IMPORTANCE_DEFAULT))
+        val target = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        val intent = PendingIntent.getActivity(context, NOTIFICATION, target, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val text = batchNoticeText(context, notice)
+        val notification = NotificationCompat.Builder(context, CHANNEL)
+            .setSmallIcon(R.drawable.ic_launcher)
+            .setContentTitle(context.getString(R.string.notice_title))
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+            .setContentIntent(intent)
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_ERROR)
+            .build()
+        if (OpenNotifications.allowed(context)) manager.notify(NOTIFICATION, notification)
+    }
+}

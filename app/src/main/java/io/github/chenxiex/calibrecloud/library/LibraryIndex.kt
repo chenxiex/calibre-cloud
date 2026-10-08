@@ -70,34 +70,20 @@ class LibraryIndex(private val library: ImportedLibrary) {
 
     fun query(request: LibraryRequest, copies: List<DownloadedCopy>): LibraryQueryResult {
         request.expected?.let { if (it != revision) return LibraryQueryResult.Stale }
-        val cached: Map<BookKey, Map<BookFormat, DownloadedCopy>> = copies
-            .filter { it.key.book.libraryId == libraryId }
-            .groupBy({ it.key.book }, { it.key.format to it }).mapValues { it.value.toMap() }
-        val scope = request.searchScope
-        if (scope is SearchScope.Column && scope.id !in searchableColumns) return problem(LibraryProblem.SEARCH_COLUMN_INVALID)
-        val categorization = request.categorization
-        if (categorization is Categorization.Column && categorization.id !in searchableColumns) return problem(LibraryProblem.CATEGORY_COLUMN_INVALID)
-        val filters = request.filters
-        if (filters.read != null && library.readColumnStatus != ReadColumnStatus.VALID) {
-            return problem(LibraryProblem.READ_FILTER_UNAVAILABLE)
-        }
+        val cached = cachedBy(copies)
+        invalid(request)?.let { return problem(it) }
 
         val keywords = keywords(request.search)
-        val matched = entries.filter { entry ->
-            matchesSearch(entry, keywords, scope) && matchesFilters(entry, filters, resolve(entry, cached[entry.key], request))
-        }
+        val matched = matching(request, keywords, cached)
         val collator = Collator.getInstance(Locale.ROOT).apply { strength = Collator.TERTIARY }
         val row = { entry: Entry -> toRow(entry, resolve(entry, cached[entry.key], request)) }
 
+        val categorization = request.categorization
         if (keywords.isNotEmpty() || categorization == Categorization.None) {
             return books(request, matched, collator, row)
         }
         val groups = LinkedHashMap<FolderKey, MutableList<Entry>>()
-        matched.forEach { entry ->
-            val values = categoryValues(entry, categorization)
-            if (values.isEmpty()) groups.getOrPut(FolderKey(null)) { mutableListOf() }.add(entry)
-            else values.forEach { groups.getOrPut(FolderKey(it)) { mutableListOf() }.add(entry) }
-        }
+        matched.forEach { entry -> folderKeys(entry, categorization).forEach { groups.getOrPut(it) { mutableListOf() }.add(entry) } }
         val folder = request.folder
         if (folder != null) return books(request, groups[folder].orEmpty(), collator, row)
 
@@ -116,6 +102,62 @@ class LibraryIndex(private val library: ImportedLibrary) {
         }
         return LibraryQueryResult.Folders(revision, ordered.size, request.offset, page)
     }
+
+    /**
+     * Expands a selection made on the level [request] shows into the deduplicated books an operation
+     * acts on (R26): [books] count only while they still match that level, and each of [folders] adds
+     * the books it holds under the request's search and filters. Nothing outside the result, and no book
+     * added by a later import, joins once the caller has frozen it.
+     */
+    fun expand(request: LibraryRequest, folders: Set<FolderKey>, books: Set<BookKey>, copies: List<DownloadedCopy>): SelectionResult {
+        request.expected?.let { if (it != revision) return SelectionResult.Stale }
+        val cached = cachedBy(copies)
+        invalid(request)?.let { return SelectionResult.Unavailable(it) }
+        val keywords = keywords(request.search)
+        val matched = matching(request, keywords, cached)
+        val categorization = request.categorization.takeIf { keywords.isEmpty() } ?: Categorization.None
+        val folder = request.folder
+        val level = if (categorization != Categorization.None && folder != null) {
+            matched.filter { folder in folderKeys(it, categorization) }
+        } else matched
+        val atFolders = categorization != Categorization.None && folder == null
+        val chosen = level.filter { entry ->
+            entry.key in books || (atFolders && folderKeys(entry, categorization).any { it in folders })
+        }
+        val collator = Collator.getInstance(Locale.ROOT).apply { strength = Collator.TERTIARY }
+        return SelectionResult.Expanded(SelectionExpansion(revision, readFilterAvailable,
+            chosen.sortedWith(bookOrder(request.sort, collator)).map { entry ->
+                val resolved = resolve(entry, cached[entry.key], request)
+                // R24: the batch candidate is the best source format, whether or not another format is cached.
+                val download = resolved.candidates.firstOrNull { it in resolved.sourceFormats }
+                SelectedBook(entry.key, entry.read, download, download != null && download in resolved.cached)
+            }))
+    }
+
+    private fun cachedBy(copies: List<DownloadedCopy>): Map<BookKey, Map<BookFormat, DownloadedCopy>> = copies
+        .filter { it.key.book.libraryId == libraryId }
+        .groupBy({ it.key.book }, { it.key.format to it }).mapValues { it.value.toMap() }
+
+    private fun invalid(request: LibraryRequest): LibraryProblem? {
+        val scope = request.searchScope
+        val categorization = request.categorization
+        return when {
+            scope is SearchScope.Column && scope.id !in searchableColumns -> LibraryProblem.SEARCH_COLUMN_INVALID
+            categorization is Categorization.Column && categorization.id !in searchableColumns -> LibraryProblem.CATEGORY_COLUMN_INVALID
+            request.filters.read != null && library.readColumnStatus != ReadColumnStatus.VALID -> LibraryProblem.READ_FILTER_UNAVAILABLE
+            else -> null
+        }
+    }
+
+    private fun matching(request: LibraryRequest, keywords: List<String>, cached: Map<BookKey, Map<BookFormat, DownloadedCopy>>) =
+        entries.filter { entry ->
+            matchesSearch(entry, keywords, request.searchScope) &&
+                matchesFilters(entry, request.filters, resolve(entry, cached[entry.key], request))
+        }
+
+    /** The folders a book appears in; a book without any value is in the no-value folder only. */
+    private fun folderKeys(entry: Entry, categorization: Categorization): List<FolderKey> =
+        categoryValues(entry, categorization).map { FolderKey(it) }.ifEmpty { listOf(FolderKey(null)) }
 
     private fun books(request: LibraryRequest, source: List<Entry>, collator: Collator, row: (Entry) -> BookRow): LibraryQueryResult {
         val sorted = source.sortedWith(bookOrder(request.sort, collator))

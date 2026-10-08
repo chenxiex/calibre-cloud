@@ -53,7 +53,7 @@ private const val TAB_MORE = 1
  * [more] draws the "更多" page for the given temporary page index. A book being opened shows its
  * mark: a cancellable progress mark while it downloads, a warning when it needs the user, whose
  * reason [notify] posts as a system notification. [moreRequest] (from such a notification) shows a
- * "更多" page once. [startReader] hands a ready copy to the system, and leaving the page revokes the
+ * "更多" page once. [notifyBatch] posts a batch action of the library that was not fully done. [startReader] hands a ready copy to the system, and leaving the page revokes the
  * wait so a finished download never opens a reader later.
  */
 @OptIn(ExperimentalComposeUiApi::class)
@@ -63,6 +63,7 @@ internal fun MainScreen(
     open: OpenViewModel,
     startReader: (OpenLaunch) -> LaunchOutcome,
     notify: (OpenNotice) -> Unit = {},
+    notifyBatch: (BatchNotice) -> Unit = {},
     moreRequest: Int? = null,
     onMoreRequestHandled: () -> Unit = {},
     more: @Composable (page: Int, onPage: (Int) -> Unit) -> Unit,
@@ -86,6 +87,13 @@ internal fun MainScreen(
         if (notice != null) {
             notify(notice)
             open.noticeHandled(notice.id)
+        }
+    }
+    val batchNotice = library.notice
+    LaunchedEffect(batchNotice) {
+        if (batchNotice != null) {
+            notifyBatch(batchNotice)
+            library.noticeHandled(batchNotice)
         }
     }
     LaunchedEffect(moreRequest) {

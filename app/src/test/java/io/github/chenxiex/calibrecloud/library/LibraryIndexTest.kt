@@ -248,4 +248,79 @@ class LibraryIndexTest {
         val reconfigured = LibraryIndex(ImportedLibrary(identity, expected.generation, 1, ParsedLibrary(null, listOf(book(1, "A")), columns), null, ReadColumnStatus.NOT_CONFIGURED))
         assertEquals(LibraryQueryResult.Stale, reconfigured.query(base.copy(expected = expected), emptyList()))
     }
+
+    private fun SelectionResult.books() = (this as SelectionResult.Expanded).expansion.books
+    private fun ImportedBook.key() = BookKey(libraryId, sourceId, sourceUuid)
+
+    @Test
+    fun selectedFoldersExpandToDistinctBooksUnderTheCurrentSearchAndFilters() {
+        val both = book(1, "Both", tags = listOf("one", "two"))
+        val one = book(2, "One", tags = listOf("one"), formats = listOf(pdf to 1L))
+        val two = book(3, "Two", tags = listOf("two"))
+        val untagged = book(4, "Untagged")
+        val index = library(listOf(both, one, two, untagged))
+        val tags = base.copy(categorization = Categorization.Tags, sort = BookSort(BookSortKey.TITLE, true))
+        // A book in two chosen folders is acted on once.
+        assertEquals(listOf(both.key(), one.key(), two.key()),
+            index.expand(tags, setOf(FolderKey("one"), FolderKey("two")), emptySet(), emptyList()).books().map { it.key })
+        // Filtered-out books stay out of a chosen folder; the fallback folder holds only untagged books.
+        assertEquals(listOf(both.key()),
+            index.expand(tags.copy(filters = LibraryFilters(formats = setOf(epub))), setOf(FolderKey("one")), emptySet(), emptyList()).books().map { it.key })
+        assertEquals(listOf(untagged.key()), index.expand(tags, setOf(FolderKey(null)), emptySet(), emptyList()).books().map { it.key })
+        // Inside a folder, chosen books count only while they still belong to it and match.
+        val inOne = tags.copy(folder = FolderKey("one"))
+        assertEquals(listOf(one.key()), index.expand(inOne, emptySet(), setOf(one.key(), two.key()), emptyList()).books().map { it.key })
+        // Books chosen on a search result count only while they match it.
+        val searched = base.copy(search = "one")
+        assertEquals(listOf(one.key()), index.expand(searched, emptySet(), setOf(one.key(), two.key()), emptyList()).books().map { it.key })
+        // A chosen book that a later import removed is dropped; a frozen expansion is not recomputed by the caller.
+        val added = book(5, "New", tags = listOf("one"))
+        val grown = library(listOf(both, two, added))
+        assertEquals(listOf(both.key(), added.key()),
+            grown.expand(tags, setOf(FolderKey("one")), setOf(one.key()), emptyList()).books().map { it.key })
+        assertEquals(SelectionResult.Unavailable(LibraryProblem.CATEGORY_COLUMN_INVALID),
+            index.expand(base.copy(categorization = Categorization.Column(readColumn)), emptySet(), emptySet(), emptyList()))
+    }
+
+    @Test
+    fun batchFormatIsTheBestSourceFormatInScopeEvenWhenAnotherFormatIsCached() {
+        val both = book(1, "Both", formats = listOf(epub to 1L, pdf to 2L))
+        val pdfOnly = book(2, "Pdf", formats = listOf(pdf to 2L))
+        val none = book(3, "None", formats = emptyList())
+        val index = library(listOf(both, pdfOnly, none))
+        val all = setOf(both.key(), pdfOnly.key(), none.key())
+        fun expanded(request: LibraryRequest, copies: List<DownloadedCopy>) =
+            index.expand(request, emptySet(), all, copies).books().associateBy { it.key }
+        val cachedPdf = listOf(copy(both, pdf))
+        val unfiltered = expanded(base, cachedPdf)
+        // The cached PDF is the default to open, but a batch download still takes EPUB by priority.
+        assertEquals(SelectedBook(both.key(), false, epub, downloaded = false), unfiltered.getValue(both.key()))
+        assertEquals(SelectedBook(pdfOnly.key(), false, pdf, downloaded = false), unfiltered.getValue(pdfOnly.key()))
+        assertEquals(SelectedBook(none.key(), false, null, downloaded = false), unfiltered.getValue(none.key()))
+        val pdfScope = expanded(base.copy(filters = LibraryFilters(formats = setOf(pdf))), cachedPdf)
+        assertEquals(SelectedBook(both.key(), false, pdf, downloaded = true), pdfScope.getValue(both.key()))
+        assertEquals(setOf(both.key(), pdfOnly.key()), pdfScope.keys)
+        val preferPdf = expanded(base.copy(formatPriority = listOf(pdf, epub)), emptyList())
+        assertEquals(pdf, preferPdf.getValue(both.key()).download)
+    }
+
+    @Test
+    fun readMarkFollowsTheLastImportForAllReadAllUnreadAndMixedSets() {
+        val read = book(1, "Read", values = mapOf(1L to ImportedColumnValue.Bool(true)))
+        val unread = book(2, "Unread", values = mapOf(1L to ImportedColumnValue.Bool(false)))
+        val empty = book(3, "Empty")
+        val books = listOf(read, unread, empty)
+        fun choice(chosen: List<ImportedBook>, status: CustomColumnId? = readColumn, write: Boolean = true): ReadMarkChoice {
+            val result = library(books, status).expand(base, emptySet(), chosen.map { it.key() }.toSet(), emptyList())
+            return ReadMarkChoice.of((result as SelectionResult.Expanded).expansion, write)
+        }
+        assertEquals(ReadMarkChoice(ReadMarkAction.MARK_UNREAD, null), choice(listOf(read)))
+        // An empty value counts as unread.
+        assertEquals(ReadMarkChoice(ReadMarkAction.MARK_READ, null), choice(listOf(unread, empty)))
+        assertEquals(ReadMarkChoice(ReadMarkAction.MARK_READ, null), choice(listOf(read, unread)))
+        assertEquals(ReadMarkChoice(ReadMarkAction.MARK_READ, ReadMarkBlock.NO_BOOKS), choice(emptyList()))
+        assertEquals(ReadMarkBlock.COLUMN_UNAVAILABLE, choice(listOf(read), status = null).blocked)
+        assertEquals(ReadMarkBlock.COLUMN_UNAVAILABLE, choice(listOf(read), status = CustomColumnId(2, "#topic")).blocked)
+        assertEquals(ReadMarkChoice(ReadMarkAction.MARK_UNREAD, ReadMarkBlock.WRITE_UNAVAILABLE), choice(listOf(read), write = false))
+    }
 }

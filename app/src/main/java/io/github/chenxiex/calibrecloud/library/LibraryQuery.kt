@@ -148,3 +148,45 @@ sealed interface LibraryQueryResult {
     /** The library, import generation or read column changed since the request's expectation. */
     data object Stale : LibraryQueryResult
 }
+
+/**
+ * One book of an expanded selection. [download] is the format a batch download takes: the
+ * highest-priority source format within the format filter, null when the book has none; [downloaded]
+ * says a complete copy of that format already exists. [read] is null without a valid read column.
+ */
+data class SelectedBook(val key: BookKey, val read: Boolean?, val download: BookFormat?, val downloaded: Boolean)
+
+/** The deduplicated books of a selection, in the level's book order. */
+data class SelectionExpansion(val revision: LibraryRevision, val readColumnValid: Boolean, val books: List<SelectedBook>)
+
+sealed interface SelectionResult {
+    data class Expanded(val expansion: SelectionExpansion) : SelectionResult
+    data class Unavailable(val problem: LibraryProblem) : SelectionResult
+    data object Stale : SelectionResult
+}
+
+enum class ReadMarkAction { MARK_READ, MARK_UNREAD }
+
+/** Why the read-state mark cannot be submitted, in the order they are reported. */
+enum class ReadMarkBlock { NO_BOOKS, COLUMN_UNAVAILABLE, WRITE_UNAVAILABLE }
+
+/** The one read-state operation offered for a selection, and why it is disabled when [blocked] is set. */
+data class ReadMarkChoice(val action: ReadMarkAction, val blocked: ReadMarkBlock?) {
+    companion object {
+        /**
+         * R26 on the last successful import: an all-read set offers "mark unread"; all unread (an empty
+         * value counts as unread) or mixed offers "mark read". Queued writes do not change the choice.
+         */
+        fun of(expansion: SelectionExpansion, writeAvailable: Boolean): ReadMarkChoice {
+            val books = expansion.books
+            val action = if (books.isNotEmpty() && books.all { it.read == true }) ReadMarkAction.MARK_UNREAD else ReadMarkAction.MARK_READ
+            val blocked = when {
+                books.isEmpty() -> ReadMarkBlock.NO_BOOKS
+                !expansion.readColumnValid -> ReadMarkBlock.COLUMN_UNAVAILABLE
+                !writeAvailable -> ReadMarkBlock.WRITE_UNAVAILABLE
+                else -> null
+            }
+            return ReadMarkChoice(action, blocked)
+        }
+    }
+}
