@@ -9,6 +9,7 @@ import io.github.chenxiex.calibrecloud.model.FormatResource
 import io.github.chenxiex.calibrecloud.model.LibraryId
 import io.github.chenxiex.calibrecloud.model.SourceFileLocator
 import io.github.chenxiex.calibrecloud.storage.api.DiagnosticId
+import io.github.chenxiex.calibrecloud.storage.api.LocationKeys
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.BookFailure
@@ -132,7 +133,7 @@ internal object TaskCodec {
                 UUID.fromString(json.getString("selection")), readBackend(json.getString("backend")),
                 UUID.fromString(json.getString("authorization")),
             ),
-            json.getString("operation"),
+            json.getString("operation").let { if (it in LEGACY_SYNC) TaskRequest.CandidateConfiguration.LIBRARY_SYNC else it },
             if (json.has("directory_item") && !json.isNull("directory_item")) json.getString("directory_item") else null,
             json.optInt("directory_page", 0),
         )
@@ -187,15 +188,10 @@ internal object TaskCodec {
 
     private fun version(value: FileVersion) = obj("backend" to backendCode(value.backend), "token" to value.token)
     private fun readVersion(json: JSONObject) = FileVersion(readBackend(json.getString("backend")), json.getString("token"))
-    private fun backendCode(value: BackendKind) = when (value) {
-        BackendKind.LOCAL -> "local"
-        BackendKind.ONEDRIVE -> "onedrive"
-    }
-    private fun readBackend(value: String) = when (value) {
-        "local" -> BackendKind.LOCAL
-        "onedrive" -> BackendKind.ONEDRIVE
-        else -> invalidTag()
-    }
+    private fun backendCode(value: BackendKind) = LocationKeys.backendCode(value)
+    private fun readBackend(value: String) = BackendKind.entries.singleOrNull { backendCode(it) == value } ?: invalidTag()
+    /** Per-backend sync operations stored before they became [TaskRequest.CandidateConfiguration.LIBRARY_SYNC]. */
+    private val LEGACY_SYNC = setOf("local_snapshot", "onedrive_snapshot")
 
     private fun commit(value: CommitState): JSONObject = when (value) {
         CommitState.NotCommitted -> obj("tag" to "not_committed")

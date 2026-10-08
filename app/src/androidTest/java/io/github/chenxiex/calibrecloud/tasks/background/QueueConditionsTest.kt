@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks.background
 
+import io.github.chenxiex.calibrecloud.storage.SourcePolicies
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
@@ -30,7 +31,7 @@ class QueueConditionsTest {
             assertTrue(state.bindValidated(state.select(local.location).token, local))
             assertTrue(state.bindValidated(state.select(cloud.location).token, cloud))
             var connected = false
-            val conditions = QueueConditions(context, database) { connected }
+            val conditions = QueueConditions(context, database, SourcePolicies.sources) { connected }
             assertTrue(conditions.waiting(record(TaskRequest.MetadataSync(local.id))).isEmpty())
             assertEquals(setOf(WaitingReason.NETWORK), conditions.waiting(record(TaskRequest.MetadataSync(cloud.id))))
             for (backend in BackendKind.entries) {
@@ -60,7 +61,7 @@ class QueueConditionsTest {
             var connected = false
             var calls = 0
             val queue = DurableTaskQueue(database, Dispatchers.IO)
-            val conditions = QueueConditions(context, database) { connected }
+            val conditions = QueueConditions(context, database, SourcePolicies.sources) { connected }
             val handler = object : TaskHandler {
                 override fun supports(request: TaskRequest) = request is TaskRequest.CandidateConfiguration
                 override fun controls(stage: TaskStage) = TaskControls(false, true, false, false)
@@ -72,7 +73,7 @@ class QueueConditionsTest {
                 }
             }
             val coordinator = TaskCoordinator(queue, listOf(handler), conditions::waiting)
-            val startup = StartupSync(state, coordinator) { session }
+            val startup = StartupSync(state, coordinator, io.github.chenxiex.calibrecloud.tasks.TestAuthorizations.of(state, { session }))
             val task = requireNotNull(startup.onMainOpened())
             val selected = state.current()
             coordinator.drain()

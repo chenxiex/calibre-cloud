@@ -76,7 +76,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        testInstrumentationRunner = "io.github.chenxiex.calibrecloud.AwakeTestRunner"
         testApplicationId = "io.github.chenxiex.calibrecloud.debug.test"
     }
 

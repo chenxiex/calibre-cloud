@@ -17,6 +17,7 @@ import io.github.chenxiex.calibrecloud.model.LibraryIdentity
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
+import io.github.chenxiex.calibrecloud.state.StateSchemaHistory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -82,7 +83,7 @@ class TaskSchemaMigrationTest {
                 val selected = state.select(identity.location)
                 assertTrue(state.bindValidated(selected.token, identity))
                 val db = database.writableDatabase
-                db.execSQL("INSERT INTO downloaded_copies VALUES (?, 1, ?, 'EPUB', ?, 'Fixture title', 23, 'local', 'fixture-version', 'unconfirmed')",
+                db.execSQL("INSERT INTO downloaded_copies(library_id,source_id,source_uuid,format,file_generation,title,size_bytes,version_backend,version_token,source_availability) VALUES (?, 1, ?, 'EPUB', ?, 'Fixture title', 23, 'local', 'fixture-version', 'unconfirmed')",
                     arrayOf(identity.id.value.toString(), bookUuid.toString(), fileGeneration.toString()))
                 val queue = DurableTaskQueue(database, Dispatchers.IO)
                 val sync = (queue.submit(TaskSubmission(TaskRequest.MetadataSync(identity.id), TaskOrigin.STARTUP_SYNC)) as SubmissionResult.Created).taskId
@@ -92,18 +93,13 @@ class TaskSchemaMigrationTest {
                 queue.update(sync) { it.copy(checkpoint = RecoveryCheckpoint(UUID.randomUUID(), FileVersion(BackendKind.LOCAL, "fixture-checkpoint"))) }
                 val records = queue.list()
                 val selection = state.current()
-                // Reconstruct the shipped v2 schema rather than retaining later migration tables.
-                io.github.chenxiex.calibrecloud.state.LegacyCacheSchemaFixture.downgradeToFour(db)
-                db.execSQL("DROP TABLE cover_cache")
-                db.execSQL("DROP TABLE metadata_books")
-                db.execSQL("DROP TABLE metadata_imports")
-                db.version = 2
+                StateSchemaHistory.downgrade(db, 2)
                 selection to records
             }
             ApplicationStateDatabase(context, name).use { database ->
                 val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
                 val queue = DurableTaskQueue(database, Dispatchers.IO)
-                assertEquals(8, database.readableDatabase.version)
+                assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
                 assertEquals(previous.first, state.current())
                 assertEquals(identity, state.binding(identity.id))
                 assertEquals(previous.second, queue.list())
@@ -121,6 +117,89 @@ class TaskSchemaMigrationTest {
                 val lastSequence = previous.second.maxOf { it.record.scheduling.sequence.value }
                 val later = queue.submit(TaskSubmission(TaskRequest.CoverLoad(BookKey(identity.id, 2, UUID.randomUUID())), TaskOrigin.USER_OPEN)) as SubmissionResult.Created
                 assertTrue(queue.get(later.taskId)!!.record.scheduling.sequence.value > lastSequence)
+                database.readableDatabase.rawQuery("PRAGMA foreign_key_check", null).use { assertEquals(0, it.count) }
+            }
+        } finally {
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun versionEightUpgradeAddsRequestCostStateWithoutTouchingExistingRows() = runBlocking<Unit> {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "request-cost-migration-${UUID.randomUUID()}.db"
+        val identity = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.OneDrive("account", "drive", "root"), UUID.randomUUID())
+        try {
+            val previous = ApplicationStateDatabase(context, name).use { database ->
+                val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
+                assertTrue(state.bindValidated(state.select(identity.location).token, identity))
+                val db = database.writableDatabase
+                db.execSQL("INSERT INTO downloaded_copies(library_id,source_id,source_uuid,format,file_generation,title,size_bytes,version_backend,version_token,source_availability) VALUES (?, 1, ?, 'EPUB', ?, 'Fixture title', 23, 'onedrive', 'fixture-version', 'available')",
+                    arrayOf(identity.id.value.toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString()))
+                db.execSQL("INSERT INTO metadata_imports(library_id,import_generation,imported_at,payload) VALUES (?, ?, 7, '{}')",
+                    arrayOf(identity.id.value.toString(), UUID.randomUUID().toString()))
+                val queue = DurableTaskQueue(database, Dispatchers.IO)
+                queue.submit(TaskSubmission(TaskRequest.CoverLoad(BookKey(identity.id, 1, UUID.randomUUID())), TaskOrigin.VISIBLE_COVER))
+                val copies = state.listCopies(identity.id, 10, 0)
+                val records = queue.list()
+                StateSchemaHistory.downgrade(db, 8)
+                copies to records
+            }
+            ApplicationStateDatabase(context, name).use { database ->
+                val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
+                assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
+                assertEquals(previous.first, state.listCopies(identity.id, 10, 0))
+                assertEquals(previous.second, DurableTaskQueue(database, Dispatchers.IO).list())
+                database.readableDatabase.rawQuery("SELECT calibre_recorded, calibre_modified, calibre_size FROM downloaded_copies", null).use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals(0, it.getInt(0))
+                    assertTrue(it.isNull(1) && it.isNull(2))
+                }
+                database.readableDatabase.rawQuery("SELECT imported_at, source_version FROM metadata_imports", null).use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals(7L, it.getLong(0))
+                    assertTrue(it.isNull(1))
+                }
+                database.readableDatabase.rawQuery("SELECT COUNT(*) FROM source_throttle", null).use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals(0, it.getInt(0))
+                }
+            }
+        } finally {
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun versionNineUpgradeStoresLocationsAsOpaqueKeysWithoutTouchingRows() = runBlocking<Unit> {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "location-key-migration-${UUID.randomUUID()}.db"
+        val remote = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.OneDrive("account", "drive", "root"), UUID.randomUUID())
+        val local = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.Local("test.documents", "fixture-root"), UUID.randomUUID())
+        try {
+            val previous = ApplicationStateDatabase(context, name).use { database ->
+                val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
+                assertTrue(state.bindValidated(state.select(remote.location).token, remote))
+                assertTrue(state.bindValidated(state.select(local.location).token, local))
+                database.writableDatabase.execSQL("INSERT INTO downloaded_copies(library_id,source_id,source_uuid,format,file_generation,title,size_bytes,version_backend,version_token,source_availability,calibre_recorded,calibre_size) VALUES (?, 1, ?, 'EPUB', ?, 'Fixture title', 23, 'onedrive', 'fixture-version', 'available', 1, 23)",
+                    arrayOf(remote.id.value.toString(), UUID.randomUUID().toString(), UUID.randomUUID().toString()))
+                val selection = state.current()
+                val copies = state.listCopies(remote.id, 10, 0)
+                StateSchemaHistory.downgrade(database.writableDatabase, 9)
+                selection to copies
+            }
+            ApplicationStateDatabase(context, name).use { database ->
+                val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
+                assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
+                assertEquals(previous.first, state.current())
+                assertEquals(listOf(remote), state.bindingsAt(remote.location))
+                assertEquals(listOf(local), state.bindingsAt(local.location))
+                assertEquals(previous.second, state.listCopies(remote.id, 10, 0))
+                database.readableDatabase.rawQuery("SELECT calibre_recorded, calibre_size FROM downloaded_copies", null).use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals(1, it.getInt(0))
+                    assertEquals(23L, it.getLong(1))
+                }
                 database.readableDatabase.rawQuery("PRAGMA foreign_key_check", null).use { assertEquals(0, it.count) }
             }
         } finally {

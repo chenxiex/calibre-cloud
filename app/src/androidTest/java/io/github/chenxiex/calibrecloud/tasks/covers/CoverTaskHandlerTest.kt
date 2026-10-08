@@ -12,14 +12,13 @@ import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
 import io.github.chenxiex.calibrecloud.metadata.CalibreFixture
 import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.model.*
-import io.github.chenxiex.calibrecloud.state.LegacyCacheSchemaFixture
+import io.github.chenxiex.calibrecloud.state.StateSchemaHistory
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
+import io.github.chenxiex.calibrecloud.storage.SourcePolicies
 import io.github.chenxiex.calibrecloud.storage.api.*
 import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
 import io.github.chenxiex.calibrecloud.tasks.api.*
-import io.github.chenxiex.calibrecloud.tasks.copies.FormatSource
-import io.github.chenxiex.calibrecloud.tasks.copies.FormatSourceFailure
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import io.github.chenxiex.calibrecloud.ui.CoverViewModel
 import kotlinx.coroutines.Dispatchers
@@ -188,13 +187,10 @@ class CoverTaskHandlerTest {
             "EPUB", UUID.randomUUID().toString(), "Preserved book", 123L, "local", "version-3", "available"))
         val manifest = state.find(CopyKey(book, BookFormat.parse("EPUB")))
         assertNotNull(manifest)
-        // Reconstruct the old queue and remove tables absent from version three.
-        LegacyCacheSchemaFixture.downgradeToFour(database.writableDatabase)
-        database.writableDatabase.execSQL("DROP TABLE cover_cache")
-        database.writableDatabase.version = 3
+        StateSchemaHistory.downgrade(database.writableDatabase, 3)
         database.close()
         reopen()
-        assertEquals(7, database.readableDatabase.version)
+        assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
         assertEquals(imported, metadata.currentImport())
         assertEquals(manifest, state.find(CopyKey(book, BookFormat.parse("EPUB"))))
         assertEquals(queued, queue.get(task))
@@ -208,7 +204,7 @@ class CoverTaskHandlerTest {
             block = true
             onOpen = { events.add("cover") }
         }
-        val coverHandler = CoverTaskHandler(state, metadata, covers, source, source, Dispatchers.IO)
+        val coverHandler = CoverTaskHandler(state, metadata, covers, source.sources, Dispatchers.IO)
         val download = object : TaskHandler {
             override fun supports(request: TaskRequest) = request is TaskRequest.FormatCopy
             override fun controls(stage: TaskStage) = TaskControls(true, true, false, false)
@@ -314,7 +310,7 @@ class CoverTaskHandlerTest {
         val selection = state.select(LibraryLocation.Local("test.documents", name))
         val fixture = CalibreFixture.create(File(root, "$name.db"), bookUuid = sourceUuid)
         SQLiteDatabase.openDatabase(fixture.path, null, SQLiteDatabase.OPEN_READWRITE).use {
-            it.execSQL("INSERT INTO books VALUES(2,?,'第二本','2026-01-02 03:04:05+00:00','作者/第二本 (2)',1,1)",
+            it.execSQL("INSERT INTO books(id,uuid,title,timestamp,path,series_index,has_cover) VALUES(2,?,'第二本','2026-01-02 03:04:05+00:00','作者/第二本 (2)',1,1)",
                 arrayOf(UUID.randomUUID().toString()))
         }
         val identity = requireNotNull(metadata.importSnapshot(selection.token, fixture))
@@ -322,7 +318,7 @@ class CoverTaskHandlerTest {
     }
 
     private fun coordinator(source: Source) = TaskCoordinator(queue,
-        listOf(CoverTaskHandler(state, metadata, covers, source, source, Dispatchers.IO)))
+        listOf(CoverTaskHandler(state, metadata, covers, source.sources, Dispatchers.IO)))
 
     private suspend fun submit() = (queue.submit(TaskSubmission(TaskRequest.CoverLoad(book),
         TaskOrigin.VISIBLE_COVER)) as SubmissionResult.Created).taskId
@@ -339,7 +335,20 @@ class CoverTaskHandlerTest {
         } finally { bitmap.recycle() }
     }
 
-    private class Source(private val bytes: ByteArray) : CoverSource, FormatSource {
+    /** Cover I/O fixture; backend policies come from the production sources. */
+    private class Source(private val bytes: ByteArray) {
+        val sources = LibrarySources { backend ->
+            object : LibrarySource by SourcePolicies.sources.of(backend) {
+                override suspend fun openCover(location: LibraryLocation, path: RelativeSourcePath, targetWidth: Int,
+                    targetHeight: Int, control: suspend () -> Unit): SourceStream {
+                    control()
+                    val opened = this@Source.version(location)
+                    return SourceStream(this@Source.open(path), opened)
+                }
+                override suspend fun unchanged(location: LibraryLocation, path: RelativeSourcePath, version: FileVersion,
+                    control: suspend () -> Unit) = this@Source.version(location) == version
+            }
+        }
         val opens = AtomicInteger()
         val closes = AtomicInteger()
         val paths = mutableListOf<String>()
@@ -350,11 +359,11 @@ class CoverTaskHandlerTest {
         var failure: StorageErrorKind? = null
         var onOpen: () -> Unit = {}
         private var version = "initial"
-        override suspend fun version(location: LibraryLocation, path: RelativeSourcePath): FileVersion {
-            failure?.let { throw FormatSourceFailure(StorageError(it)) }
+        fun version(location: LibraryLocation): FileVersion {
+            failure?.let { throw SourceFailure(StorageError(it)) }
             return FileVersion(location.backend, version)
         }
-        override suspend fun open(location: LibraryLocation, path: RelativeSourcePath): InputStream {
+        fun open(path: RelativeSourcePath): InputStream {
             opens.incrementAndGet()
             onOpen()
             paths.add(path.value)

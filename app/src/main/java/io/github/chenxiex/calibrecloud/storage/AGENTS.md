@@ -24,7 +24,15 @@
 
 ## 显式操作和文件提供
 
-显式源访问由任务处理器经 `FormatSource`、`CoverSource` 及各后端快照接口完成。`CopyMaintenance` 仅声明精确副本移除和元数据清理，由 `CacheMaintenance` 实现。没有一般源上传／删除接口。`ReadStatusIntent` 只表达书籍、动态栏目和固定布尔目标，第四阶段再实现安全准备／提交和写后刷新协议。
+## 统一源接口
+
+已激活书库的全部源访问经 [LibrarySource](api/LibrarySource.kt)：按路径观察文件（`lookup`，返回版本、大小、可选内容散列与流）、发布前核对（`unchanged`）、封面（`openCover`）和元数据快照（`acquireSnapshot`，源未变时可返回 null），失败统一为 `SourceFailure`。每个后端实现完整契约（[本地](local/LocalLibrarySource.kt)、[OneDrive](onedrive/OneDriveLibrarySource.kt)）；规格按后端区分的行为由后端声明，调用方不判断后端类型：`requiresNetwork`、`resyncsMissingPath`（R11 路径失效先同步）、`checksCopy`（R11 导入后检查范围）、`reauthorization`（等待登录或目录授权）。节省请求的规则（如 OneDrive 一次查找供后续读取、发布前不复查）在操作内部实现；限流以 `THROTTLED` 及等待时间表达，由队列对所属书库统一生效，不需要额外接口。新增后端只需实现该接口并在应用容器的 `librarySources` 中注册。
+
+书库位置由 [LocationKeys](api/LocationKeys.kt) 编码为不透明键：状态库只保存后端代码和该键，只比较相等，不解析其组成，新增后端不改 schema。同步任务所需的授权由各后端实现 [LibraryAuthorization](../tasks/api/LibraryAuthorization.kt)，见[任务约束](../tasks/AGENTS.md)。
+
+按用户确认，只有以下两类按设计与具体后端绑定，不经统一接口：登录与目录授权本身（`auth/`、本地授权组件），以及选择书库根（OneDrive 目录浏览及其 `OneDriveCandidateTaskHandler`／`OneDriveCandidateService`、SAF 选择器）。选中根之后的同步、恢复与源访问都走统一接口。
+
+`CopyMaintenance` 仅声明精确副本移除和元数据清理，由 `CacheMaintenance` 实现。没有一般源上传／删除接口。`ReadStatusIntent` 只表达书籍、动态栏目和固定布尔目标，第四阶段再实现安全准备／提交和写后刷新协议。
 
 文件工厂、书籍 provider 的提供范围、完整文件发布及只读授权规则见 [文件提供开发约束](../files/AGENTS.md)。
 

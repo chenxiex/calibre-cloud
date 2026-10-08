@@ -7,6 +7,7 @@ import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.storage.local.SnapshotValidator
 import java.io.IOException
+import java.net.URLDecoder
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -29,84 +30,180 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
+/**
+ * Graph fixture with path addressing below the root item. Every request is recorded so tests can
+ * assert the exact request sequence: Graph metadata requests, children listings and content reads.
+ */
 class OneDriveSourceBackendTest {
     @get:Rule val temporary = TemporaryFolder()
-    private val location = LibraryLocation.OneDrive("account", "drive", "root")
+    private val location = LibraryLocation.OneDrive("microsoft-consumers:subject", "drive", "root")
+    private val database = RelativeSourcePath("metadata.db")
 
     private class Fixture {
         val decoded = mutableMapOf<String, Map<String, Any?>>()
         val requests = mutableListOf<Request>()
         val refreshes = mutableListOf<Boolean>()
         var driveType = "personal"
-        var accountId = "account"
-        var ownerIdPresent = true
-        var subject: String? = null
+        var ownerId: String? = "owner"
+        var subject: String? = "subject"
         var contentReads = 0
-        var data = "database"
-        var tag = "content-1"
         var valid = true
+        var directUrls = true
         var thumbnails = emptyList<Map<String, Any?>>()
         var onRequest: (Request) -> Response? = { null }
         var onContent: () -> Unit = {}
-        var childPages: (String, String?) -> Map<String, Any?> = { parent, _ ->
-            mapOf("value" to if (parent == "root") listOf(item("db", "metadata.db", "root", false)) else emptyList<Map<String, Any?>>())
+        /** Library files by decoded relative path; values are item JSON without content. */
+        val files = mutableMapOf<String, Map<String, Any?>>()
+        val contents = mutableMapOf<String, String>()
+        var childPages: (String, String?) -> Map<String, Any?> = { _, _ -> mapOf("value" to emptyList<Any>()) }
+
+        init { file("metadata.db", "db", "database") }
+
+        fun file(path: String, id: String, content: String, tag: String = "content-1", extra: Map<String, Any?> = emptyMap()) {
+            contents[id] = content
+            files[path] = item(id, path.substringAfterLast('/'), "parent-of-$id", false, tag = tag, size = content.toByteArray().size.toLong()) + extra
         }
-        fun item(id: String, name: String, parent: String?, directory: Boolean, drive: String = "drive") = buildMap<String, Any?> {
+        fun item(id: String, name: String, parent: String?, directory: Boolean, drive: String = "drive", tag: String = "content-1", size: Long = 0) = buildMap<String, Any?> {
             put("id", id); put("name", name); put(if (directory) "folder" else "file", emptyMap<String, Any?>())
             if (parent != null) put("parentReference", mapOf("id" to parent, "driveId" to drive))
-            put("cTag", tag); put("size", data.toByteArray().size.toLong())
+            put("cTag", tag); put("size", size)
         }
         fun response(request: Request, code: Int = 200, data: String = "", headers: Map<String, String> = emptyMap()) =
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(code).message("fixture").body(data.toResponseBody()).apply {
                 headers.forEach { (name, value) -> header(name, value) }
             }.build()
+        private fun json(request: Request, value: Map<String, Any?>): Response {
+            val marker = UUID.randomUUID().toString()
+            decoded[marker] = value
+            return response(request, data = marker)
+        }
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
             requests.add(request)
             onRequest(request) ?: run {
                 val path = request.url.encodedPath
-                if (request.url.host == "download.example") {
-                    contentReads++
-                    onContent()
-                    response(request, data = data)
-                } else if (path.endsWith("/content")) {
-                    response(request, 302, headers = mapOf("Location" to "https://download.example/file?secret=ephemeral"))
-                } else {
-                    val result = when {
-                        path.endsWith("/thumbnails") -> mapOf("value" to thumbnails)
-                        path.endsWith("/me/drive") -> mapOf("id" to "drive", "driveType" to driveType, "owner" to mapOf("user" to (if (ownerIdPresent) mapOf("id" to accountId) else emptyMap<String, Any?>())))
-                        path.endsWith("/children") -> childPages(request.url.pathSegments[4], request.url.queryParameter("page"))
-                        path.endsWith("/root") -> item("root", "library", null, true)
-                        path.endsWith("/items/db") -> item("db", "metadata.db", "root", false)
-                        else -> item(request.url.pathSegments.last(), "folder", "root", true)
+                when {
+                    request.url.host == "download.example" -> {
+                        contentReads++
+                        onContent()
+                        response(request, data = contents.getValue(request.url.pathSegments.last()))
                     }
-                    val marker = UUID.randomUUID().toString()
-                    decoded[marker] = result
-                    response(request, data = marker)
+                    path.endsWith("/content") -> response(request, 302,
+                        headers = mapOf("Location" to "https://download.example/${request.url.pathSegments[4]}?secret=ephemeral"))
+                    "/items/root:/" in path -> {
+                        val relative = path.substringAfter("/items/root:/").split('/').joinToString("/") { URLDecoder.decode(it.replace("+", "%2B"), "UTF-8") }
+                        val item = files[relative] ?: return@run response(request, 404)
+                        var value = item
+                        if (directUrls && item["file"] != null) value = value + ("@microsoft.graph.downloadUrl" to "https://download.example/${item["id"]}?secret=ephemeral")
+                        if (request.url.queryParameter("\$expand") == "thumbnails") value = value + ("thumbnails" to thumbnails)
+                        json(request, value)
+                    }
+                    path.endsWith("/me/drive") -> json(request, mapOf("id" to "drive", "driveType" to driveType,
+                        "owner" to mapOf("user" to (ownerId?.let { mapOf("id" to it) } ?: emptyMap<String, Any?>()))))
+                    path.endsWith("/children") -> json(request, childPages(request.url.pathSegments[4], request.url.queryParameter("page")))
+                    path.endsWith("/root") -> json(request, item("root", "library", null, true))
+                    else -> json(request, item(request.url.pathSegments.last(), "folder", "root", true))
                 }
             }
         }.build()
         val decoder = GraphJsonDecoder { decoded.getValue(it) }
+        fun graph() = requests.filter { it.url.host == "graph.microsoft.com" }
     }
 
-    @Test fun personalStableIdentityAndAccountSwitchAreVerified() = runTest {
+    @Test fun identityIsComparedLocallyWithoutRequests() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         val identity = (backend.discover() as OneDriveSourceResult.Available).value
-        assertEquals("account", identity.accountId)
+        assertEquals(location.accountId, identity.accountId)
         assertEquals("drive", identity.driveId)
-        fixture.accountId = "other"
-        assertEquals(StorageErrorKind.LOGIN_REQUIRED, failure(backend.version(location, RelativeSourcePath("metadata.db"))))
+        fixture.requests.clear()
+        fixture.subject = "another-subject"
+        assertEquals(StorageErrorKind.LOGIN_REQUIRED, failure(backend.version(location, database)))
+        assertEquals(StorageErrorKind.LOGIN_REQUIRED, failure(backend.acquireSnapshot(location, UUID.randomUUID())))
+        assertTrue(fixture.requests.isEmpty())
         fixture.driveType = "business"
         assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.discover()))
     }
 
-    @Test fun coverRequestsExactImageItemAndChoosesSmallestSufficientThumbnailWithoutCredentials() = runTest {
+    @Test fun sessionWithoutSubjectFallsBackToDriveOwner() = runTest {
         val fixture = Fixture()
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(
-            fixture.item("cover-image", "cover.jpg", "root", false),
-            fixture.item("book-format", "book.epub", "root", false),
-        )) }
+        fixture.subject = null
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val owned = location.copy(accountId = "owner")
+        assertEquals("content-1", (backend.version(owned, database) as OneDriveSourceResult.Available).value.token)
+        assertEquals(listOf("/v1.0/me/drive", "/v1.0/drives/drive/root", "/v1.0/drives/drive/items/root:/metadata.db"),
+            fixture.requests.map { it.url.encodedPath })
+        fixture.ownerId = "other"
+        assertEquals(StorageErrorKind.LOGIN_REQUIRED, failure(backend.version(owned, database)))
+    }
+
+    @Test fun lookupIsOnePathRequestAndDownloadNeedsNoFurtherGraphRequest() = runTest {
+        val fixture = Fixture()
+        fixture.file("Author #1/Book 100% + more 书/Book 100% + more 书.epub", "book", "epub bytes", tag = "book-tag")
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val path = RelativeSourcePath("Author #1/Book 100% + more 书/Book 100% + more 书.epub")
+        val file = (backend.lookup(location, path) as OneDriveSourceResult.Available).value
+        assertEquals(FileVersion(BackendKind.ONEDRIVE, "book-tag"), file.version)
+        assertEquals(10L, file.sizeBytes)
+        assertFalse(file.toString().contains("secret"))
+        val stream = (backend.open(location, file) as OneDriveSourceResult.Available).value
+        assertEquals("epub bytes", stream.use { it.readBytes().decodeToString() })
+        val graph = fixture.graph().single()
+        assertEquals("/v1.0/drives/drive/items/root:/Author%20%231/Book%20100%25%20%2B%20more%20%E4%B9%A6/Book%20100%25%20%2B%20more%20%E4%B9%A6.epub",
+            graph.url.encodedPath)
+        assertNull(graph.url.queryParameter("\$select"))
+        assertNull(fixture.requests.single { it.url.host == "download.example" }.header("Authorization"))
+        assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/children") })
+    }
+
+    @Test fun missingDownloadUrlFallsBackToContentRedirectWithoutCredentials() = runTest {
+        val fixture = Fixture()
+        fixture.directUrls = false
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val file = (backend.lookup(location, database) as OneDriveSourceResult.Available).value
+        val stream = (backend.open(location, file) as OneDriveSourceResult.Available).value
+        assertEquals("database", stream.use { it.readBytes().decodeToString() })
+        assertEquals(listOf("/v1.0/drives/drive/items/root:/metadata.db", "/v1.0/drives/drive/items/db/content"),
+            fixture.graph().map { it.url.encodedPath })
+        assertNull(fixture.requests.single { it.url.host == "download.example" }.header("Authorization"))
+        fixture.onRequest = { request ->
+            if (request.url.encodedPath.endsWith("/content")) fixture.response(request, 302, headers = mapOf("Location" to "http://attacker.example/file")) else null
+        }
+        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.open(location, file)))
+        assertFalse(fixture.requests.any { it.url.host == "attacker.example" })
+    }
+
+    @Test fun unsafeDownloadUrlIsNeverRequested() = runTest {
+        val fixture = Fixture()
+        fixture.file("book.epub", "book", "bytes", extra = mapOf("@microsoft.graph.downloadUrl" to "http://attacker.example/book"))
+        fixture.directUrls = false
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val file = (backend.lookup(location, RelativeSourcePath("book.epub")) as OneDriveSourceResult.Available).value
+        assertEquals("bytes", (backend.open(location, file) as OneDriveSourceResult.Available).value.use { it.readBytes().decodeToString() })
+        assertFalse(fixture.requests.any { it.url.host == "attacker.example" })
+    }
+
+    @Test fun pathLookupRefusesFoldersRemoteItemsOtherDrivesAndMissingFiles() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        fixture.files["folder"] = fixture.item("folder", "folder", "root", true)
+        assertEquals(StorageErrorKind.SOURCE_MISSING, failure(backend.lookup(location, RelativeSourcePath("folder"))))
+        assertEquals(StorageErrorKind.SOURCE_MISSING, failure(backend.lookup(location, RelativeSourcePath("absent/book.epub"))))
+        for (extra in listOf("remoteItem", "package", "deleted")) {
+            fixture.file("odd.epub", "odd", "x", extra = mapOf(extra to emptyMap<String, Any?>()))
+            assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.lookup(location, RelativeSourcePath("odd.epub"))))
+        }
+        fixture.files["odd.epub"] = fixture.item("odd", "odd.epub", "parent", false, drive = "other-drive")
+        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.lookup(location, RelativeSourcePath("odd.epub"))))
+        // The shared facet of an owned item does not change its drive boundary.
+        fixture.file("shared.epub", "shared", "bytes", extra = mapOf("shared" to mapOf("scope" to "users")))
+        assertTrue(backend.lookup(location, RelativeSourcePath("shared.epub")) is OneDriveSourceResult.Available)
+        assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/children") })
+    }
+
+    @Test fun coverIsOneRequestAndChoosesSmallestSufficientThumbnailWithoutCredentials() = runTest {
+        val fixture = Fixture()
+        fixture.file("Book/cover.jpg", "cover-image", "original", tag = "cover-tag")
         fixture.thumbnails = listOf(mapOf(
             "small" to thumbnail(64, 96, "small"),
             "medium" to thumbnail(200, 300, "medium"),
@@ -117,21 +214,23 @@ class OneDriveSourceBackendTest {
         }
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         var dimensions: Pair<Int, Int>? = null
-        val stream = (backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180) { width, height ->
+        val cover = (backend.openCover(location, RelativeSourcePath("Book/cover.jpg"), 120, 180) { width, height ->
             dimensions = width to height
         } as OneDriveSourceResult.Available).value
-        assertEquals("medium", stream.use { it.readBytes().decodeToString() })
+        assertEquals("medium", cover.stream.use { it.readBytes().decodeToString() })
+        assertEquals("cover-tag", cover.version.token)
         assertEquals(200 to 300, dimensions)
-        assertEquals("/v1.0/drives/drive/items/cover-image/thumbnails", fixture.requests.single { it.url.encodedPath.endsWith("/thumbnails") }.url.encodedPath)
+        val graph = fixture.graph().single()
+        assertEquals("/v1.0/drives/drive/items/root:/Book/cover.jpg", graph.url.encodedPath)
+        assertEquals("thumbnails", graph.url.queryParameter("\$expand"))
         assertNull(fixture.requests.single { it.url.host == "thumbnail.example" }.header("Authorization"))
-        assertFalse(fixture.requests.any { it.url.encodedPath.contains("book-format") || it.url.encodedPath.endsWith("/content") })
-        val larger = (backend.openCover(location, RelativeSourcePath("cover.jpg"), 1000, 1500) as OneDriveSourceResult.Available).value
-        assertEquals("large", larger.use { it.readBytes().decodeToString() })
+        val larger = (backend.openCover(location, RelativeSourcePath("Book/cover.jpg"), 1000, 1500) as OneDriveSourceResult.Available).value
+        assertEquals("large", larger.stream.use { it.readBytes().decodeToString() })
     }
 
     @Test fun absentUnsafeAndExpiredThumbnailsFallBackToSameCoverOriginal() = runTest {
         val fixture = Fixture()
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("cover-image", "cover.jpg", "root", false))) }
+        fixture.file("cover.jpg", "cover-image", "original")
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         for (available in listOf(
             emptyList(),
@@ -141,38 +240,37 @@ class OneDriveSourceBackendTest {
             fixture.requests.clear()
             fixture.thumbnails = available
             fixture.onRequest = { request -> if (request.url.host == "thumbnail.example") fixture.response(request, 404) else null }
-            val stream = (backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180) { _, _ ->
+            val cover = (backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180) { _, _ ->
                 throw AssertionError("fallback counted as thumbnail")
             } as OneDriveSourceResult.Available).value
-            assertEquals("database", stream.use { it.readBytes().decodeToString() })
-            assertEquals("/v1.0/drives/drive/items/cover-image/content", fixture.requests.single { it.url.encodedPath.endsWith("/content") }.url.encodedPath)
+            assertEquals("original", cover.stream.use { it.readBytes().decodeToString() })
+            assertEquals(1, fixture.graph().size)
+            assertEquals("/cover-image", fixture.requests.single { it.url.host == "download.example" }.url.encodedPath)
             assertFalse(fixture.requests.any { it.url.host == "unsafe.example" })
         }
     }
 
     @Test fun thumbnailFailuresRetainAuthorizationAndRetrySemanticsWithoutOriginalFallback() = runTest {
         val fixture = Fixture()
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("cover-image", "cover.jpg", "root", false))) }
+        fixture.file("cover.jpg", "cover-image", "original")
         fixture.thumbnails = listOf(mapOf("medium" to thumbnail(200, 300, "image")))
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        for (target in listOf("/thumbnails", "thumbnail.example")) {
-            for ((code, kind) in listOf(403 to StorageErrorKind.AUTHORIZATION_EXPIRED, 429 to StorageErrorKind.THROTTLED, 503 to StorageErrorKind.THROTTLED)) {
-                fixture.requests.clear()
-                fixture.onRequest = { request ->
-                    if (request.url.encodedPath.endsWith(target) || request.url.host == target) fixture.response(request, code, headers = mapOf("Retry-After" to "12")) else null
-                }
-                val result = backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180) as OneDriveSourceResult.Failed
-                assertEquals(kind, result.error.kind)
-                assertEquals(code != 403, result.transient)
-                if (result.transient) assertEquals(12_000L, result.retryDelayMillis)
-                assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/content") })
+        for ((code, kind) in listOf(403 to StorageErrorKind.AUTHORIZATION_EXPIRED, 429 to StorageErrorKind.THROTTLED, 503 to StorageErrorKind.THROTTLED)) {
+            fixture.requests.clear()
+            fixture.onRequest = { request ->
+                if (request.url.host == "thumbnail.example") fixture.response(request, code, headers = mapOf("Retry-After" to "12")) else null
             }
+            val result = backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180) as OneDriveSourceResult.Failed
+            assertEquals(kind, result.error.kind)
+            assertEquals(code != 403, result.transient)
+            if (result.transient) assertEquals(12_000L, result.retryDelayMillis)
+            assertFalse(fixture.requests.any { it.url.host == "download.example" })
         }
     }
 
-    @Test fun thumbnailRedirectRejectsDowngradeAndSourceBoundaryPrecedesThumbnailRequest() = runTest {
+    @Test fun thumbnailRedirectRejectsDowngradeAndForeignCoverReceivesNoThumbnailRequest() = runTest {
         val fixture = Fixture()
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("cover-image", "cover.jpg", "root", false))) }
+        fixture.file("cover.jpg", "cover-image", "original")
         fixture.thumbnails = listOf(mapOf("medium" to thumbnail(200, 300, "image")))
         fixture.onRequest = { request ->
             if (request.url.host == "thumbnail.example") fixture.response(request, 302, headers = mapOf("Location" to "http://unsafe.example/image")) else null
@@ -181,45 +279,26 @@ class OneDriveSourceBackendTest {
         assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180)))
         assertFalse(fixture.requests.any { it.url.host == "unsafe.example" })
         fixture.requests.clear()
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("cover-image", "cover.jpg", "outside", false))) }
+        fixture.files["cover.jpg"] = fixture.item("cover-image", "cover.jpg", "parent", false, drive = "other-drive")
         assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180)))
-        assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/thumbnails") })
+        assertFalse(fixture.requests.any { it.url.host == "thumbnail.example" })
     }
 
     private fun thumbnail(width: Int, height: Int, name: String): Map<String, Any?> = mapOf(
         "width" to width, "height" to height, "url" to "https://thumbnail.example/$name",
     )
 
-    @Test fun missingOwnerIdUsesStableAuthenticatedSubjectAndDoesNotDependOnDisplayName() = runTest {
+    @Test fun stableSubjectIdentityDoesNotDependOnOwnerRepresentation() = runTest {
         val fixture = Fixture()
-        fixture.ownerIdPresent = false
-        fixture.subject = "stable-subject"
+        fixture.ownerId = null
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         val first = backend.discover() as OneDriveSourceResult.Available
-        assertEquals("microsoft-consumers:stable-subject", first.value.accountId)
-        fixture.ownerIdPresent = true
-        fixture.accountId = "different-owner-representation"
+        assertEquals("microsoft-consumers:subject", first.value.accountId)
+        fixture.ownerId = "different-owner-representation"
         val second = backend.discover() as OneDriveSourceResult.Available
         assertEquals(first.value.accountId, second.value.accountId)
         fixture.subject = "another-subject"
-        val selected = location.copy(accountId = first.value.accountId)
-        assertEquals(StorageErrorKind.LOGIN_REQUIRED, failure(backend.listDirectories(selected)))
-    }
-
-    @Test fun pagesStayInsideSameParentAndUnsafeNextLinkReceivesNoToken() = runTest {
-        val fixture = Fixture()
-        fixture.childPages = { _, page ->
-            if (page == null) mapOf("value" to listOf(fixture.item("folder", "Folder", "root", true)), "@odata.nextLink" to "https://graph.microsoft.com/v1.0/drives/drive/items/root/children?page=2")
-            else mapOf("value" to listOf(fixture.item("folder2", "Second", "root", true)))
-        }
-        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        val first = (backend.listDirectories(location) as OneDriveSourceResult.Available).value
-        assertEquals("folder", first.items.single().id)
-        val second = (backend.listDirectories(location, pageUrl = first.nextPageUrl) as OneDriveSourceResult.Available).value
-        assertEquals("folder2", second.items.single().id)
-        fixture.childPages = { _, _ -> mapOf("value" to emptyList<Any>(), "@odata.nextLink" to "https://attacker.example/v1.0/drives/drive/items/root/children") }
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.listDirectories(location)))
-        assertFalse(fixture.requests.any { it.url.host == "attacker.example" })
+        assertEquals(StorageErrorKind.LOGIN_REQUIRED, failure(backend.listAllDirectories(location)))
     }
 
     @Test fun unrelatedUnsupportedChildrenDoNotPreventDirectoryBrowsing() = runTest {
@@ -233,36 +312,11 @@ class OneDriveSourceBackendTest {
             fixture.item("deleted", "Deleted", "root", true) + ("deleted" to emptyMap<String, Any?>()),
         )) }
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        val directories = (backend.listDirectories(location) as OneDriveSourceResult.Available).value
-        assertEquals(listOf("folder", "shared"), directories.items.map { it.id })
-        val allDirectories = (backend.listAllDirectories(location) as OneDriveSourceResult.Available).value
-        assertEquals(directories.items, allDirectories.items)
-        // Source resolution retains its strict boundary even for unrelated unsupported siblings.
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.resolve(location, RelativeSourcePath("ordinary.txt"))))
-    }
-
-    @Test fun sharedFacetOnOwnedItemsPreservesDirectoryBrowsingAndSourceRead() = runTest {
-        val fixture = Fixture()
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(
-            fixture.item("shared-folder", "Owned shared folder", "root", true) + ("shared" to mapOf("scope" to "users")),
-            fixture.item("db", "metadata.db", "root", false) + ("shared" to mapOf("scope" to "users")),
-        )) }
-        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         val directories = (backend.listAllDirectories(location) as OneDriveSourceResult.Available).value
-        assertEquals(listOf("shared-folder"), directories.items.map { it.id })
-        val source = (backend.resolve(location, RelativeSourcePath("metadata.db")) as OneDriveSourceResult.Available).value
-        assertEquals("content-1", source.version.token)
-        val stream = (backend.openRead(location, RelativeSourcePath("metadata.db")) as OneDriveSourceResult.Available).value
-        assertEquals("database", stream.use { it.readBytes().decodeToString() })
-        assertNull(fixture.requests.single { it.url.host == "download.example" }.header("Authorization"))
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(
-            fixture.item("db", "metadata.db", "root", false) + ("shared" to emptyMap<String, Any?>()) + ("remoteItem" to emptyMap<String, Any?>()),
-        )) }
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.openRead(location, RelativeSourcePath("metadata.db"))))
-        assertEquals(1, fixture.contentReads)
+        assertEquals(listOf("folder", "shared"), directories.items.map { it.id })
     }
 
-    @Test fun completeDirectoryLoadFollowsServerPagesAndVerifiesIdentityAndParentOnce() = runTest {
+    @Test fun completeDirectoryLoadFollowsServerPagesAndVerifiesParentOnce() = runTest {
         val fixture = Fixture()
         fixture.childPages = { _, page ->
             val index = page?.toInt() ?: 0
@@ -279,7 +333,7 @@ class OneDriveSourceBackendTest {
         assertEquals((0 until 14).map { "folder-$it" }, result.items.map { it.id })
         assertEquals("library", result.parentName)
         assertNull(result.nextPageUrl)
-        assertEquals(1, fixture.requests.count { it.url.encodedPath.endsWith("/me/drive") })
+        assertEquals(0, fixture.requests.count { it.url.encodedPath.endsWith("/me/drive") })
         assertEquals(1, fixture.requests.count { it.url.encodedPath.endsWith("/items/root") })
         assertEquals(3, fixture.requests.count { it.url.encodedPath.endsWith("/children") })
         assertTrue(fixture.requests.none { it.url.queryParameter("\$top") != null })
@@ -343,91 +397,104 @@ class OneDriveSourceBackendTest {
         assertEquals(1, fixture.requests.count { it.url.encodedPath.endsWith("/children") })
     }
 
-    @Test fun rootResolutionRefusesWrongParentRemoteItemsAndMissingFiles() = runTest {
-        val fixture = Fixture()
-        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("db", "metadata.db", "outside", false))) }
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.resolve(location, RelativeSourcePath("metadata.db"))))
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("db", "metadata.db", "root", false) + ("remoteItem" to emptyMap<String, Any?>()))) }
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.resolve(location, RelativeSourcePath("metadata.db"))))
-        fixture.childPages = { _, _ -> mapOf("value" to listOf(fixture.item("db", "metadata.db", "root", false) + ("package" to emptyMap<String, Any?>()))) }
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.resolve(location, RelativeSourcePath("metadata.db"))))
-        fixture.childPages = { _, _ -> mapOf("value" to emptyList<Any>()) }
-        assertEquals(StorageErrorKind.SOURCE_MISSING, failure(backend.resolve(location, RelativeSourcePath("metadata.db"))))
-    }
-
     @Test fun opaqueDirectoryIdsCannotNormalizeIntoDifferentGraphEndpoints() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         for (id in listOf(".", "..", "outside/child", "outside\\child")) {
-            fixture.requests.clear()
-            assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.listDirectories(location, id)))
-            assertEquals(listOf("/v1.0/me/drive", "/v1.0/drives/drive/root"), fixture.requests.map { it.url.encodedPath })
+            assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.listAllDirectories(location, id)))
+            assertTrue(fixture.requests.isEmpty())
         }
-    }
-
-    @Test fun contentRedirectDropsCredentialsAndHttpDowngradeIsRejected() = runTest {
-        val fixture = Fixture()
-        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        val stream = (backend.openRead(location, RelativeSourcePath("metadata.db")) as OneDriveSourceResult.Available).value
-        assertEquals("database", stream.use { it.readBytes().decodeToString() })
-        assertNull(fixture.requests.single { it.url.host == "download.example" }.header("Authorization"))
-        fixture.onRequest = { request ->
-            if (request.url.encodedPath.endsWith("/content")) fixture.response(request, 302, headers = mapOf("Location" to "http://attacker.example/file")) else null
-        }
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.openRead(location, RelativeSourcePath("metadata.db"))))
-        assertFalse(fixture.requests.any { it.url.host == "attacker.example" })
     }
 
     @Test fun authenticationRetriesOnceAndRetryAfterIsReturnedToScheduler() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         fixture.onRequest = { request -> if (request.header("Authorization") == "Bearer old") fixture.response(request, 401) else null }
-        assertTrue(backend.discover() is OneDriveSourceResult.Available)
+        assertTrue(backend.lookup(location, database) is OneDriveSourceResult.Available)
         assertTrue(fixture.refreshes.contains(true))
         fixture.onRequest = { fixture.response(it, 429, headers = mapOf("Retry-After" to "120")) }
-        val limited = backend.discover() as OneDriveSourceResult.Failed
+        val limited = backend.lookup(location, database) as OneDriveSourceResult.Failed
         assertEquals(120_000L, limited.retryDelayMillis)
         assertTrue(limited.transient)
         fixture.onRequest = { fixture.response(it, 403) }
-        assertEquals(StorageErrorKind.AUTHORIZATION_EXPIRED, failure(backend.discover()))
+        assertEquals(StorageErrorKind.AUTHORIZATION_EXPIRED, failure(backend.lookup(location, database)))
         fixture.onRequest = { throw IOException() }
-        assertEquals(StorageErrorKind.NO_NETWORK, failure(backend.discover()))
+        assertEquals(StorageErrorKind.NO_NETWORK, failure(backend.lookup(location, database)))
     }
 
-    @Test fun snapshotUsesCtagAndDoubleReadAndPreservesPublishedGenerationOnConflict() = runTest {
+    @Test fun serverAndMissingResponsesRemainDistinctAndHttpDateRetryAfterIsHonored() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        val candidate = UUID.randomUUID()
-        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value
+        fixture.onRequest = { fixture.response(it, 503) }
+        val unavailable = backend.lookup(location, database) as OneDriveSourceResult.Failed
+        assertEquals(StorageErrorKind.THROTTLED, unavailable.error.kind)
+        assertTrue(unavailable.transient)
+        assertEquals(30_000L, unavailable.retryDelayMillis)
+        fixture.onRequest = { fixture.response(it, 404) }
+        val missing = backend.lookup(location, database) as OneDriveSourceResult.Failed
+        assertEquals(StorageErrorKind.SOURCE_MISSING, missing.error.kind)
+        assertFalse(missing.transient)
+        val retryDate = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).plusMinutes(2)
+            .format(java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
+        fixture.onRequest = { fixture.response(it, 429, headers = mapOf("Retry-After" to retryDate)) }
+        val limited = backend.lookup(location, database) as OneDriveSourceResult.Failed
+        assertEquals(StorageErrorKind.THROTTLED, limited.error.kind)
+        assertTrue(limited.retryDelayMillis!! in 110_000L..120_000L)
+    }
+
+    @Test fun unchangedSnapshotIsOneRequestWithoutReading() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val result = backend.acquireSnapshot(location, UUID.randomUUID(), FileVersion(BackendKind.ONEDRIVE, "content-1"))
+        assertNull((result as OneDriveSourceResult.Available).value)
+        assertEquals(listOf("/v1.0/drives/drive/items/root:/metadata.db"), fixture.requests.map { it.url.encodedPath })
+    }
+
+    @Test fun changedSnapshotQueriesLogsByNameAndReadsOnceWithPreReadVersion() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val good = (backend.acquireSnapshot(location, UUID.randomUUID(), FileVersion(BackendKind.ONEDRIVE, "older"))
+            as OneDriveSourceResult.Available).value!!
         assertEquals("database", good.file.readText())
         assertEquals("content-1", good.version.token)
-        assertEquals(2, fixture.contentReads)
-        fixture.onContent = { fixture.tag = "changed" }
-        assertEquals(StorageErrorKind.VERSION_CONFLICT, failure(backend.acquireSnapshot(location, candidate)))
-        assertTrue(good.file.exists())
+        assertEquals(1, fixture.contentReads)
+        assertEquals(listOf("/v1.0/drives/drive/items/root:/metadata.db", "/v1.0/drives/drive/items/root:/metadata.db-wal",
+            "/v1.0/drives/drive/items/root:/metadata.db-journal"), fixture.graph().map { it.url.encodedPath })
+        assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/children") })
         assertFalse(good.file.parentFile!!.listFiles()!!.any { it.extension == "part" })
     }
 
-    @Test fun activeTransactionLogsRefuseSnapshotAndKeepOldGeneration() = runTest {
+    @Test fun nonEmptyTransactionLogsRefuseSnapshotAndEmptyLogsDoNot() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         val candidate = UUID.randomUUID()
-        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value
-        for (name in listOf("metadata.db-wal", "metadata.db-journal", "metadata.db-shm")) {
-            fixture.childPages = { _, _ -> mapOf("value" to listOf(
-                fixture.item("db", "metadata.db", "root", false), fixture.item("log", name, "root", false),
-            )) }
+        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value!!
+        for (name in listOf("metadata.db-wal", "metadata.db-journal")) {
+            fixture.file(name, "log", "pending")
             assertEquals(StorageErrorKind.VERSION_CONFLICT, failure(backend.acquireSnapshot(location, candidate)))
             assertPreserved(good)
+            fixture.file(name, "log", "")
+            val empty = (backend.acquireSnapshot(location, UUID.randomUUID()) as OneDriveSourceResult.Available).value!!
+            assertEquals("database", empty.file.readText())
+            fixture.files.remove(name)
         }
+        fixture.files["metadata.db-journal"] = fixture.item("log", "metadata.db-journal", "root", true)
+        assertEquals(StorageErrorKind.VERSION_CONFLICT, failure(backend.acquireSnapshot(location, candidate)))
+    }
+
+    @Test fun snapshotLengthMismatchIsCorrupt() = runTest {
+        val fixture = Fixture()
+        fixture.file("metadata.db", "db", "database")
+        fixture.contents["db"] = "truncated"
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        assertEquals(StorageErrorKind.CORRUPT_CONTENT, failure(backend.acquireSnapshot(location, UUID.randomUUID())))
     }
 
     @Test fun interruptedBodyReadKeepsOldSnapshotAndDeletesPartialCopy() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         val candidate = UUID.randomUUID()
-        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value
+        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value!!
         fixture.onRequest = { request ->
             if (request.url.host != "download.example") null else {
                 val interrupted = object : ResponseBody() {
@@ -454,7 +521,7 @@ class OneDriveSourceBackendTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         val candidate = UUID.randomUUID()
-        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value
+        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value!!
         fixture.valid = false
         assertEquals(StorageErrorKind.CORRUPT_CONTENT, failure(backend.acquireSnapshot(location, candidate)))
         assertPreserved(good)
@@ -464,14 +531,14 @@ class OneDriveSourceBackendTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         val candidate = UUID.randomUUID()
-        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value
+        val good = (backend.acquireSnapshot(location, candidate) as OneDriveSourceResult.Available).value!!
         val cancelled = object : CancellationException("fixture cancellation") {}
         var checksAfterContent = 0
         try {
             backend.acquireSnapshot(location, candidate) {
-                // The fixture has already read two bodies for the old snapshot. During this attempt,
-                // stop on the second copy-loop control check, after the first bytes reached staging.
-                if (fixture.contentReads > 2 && ++checksAfterContent == 2) throw cancelled
+                // The old snapshot read one body. During this attempt, stop on the second copy-loop
+                // control check, after the first bytes reached staging.
+                if (fixture.contentReads > 1 && ++checksAfterContent == 2) throw cancelled
             }
             throw AssertionError("task cancellation was swallowed")
         } catch (actual: CancellationException) {
@@ -480,44 +547,32 @@ class OneDriveSourceBackendTest {
         assertPreserved(good)
     }
 
-    @Test fun serverAndMissingResponsesRemainDistinctAndHttpDateRetryAfterIsHonored() = runTest {
-        val fixture = Fixture()
-        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        fixture.onRequest = { fixture.response(it, 503) }
-        val unavailable = backend.discover() as OneDriveSourceResult.Failed
-        assertEquals(StorageErrorKind.THROTTLED, unavailable.error.kind)
-        assertTrue(unavailable.transient)
-        assertEquals(30_000L, unavailable.retryDelayMillis)
-        fixture.onRequest = { fixture.response(it, 404) }
-        val missing = backend.discover() as OneDriveSourceResult.Failed
-        assertEquals(StorageErrorKind.SOURCE_MISSING, missing.error.kind)
-        assertFalse(missing.transient)
-        val retryDate = java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).plusMinutes(2)
-            .format(java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME)
-        fixture.onRequest = { fixture.response(it, 429, headers = mapOf("Retry-After" to retryDate)) }
-        val limited = backend.discover() as OneDriveSourceResult.Failed
-        assertEquals(StorageErrorKind.THROTTLED, limited.error.kind)
-        assertTrue(limited.retryDelayMillis!! in 110_000L..120_000L)
-    }
-
-    @Test fun rangeUsesActualDownloadUrlAndReturnsOnlyValidatedSuffix() = runTest {
+    @Test fun rangeUsesLookedUpDownloadUrlAndReturnsOnlyValidatedSuffix() = runTest {
         val fixture = Fixture()
         fixture.onRequest = { request ->
             if (request.url.host == "download.example") fixture.response(request, 206, "base", mapOf("Content-Range" to "bytes 4-7/8")) else null
         }
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        val stream = (backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, fixture.tag)) as OneDriveSourceResult.Available).value!!
+        val file = (backend.lookup(location, database) as OneDriveSourceResult.Available).value
+        val stream = (backend.openRange(location, file, 4) as OneDriveSourceResult.Available).value!!
         assertEquals("base", stream.use { it.readBytes().decodeToString() })
         val content = fixture.requests.single { it.url.host == "download.example" }
         assertEquals("bytes=4-", content.header("Range"))
         assertEquals("identity", content.header("Accept-Encoding"))
         assertNull(content.header("Authorization"))
+        assertEquals(1, fixture.graph().size)
+        fixture.directUrls = false
+        fixture.requests.clear()
+        val redirected = (backend.lookup(location, database) as OneDriveSourceResult.Available).value
+        (backend.openRange(location, redirected, 4) as OneDriveSourceResult.Available).value!!.close()
         assertNull(fixture.requests.single { it.url.encodedPath.endsWith("/content") }.header("Range"))
+        assertEquals("bytes=4-", fixture.requests.single { it.url.host == "download.example" }.header("Range"))
     }
 
     @Test fun ignoredRangeAndUnsatisfiableRangeCloseResponseAndRequireFullRestart() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val file = (backend.lookup(location, database) as OneDriveSourceResult.Available).value
         for (status in listOf(200, 416)) {
             var closed = false
             fixture.onRequest = { request ->
@@ -532,16 +587,15 @@ class OneDriveSourceBackendTest {
                     }).build()
                 }
             }
-            assertNull((backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, fixture.tag)) as OneDriveSourceResult.Available).value)
+            assertNull((backend.openRange(location, file, 4) as OneDriveSourceResult.Available).value)
             assertTrue(closed)
         }
     }
 
-    @Test fun rangeRefusesChangedVersionWrongBoundsAndWrongTotal() = runTest {
+    @Test fun rangeRefusesWrongBoundsAndWrongTotal() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        assertEquals(StorageErrorKind.VERSION_CONFLICT, failure(backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, "old"))))
-        assertFalse(fixture.requests.any { it.url.encodedPath.endsWith("/content") })
+        val file = (backend.lookup(location, database) as OneDriveSourceResult.Available).value
         for ((header, expected) in listOf(
             "bytes 0-7/8" to StorageErrorKind.CORRUPT_CONTENT,
             "bytes 4-6/8" to StorageErrorKind.CORRUPT_CONTENT,
@@ -549,13 +603,14 @@ class OneDriveSourceBackendTest {
             "bytes 4-7/*" to StorageErrorKind.CORRUPT_CONTENT,
         )) {
             fixture.onRequest = { request -> if (request.url.host == "download.example") fixture.response(request, 206, "base", mapOf("Content-Range" to header)) else null }
-            assertEquals(expected, failure(backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, fixture.tag))))
+            assertEquals(expected, failure(backend.openRange(location, file, 4)))
         }
     }
 
     @Test fun unknownLengthRangeStreamDetectsTruncationAndExcessBytes() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val file = (backend.lookup(location, database) as OneDriveSourceResult.Available).value
         for (bytes in listOf("ba", "base-extra")) {
             fixture.onRequest = { request -> if (request.url.host != "download.example") null else {
                 fixture.response(request, 206, headers = mapOf("Content-Range" to "bytes 4-7/8")).newBuilder().body(object : ResponseBody() {
@@ -564,7 +619,7 @@ class OneDriveSourceBackendTest {
                     override fun source() = Buffer().writeUtf8(bytes)
                 }).build()
             } }
-            val stream = (backend.openRange(location, RelativeSourcePath("metadata.db"), 4, FileVersion(BackendKind.ONEDRIVE, fixture.tag)) as OneDriveSourceResult.Available).value!!
+            val stream = (backend.openRange(location, file, 4) as OneDriveSourceResult.Available).value!!
             try {
                 stream.use { it.readBytes() }
                 throw AssertionError("invalid suffix accepted")

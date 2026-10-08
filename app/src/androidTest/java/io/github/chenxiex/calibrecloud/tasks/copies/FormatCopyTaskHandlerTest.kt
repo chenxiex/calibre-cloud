@@ -12,9 +12,11 @@ import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.model.*
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
+import io.github.chenxiex.calibrecloud.storage.SourcePolicies
 import io.github.chenxiex.calibrecloud.storage.api.*
 import io.github.chenxiex.calibrecloud.storage.cache.PrivateCopyReader
 import io.github.chenxiex.calibrecloud.storage.local.*
+import io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveLibrarySource
 import io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveSourceBackend
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -392,7 +394,7 @@ class FormatCopyTaskHandlerTest {
     fun completedTransferRecoveryPublishesWithoutDownloadingAgain() = runBlocking<Unit> {
         val source = Source(epub("publish recovery"))
         val task = submit()
-        val handler = FormatCopyTaskHandler(state, metadata, queue, source, context.filesDir, Dispatchers.IO, { Long.MAX_VALUE })
+        val handler = FormatCopyTaskHandler(state, metadata, queue, source.sources, context.filesDir, Dispatchers.IO, { Long.MAX_VALUE })
         val interrupted = object : TaskHandler by handler {
             override suspend fun execute(entry: QueueEntry, execution: TaskExecution): StageOutcome =
                 if (entry.stage == TaskStage.FORMAT_PUBLISH) StageOutcome.Wait(WaitingReason.NETWORK)
@@ -693,9 +695,8 @@ class FormatCopyTaskHandlerTest {
         assertEquals(book.libraryId, state.current()!!.identity!!.id)
         val local = LocalSourceBackend(documents, File(root, "local-snapshots"), SnapshotValidator { false }, Dispatchers.IO)
         val remote = OneDriveSourceBackend({ null }, File(root, "remote-snapshots"), SnapshotValidator { false }, Dispatchers.IO)
-        val source = BackendFormatSource(state, local, remote)
         val task = submit()
-        coordinator(source).drain()
+        coordinator(productionSources(local, remote)).drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
         assertTrue(reads.get() >= 3)
         assertArrayEquals(bytes, readBytes())
@@ -704,43 +705,24 @@ class FormatCopyTaskHandlerTest {
     }
 
     @Test
-    fun oneDriveBackendBridgeDownloadsCompleteBytesWithoutGrantingTokenToRedirect() = runBlocking<Unit> {
+    fun oneDriveBackendBridgeDownloadsWithOnePathRequestAndNoTokenOnContent() = runBlocking<Unit> {
         val bytes = epub("OneDrive backend")
         val requests = mutableListOf<Request>()
-        fun item(id: String, name: String, parent: String?, directory: Boolean): Map<String, Any?> = buildMap {
-            put("id", id); put("name", name); put(if (directory) "folder" else "file", emptyMap<String, Any>())
-            if (parent != null) put("parentReference", mapOf("id" to parent, "driveId" to "drive"))
-            put("cTag", "content-1"); put("size", bytes.size.toLong())
-        }
-        val items = mapOf("root" to item("root", "library", null, true),
-            "author" to item("author", "作者", "root", true), "book" to item("book", "书名 (1)", "author", true),
-            "epub" to item("epub", "正文.epub", "book", false))
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
             requests.add(request)
-            val path = request.url.encodedPath
             val builder = Response.Builder().request(request).protocol(Protocol.HTTP_1_1).message("fixture")
             when {
                 request.url.host == "download.example" -> builder.code(200).body(bytes.toResponseBody()).build()
-                path.endsWith("/content") -> builder.code(302).header("Location", "https://download.example/fixture")
-                    .body("".toResponseBody()).build()
-                else -> {
-                    val payload = when {
-                        path.endsWith("/me/drive") -> mapOf("id" to "drive", "driveType" to "personal", "owner" to mapOf("user" to mapOf("id" to "account")))
-                        path.endsWith("/children") -> mapOf("value" to items.values.filter {
-                            (it["parentReference"] as? Map<*, *>)?.get("id") == request.url.pathSegments[4]
-                        })
-                        else -> items.getValue(request.url.pathSegments.last())
-                    }
-                    builder.code(200).body(JSONObject(payload).toString().toResponseBody()).build()
-                }
+                request.url.encodedPath.startsWith("/v1.0/drives/drive/items/graph-library:/") -> builder.code(200).body(JSONObject(mapOf(
+                    "id" to "epub", "name" to "正文.epub", "file" to emptyMap<String, Any>(),
+                    "parentReference" to mapOf("id" to "book", "driveId" to "drive"), "cTag" to "content-1",
+                    "size" to bytes.size.toLong(), "@microsoft.graph.downloadUrl" to "https://download.example/fixture?secret=ephemeral",
+                )).toString().toResponseBody()).build()
+                else -> error("Unexpected request")
             }
         }.build()
-        val selection = state.select(LibraryLocation.OneDrive("account", "drive", "root"))
-        val identity = requireNotNull(metadata.importSnapshot(selection.token,
-            CalibreFixture.create(File(root, "graph-library.db"), bookUuid = bookUuid)))
-        libraries.add(identity.id)
-        val remoteBook = BookKey(identity.id, 1, bookUuid)
+        val remoteBook = activateOneDrive("graph-library")
         val local = LocalSourceBackend(object : LocalDocumentAccess {
             override fun root(treeUri: String): LocalDocument = error("Unexpected local source")
             override fun children(treeUri: String, parentId: String): List<LocalDocument> = error("Unexpected local source")
@@ -748,16 +730,126 @@ class FormatCopyTaskHandlerTest {
             override fun openRead(treeUri: String, documentId: String): InputStream = error("Unexpected local source")
         }, File(root, "unused-snapshots"), SnapshotValidator { false }, Dispatchers.IO)
         val remote = OneDriveSourceBackend({ "fixture-token" }, File(root, "graph-snapshots"), SnapshotValidator { false },
-            Dispatchers.IO, client = client, contentClient = client)
-        val task = submit(TaskRequest.FormatCopy(FormatResource(remoteBook, BookFormat.parse("EPUB"),
-            SourceFileLocator.Relative(BackendKind.ONEDRIVE, RelativeSourcePath("作者/书名 (1)/正文.epub")))))
-        coordinator(BackendFormatSource(state, local, remote)).drain()
+            Dispatchers.IO, client = client, contentClient = client, accountProvider = { "subject" })
+        val task = submit(oneDriveRequest(remoteBook))
+        coordinator(productionSources(local, remote)).drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
         assertArrayEquals(bytes, readBytes(key(target = remoteBook)))
-        val download = requests.single { it.url.host == "download.example" }
-        assertNull(download.header("Authorization"))
+        val graph = requests.filter { it.url.host == "graph.microsoft.com" }
+        assertEquals(listOf("/v1.0/drives/drive/items/graph-library:/%E4%BD%9C%E8%80%85/%E4%B9%A6%E5%90%8D%20%281%29/%E6%AD%A3%E6%96%87.epub"),
+            graph.map { it.url.encodedPath })
+        assertTrue(graph.all { it.header("Authorization") == "Bearer fixture-token" })
+        assertNull(requests.single { it.url.host == "download.example" }.header("Authorization"))
         assertEquals(FileVersion(BackendKind.ONEDRIVE, "content-1"), state.find(key(target = remoteBook))!!.savedVersion)
-        assertTrue(requests.filter { it.url.host == "graph.microsoft.com" }.all { it.header("Authorization") == "Bearer fixture-token" })
+    }
+
+    @Test
+    fun oneDriveImportChecksOnlyCopiesWhoseCalibreRecordChanged() = runBlocking<Unit> {
+        val remoteBook = activateOneDrive("stamped")
+        val source = Source(epub("stamped"))
+        submit(oneDriveRequest(remoteBook))
+        coordinator(source).drain()
+        val copy = key(target = remoteBook)
+        assertNotNull(state.find(copy))
+        reimport("stamped")
+        assertEquals(emptyList<TaskRequest>(), pendingChecks())
+        reimport("stamped", lastModified = "2026-03-04 05:06:07.000000+00:00")
+        assertEquals(listOf(TaskRequest.FormatCheck(copy)), pendingChecks())
+        source.paths.clear()
+        coordinator(source).drain()
+        assertEquals(1, source.paths.size)
+        // The unchanged version was confirmed against the new record, so the same import is not checked again.
+        reimport("stamped", lastModified = "2026-03-04 05:06:07.000000+00:00")
+        assertEquals(emptyList<TaskRequest>(), pendingChecks())
+        reimport("stamped", lastModified = "2026-03-04 05:06:07.000000+00:00", epubSize = 43)
+        assertEquals(listOf(TaskRequest.FormatCheck(copy)), pendingChecks())
+        coordinator(source).drain()
+        // A copy downloaded before Calibre records were kept is checked once, then recorded.
+        database.writableDatabase.execSQL("UPDATE downloaded_copies SET calibre_recorded = 0")
+        reimport("stamped", lastModified = "2026-03-04 05:06:07.000000+00:00", epubSize = 43)
+        assertEquals(listOf(TaskRequest.FormatCheck(copy)), pendingChecks())
+        coordinator(source).drain()
+        reimport("stamped", lastModified = "2026-03-04 05:06:07.000000+00:00", epubSize = 43)
+        assertEquals(emptyList<TaskRequest>(), pendingChecks())
+    }
+
+    @Test
+    fun staleOneDrivePathSyncsOnceAtInheritedPriorityAndRetriesAtNewPath() = runBlocking<Unit> {
+        val remoteBook = activateOneDrive("renamed")
+        val source = Source(epub("renamed")).apply { missing = setOf("作者/书名 (1)/正文.epub") }
+        val sync = FixtureSync("renamed", "作者/新书名 (1)")
+        val task = submit(oneDriveRequest(remoteBook))
+        coordinator(source, sync).drain()
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertEquals(listOf("作者/书名 (1)/正文.epub", "作者/新书名 (1)/正文.epub"), source.paths.distinct())
+        assertEquals(listOf(TaskOrigin.USER_DOWNLOAD), sync.origins)
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(sync.tasks.single())!!.record.state)
+        assertArrayEquals(source.bytes, readBytes(key(target = remoteBook)))
+        assertFalse(queue.list().any { it.record.submission.request is TaskRequest.CandidateConfiguration &&
+            it.record.state !is TaskState.Finished })
+    }
+
+    @Test
+    fun stillMissingAfterSyncFailsOnceAndOnlyThenMarksCopyUnavailable() = runBlocking<Unit> {
+        val remoteBook = activateOneDrive("vanished")
+        val source = Source(epub("vanished"))
+        submit(oneDriveRequest(remoteBook))
+        coordinator(source).drain()
+        val copy = key(target = remoteBook)
+        source.missing = setOf("作者/书名 (1)/正文.epub")
+        var firstSync = true
+        val sync = FixtureSync("vanished", "作者/书名 (1)") {
+            if (firstSync) assertEquals(SourceAvailability.AVAILABLE, state.find(copy)!!.sourceAvailability)
+            firstSync = false
+        }
+        source.paths.clear()
+        val check = submitCheck(copy)
+        coordinator(source, sync).drain()
+        assertEquals(StorageErrorKind.SOURCE_MISSING, failedKind(check))
+        // The sync kept the same path, so the retry fails without requesting it again.
+        assertEquals(listOf("作者/书名 (1)/正文.epub"), source.paths)
+        assertEquals(1, sync.tasks.size)
+        assertEquals(listOf(TaskOrigin.DOWNLOADED_FORMAT_UPDATE), sync.origins)
+        assertEquals(SourceAvailability.CONFIRMED_MISSING, state.find(copy)!!.sourceAvailability)
+        assertTrue(queue.control(check, TaskControl.RETRY))
+        coordinator(source, sync).drain()
+        assertEquals(2, sync.tasks.size)
+    }
+
+    @Test
+    fun throttledOneDriveLibraryHoldsItsSourceTasksAcrossRestartButNotOtherLibraries() = runBlocking<Unit> {
+        val remoteBook = activateOneDrive("throttled")
+        val source = Source(epub("throttled")).apply { throttleMillis = 60_000 }
+        var now = 1_000_000L
+        fun throttledCoordinator() = TaskCoordinator(queue, listOf(FormatCopyTaskHandler(state, metadata, queue, source.sources,
+            context.filesDir, Dispatchers.IO, availableBytes = { Long.MAX_VALUE })), now = { now })
+        val first = submit(oneDriveRequest(remoteBook))
+        val second = submit(oneDriveRequest(remoteBook, "PDF"))
+        throttledCoordinator().drain()
+        assertEquals(1, source.paths.size)
+        val waiting = TaskState.Waiting(FrozenSet(listOf(WaitingReason.THROTTLED)))
+        assertEquals(waiting, queue.get(first)!!.record.state)
+        assertEquals(waiting, queue.get(second)!!.record.state)
+        assertEquals(now + 60_000, queue.get(second)!!.retryAt)
+        database.close()
+        reopen()
+        now += 59_000
+        throttledCoordinator().drain()
+        assertEquals(1, source.paths.size)
+        // Local work in another library proceeds while the OneDrive library is throttled.
+        source.throttleMillis = null
+        state.select(LibraryLocation.Local("test.documents", "first"))
+        val local = submit()
+        throttledCoordinator().drain()
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(local)!!.record.state)
+        state.select(LibraryLocation.OneDrive("microsoft-consumers:subject", "drive", "throttled"))
+        now += 2_000
+        source.paths.clear()
+        throttledCoordinator().drain()
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(first)!!.record.state)
+        // The fixture serves EPUB bytes only; the PDF task ran after the deadline and failed validation.
+        assertTrue("作者/书名 (1)/正文.pdf" in source.paths)
+        assertTrue(queue.get(second)!!.record.state is TaskState.Finished)
     }
 
     @Test
@@ -915,10 +1007,14 @@ class FormatCopyTaskHandlerTest {
     private suspend fun submitCheck(key: CopyKey): TaskId =
         (queue.submit(TaskSubmission(TaskRequest.FormatCheck(key), TaskOrigin.DOWNLOADED_FORMAT_UPDATE)) as SubmissionResult.Created).taskId
 
-    private fun coordinator(source: FormatSource, availableBytes: () -> Long = { Long.MAX_VALUE }, copyFilesDir: File = context.filesDir) =
-        TaskCoordinator(queue, listOf(FormatCopyTaskHandler(state, metadata, queue, source, copyFilesDir, Dispatchers.IO, availableBytes)))
+    private fun coordinator(source: Source, availableBytes: () -> Long = { Long.MAX_VALUE }, copyFilesDir: File = context.filesDir) =
+        coordinator(source.sources, availableBytes, copyFilesDir)
 
-    private class Source(@Volatile var bytes: ByteArray, @Volatile var token: String = hash(bytes)) : FormatSource {
+    private fun coordinator(sources: LibrarySources, availableBytes: () -> Long = { Long.MAX_VALUE }, copyFilesDir: File = context.filesDir) =
+        TaskCoordinator(queue, listOf(FormatCopyTaskHandler(state, metadata, queue, sources, copyFilesDir, Dispatchers.IO, availableBytes)))
+
+    /** Source I/O fixture. Backend policies come from the production sources; [unchanged] re-reads the token. */
+    private class Source(@Volatile var bytes: ByteArray, @Volatile var token: String = hash(bytes)) {
         @Volatile var knownSize: Long? = null
         @Volatile var estimate: Long? = null
         @Volatile var failure: StorageErrorKind? = null
@@ -929,27 +1025,54 @@ class FormatCopyTaskHandlerTest {
         @Volatile var blockAfterChunk = false
         @Volatile var networkAfterChunk = false
         @Volatile var rangeSupported = true
+        @Volatile var throttleMillis: Long? = null
+        @Volatile var missing = emptySet<String>()
+        val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
         val rangeOffsets = mutableListOf<Long>()
         val bytesRead = java.util.concurrent.atomic.AtomicLong()
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
         val opens = AtomicInteger()
         val closes = AtomicInteger()
-        override suspend fun version(location: LibraryLocation, path: RelativeSourcePath): FileVersion {
-            failure?.let { throw FormatSourceFailure(StorageError(it)) }
+        val sources = LibrarySources { backend -> on(SourcePolicies.sources.of(backend)) }
+        private fun on(policy: LibrarySource): LibrarySource = object : LibrarySource by policy {
+            override suspend fun lookup(location: LibraryLocation, path: RelativeSourcePath, control: suspend () -> Unit): SourceFile {
+                control()
+                val observed = version(location, path)
+                control()
+                val exact = knownSize
+                val estimated = estimate ?: exact
+                return object : SourceFile {
+                    override val version = observed
+                    override val size = exact
+                    override val estimatedSize = estimated
+                    override val contentSha256 = observed.token.takeIf { policy.backend == BackendKind.LOCAL }
+                    override suspend fun open() = this@Source.open()
+                    override suspend fun openRange(offset: Long) = this@Source.openRange(location, offset, observed)
+                }
+            }
+            override suspend fun unchanged(location: LibraryLocation, path: RelativeSourcePath, version: FileVersion,
+                control: suspend () -> Unit): Boolean {
+                control()
+                return version(location, path) == version
+            }
+        }
+        fun version(location: LibraryLocation, path: RelativeSourcePath): FileVersion {
+            paths.add(path.value)
+            failure?.let { throw SourceFailure(StorageError(it)) }
+            throttleMillis?.let { throw SourceFailure(StorageError(StorageErrorKind.THROTTLED), true, it) }
+            if (path.value in missing) throw SourceFailure(StorageError(StorageErrorKind.SOURCE_MISSING))
             return FileVersion(location.backend, token)
         }
-        override suspend fun size(location: LibraryLocation, path: RelativeSourcePath): Long? = knownSize
-        override suspend fun estimatedSize(location: LibraryLocation, path: RelativeSourcePath): Long? = estimate ?: knownSize
-        override suspend fun open(location: LibraryLocation, path: RelativeSourcePath): InputStream {
-            failure?.let { throw FormatSourceFailure(StorageError(it)) }
+        fun open(): InputStream {
+            failure?.let { throw SourceFailure(StorageError(it)) }
             opens.incrementAndGet()
             return stream(0)
         }
-        override suspend fun openRange(location: LibraryLocation, path: RelativeSourcePath, offset: Long, expectedVersion: FileVersion): InputStream? {
+        fun openRange(location: LibraryLocation, offset: Long, expectedVersion: FileVersion): InputStream? {
             assertEquals(FileVersion(location.backend, token), expectedVersion)
             rangeOffsets.add(offset)
-            rangeFailure?.let { throw FormatSourceFailure(StorageError(it)) }
+            rangeFailure?.let { throw SourceFailure(StorageError(it)) }
             return if (rangeSupported) stream(offset) else null
         }
         private fun stream(startOffset: Long): InputStream {
@@ -970,7 +1093,7 @@ class FormatCopyTaskHandlerTest {
                         if (shouldBlockAfterChunk) { blockedAfterChunk = true; return 0 }
                     }
                     if (networkAfterChunk && chunks > 0)
-                        throw FormatSourceFailure(StorageError(StorageErrorKind.NO_NETWORK), transient = true)
+                        throw SourceFailure(StorageError(StorageErrorKind.NO_NETWORK), transient = true)
                     if (failAfterFirstChunk && chunks > 0) throw IOException("Injected stream interruption")
                     val result = super.read(buffer, offset,
                         if (failAfterFirstChunk || networkAfterChunk || (shouldBlockAfterChunk && chunks == 0)) minOf(length, 64) else length)
@@ -981,6 +1104,15 @@ class FormatCopyTaskHandlerTest {
                 override fun close() { closes.incrementAndGet(); super.close() }
             }
         }
+    }
+
+    /** The production sources over the given backends, with the local grant of the current selection. */
+    private fun productionSources(local: LocalSourceBackend, remote: OneDriveSourceBackend): LibrarySources {
+        val localSource = LocalLibrarySource(local) { location ->
+            if (state.current()?.location == location) state.localTreeUri() else null
+        }
+        val oneDrive = OneDriveLibrarySource(remote)
+        return LibrarySources { if (it == BackendKind.LOCAL) localSource else oneDrive }
     }
 
     private companion object {
@@ -1013,6 +1145,53 @@ class FormatCopyTaskHandlerTest {
         libraries.add(identity.id)
         return BookKey(identity.id, 1, bookUuid)
     }
+
+    private suspend fun activateOneDrive(name: String): BookKey {
+        state.select(LibraryLocation.OneDrive("microsoft-consumers:subject", "drive", name))
+        return BookKey(reimport(name).id, 1, bookUuid).also { libraries.add(it.libraryId) }
+    }
+
+    private suspend fun reimport(name: String, lastModified: String = "2026-01-02 03:04:05.000000+00:00", epubSize: Long = 42,
+        bookPath: String = "作者/书名 (1)"): LibraryIdentity {
+        val fixture = CalibreFixture.create(File(root, "$name-${UUID.randomUUID()}.db"), libraryUuid = UUID.nameUUIDFromBytes(name.toByteArray()),
+            bookUuid = bookUuid, lastModified = lastModified, epubSize = epubSize, bookPath = bookPath)
+        return requireNotNull(metadata.importSnapshot(state.current()!!.token, fixture,
+            sourceVersion = FileVersion(BackendKind.ONEDRIVE, UUID.randomUUID().toString()), checksCopy = SourcePolicies.sources.of(BackendKind.ONEDRIVE)::checksCopy))
+    }
+
+    private suspend fun pendingChecks() = queue.list().map { it.record }
+        .filter { it.state !is TaskState.Finished && it.submission.request is TaskRequest.FormatCheck }.map { it.submission.request }
+
+    private fun oneDriveRequest(target: BookKey, format: String = "EPUB") = TaskRequest.FormatCopy(FormatResource(target, BookFormat.parse(format),
+        SourceFileLocator.Relative(BackendKind.ONEDRIVE, RelativeSourcePath("作者/书名 (1)/正文.${format.lowercase()}"))))
+
+    /** A metadata sync stand-in: imports the library again with the book at [bookPath]. */
+    private inner class FixtureSync(private val name: String, private val bookPath: String, private val during: suspend () -> Unit = {}) : TaskHandler {
+        val tasks = mutableListOf<TaskId>()
+        val origins = mutableListOf<TaskOrigin>()
+        suspend fun request(origin: TaskOrigin): TaskId {
+            val selection = state.current()!!
+            val result = queue.submit(TaskSubmission(TaskRequest.CandidateConfiguration(
+                CandidateContext(selection.token, BackendKind.ONEDRIVE, UUID.randomUUID()), "fixture_sync"), origin))
+            val id = (result as SubmissionResult.Created).taskId
+            tasks.add(id); origins.add(origin)
+            return id
+        }
+        override fun supports(request: TaskRequest) = (request as? TaskRequest.CandidateConfiguration)?.operation == "fixture_sync"
+        override fun controls(stage: TaskStage) = TaskControls(false, true, false, false)
+        override suspend fun recover(entry: QueueEntry, execution: TaskExecution) = RecoveryDecision(TaskStage.CANDIDATE_ACCESS, null)
+        override suspend fun execute(entry: QueueEntry, execution: TaskExecution): StageOutcome {
+            during()
+            val fixture = CalibreFixture.create(File(root, "$name-${UUID.randomUUID()}.db"), libraryUuid = UUID.nameUUIDFromBytes(name.toByteArray()),
+                bookUuid = bookUuid, bookPath = bookPath, lastModified = "2026-01-02 03:04:05.000000+00:00")
+            requireNotNull(metadata.importSnapshot(state.current()!!.token, fixture, entry.record.id.value,
+                FileVersion(BackendKind.ONEDRIVE, UUID.randomUUID().toString()), SourcePolicies.sources.of(BackendKind.ONEDRIVE)::checksCopy))
+            return StageOutcome.Complete(cachePublished = true)
+        }
+    }
+
+    private fun coordinator(source: Source, sync: FixtureSync) = TaskCoordinator(queue, listOf(
+        FormatCopyTaskHandler(state, metadata, queue, source.sources, context.filesDir, Dispatchers.IO, { Long.MAX_VALUE }, sync::request), sync))
 
     private fun key(format: String = "EPUB", target: BookKey = book) = CopyKey(target, BookFormat.parse(format))
 

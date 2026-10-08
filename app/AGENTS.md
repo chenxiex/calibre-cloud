@@ -33,6 +33,7 @@
 - 测试随实际功能路径加入，不添加常量或空 Activity 的占位测试；`NO-SOURCE` 或生成 AndroidTest APK 不能记为功能测试通过。
 - 工程与构建配置变更按受影响路径执行 debug/release 构建和 lint；生成依赖锁后再运行不更新锁的构建，核对锁文件未变化。
 - 检查实际 APK 的最低系统、包标识、可调试状态及导出组件；OAuth 配置缺失时核对回调禁用。release 仅生成未签名产物，不使用正式签名。
+- 设备测试的 runner 是 androidTest 中的 `io.github.chenxiex.calibrecloud.AwakeTestRunner`，手动 `am instrument` 也要指定它。它在整轮测试期间持有 partial wake lock：PA6 亮屏时若无 wake lock 也会挂起 CPU，每分钟只醒约 7 秒，测试进程会随之冻结。
 - ADB 安装前先从 APK 核对 debug application ID，只使用测试书库副本；记录结果后卸载 debug 与测试包，不覆盖正式应用或访问正式数据。
 - 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md)、[第二阶段记录](verification/phase-2.md) 与 [第三阶段记录](verification/phase-3.md)。构建及模拟平台／服务响应不能替代对应阶段的真实设备／上游验证；在目标真机自动执行的测试或 ADB 操作按其实际覆盖范围计为真机证据。
 

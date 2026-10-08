@@ -22,7 +22,7 @@ import java.io.File
  *
  *     adb push <library>/metadata.db /data/local/tmp/seed-metadata.db
  *     adb shell am instrument -w -e class io.github.chenxiex.calibrecloud.library.ExtendedLibrarySeedTest \
- *         -e seedLibraryDb /data/local/tmp/seed-metadata.db io.github.chenxiex.calibrecloud.debug.test/androidx.test.runner.AndroidJUnitRunner
+ *         -e seedLibraryDb /data/local/tmp/seed-metadata.db io.github.chenxiex.calibrecloud.debug.test/io.github.chenxiex.calibrecloud.AwakeTestRunner
  */
 @RunWith(AndroidJUnit4::class)
 class ExtendedLibrarySeedTest {

@@ -72,7 +72,7 @@ class LibraryQueryPlatformTest {
     @Test
     fun importedTextEnumerationAndMultiValueColumnsSearchCategorizeAndInvalidColumnsReport() = runBlocking<Unit> {
         importFixture { db ->
-            db.execSQL("INSERT INTO books VALUES (2,?,'无标签书','2026-01-05 00:00:00+00:00','b/2',NULL,0)", arrayOf(UUID.randomUUID().toString()))
+            db.execSQL("INSERT INTO books(id,uuid,title,timestamp,path,series_index,has_cover) VALUES (2,?,'无标签书','2026-01-05 00:00:00+00:00','b/2',NULL,0)", arrayOf(UUID.randomUUID().toString()))
             db.execSQL("INSERT INTO data VALUES (2,'PDF',NULL,'正文')")
         }
         val tags = service.query(LibraryRequest(categorization = Categorization.Tags, pageSize = 10)) as LibraryQueryResult.Folders
@@ -92,7 +92,7 @@ class LibraryQueryPlatformTest {
     @Test
     fun readColumnConfigurationRevisesViewsAndFiltersUseRealImportedValues() = runBlocking<Unit> {
         importFixture { db ->
-            db.execSQL("INSERT INTO books VALUES (2,?,'未读书','2026-01-05 00:00:00+00:00','b/2',NULL,0)", arrayOf(UUID.randomUUID().toString()))
+            db.execSQL("INSERT INTO books(id,uuid,title,timestamp,path,series_index,has_cover) VALUES (2,?,'未读书','2026-01-05 00:00:00+00:00','b/2',NULL,0)", arrayOf(UUID.randomUUID().toString()))
         }
         val before = (service.query(LibraryRequest(pageSize = 10)) as LibraryQueryResult.Books).revision
         val imported = metadata.currentImport()!!

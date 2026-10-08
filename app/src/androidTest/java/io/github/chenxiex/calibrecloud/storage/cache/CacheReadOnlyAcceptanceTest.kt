@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.storage.cache
 
+import io.github.chenxiex.calibrecloud.storage.api.of
 import android.os.Bundle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -84,7 +85,7 @@ class CacheReadOnlyAcceptanceTest {
                         AndroidLocalDocumentAccess(context).root(tree).name)
                 }
                 is LibraryLocation.OneDrive -> {
-                    val root = dependencies.oneDriveBackend.listDirectories(location)
+                    val root = dependencies.oneDriveBackend.listAllDirectories(location)
                     assertTrue("Cannot verify the prepared test root", root is OneDriveSourceResult.Available)
                     assertEquals("library-a", (root as OneDriveSourceResult.Available).value.parentName)
                 }
@@ -189,10 +190,10 @@ class CacheReadOnlyAcceptanceTest {
 
     private suspend fun sourceEvidence(dependencies: ApplicationDependencies, location: LibraryLocation,
         path: RelativeSourcePath): SourceEvidence {
-        val version = dependencies.formatSource.version(location, path)
-        val bytes = dependencies.formatSource.open(location, path).use { bounded(it) }
+        val version = dependencies.librarySources.of(location).lookup(location, path) {}.version
+        val bytes = dependencies.librarySources.of(location).lookup(location, path) {}.open().use { bounded(it) }
         assertEquals("Source must remain stable throughout a read-only probe", version,
-            dependencies.formatSource.version(location, path))
+            dependencies.librarySources.of(location).lookup(location, path) {}.version)
         return SourceEvidence(version, bytes)
     }
 

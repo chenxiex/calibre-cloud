@@ -1,7 +1,11 @@
 package io.github.chenxiex.calibrecloud.state
 
 import android.content.Context
+import android.content.ContentValues
+import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import io.github.chenxiex.calibrecloud.model.LibraryLocation
+import io.github.chenxiex.calibrecloud.storage.api.LocationKeys
 import android.database.sqlite.SQLiteOpenHelper
 
 /**
@@ -14,11 +18,20 @@ import android.database.sqlite.SQLiteOpenHelper
  * Version 6 adds the default-off process startup sync setting.
  * Version 7 adds per-library search history.
  * Version 8 adds the per-library last opened book.
+ * Version 9 adds OneDrive request-cost state: the imported source version, the Calibre record a
+ * downloaded copy was confirmed against, a task's one stale-path sync with its missing path, and
+ * library throttle deadlines.
+ * Version 10 stores library locations as opaque storage keys instead of per-backend columns.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
+ * Raising [VERSION] also requires its reversal in the androidTest StateSchemaHistory fixture.
  */
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
-    SQLiteOpenHelper(context.applicationContext, name, null, 8) {
+    SQLiteOpenHelper(context.applicationContext, name, null, VERSION) {
+    companion object {
+        const val VERSION = 10
+    }
+
     private val privateFiles = context.applicationContext.filesDir
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -26,48 +39,10 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        db.execSQL("""
-            CREATE TABLE library_bindings (
-                library_id TEXT PRIMARY KEY NOT NULL,
-                generation TEXT NOT NULL,
-                backend TEXT NOT NULL CHECK(backend IN ('local', 'onedrive')),
-                authority TEXT NOT NULL,
-                root_id TEXT NOT NULL,
-                account_id TEXT NOT NULL,
-                drive_id TEXT NOT NULL,
-                UNIQUE(backend, authority, root_id, account_id, drive_id, generation)
-            )
-        """.trimIndent())
-        db.execSQL("""
-            CREATE TABLE current_selection (
-                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-                token TEXT NOT NULL,
-                backend TEXT NOT NULL CHECK(backend IN ('local', 'onedrive')),
-                authority TEXT NOT NULL,
-                root_id TEXT NOT NULL,
-                account_id TEXT NOT NULL,
-                drive_id TEXT NOT NULL,
-                library_id TEXT REFERENCES library_bindings(library_id),
-                authorization_id TEXT
-            )
-        """.trimIndent())
+        createBindings(db)
+        createSelection(db)
         db.execSQL("CREATE TABLE local_authorization (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), tree_uri TEXT NOT NULL)")
-        db.execSQL("""
-            CREATE TABLE downloaded_copies (
-                library_id TEXT NOT NULL REFERENCES library_bindings(library_id),
-                source_id INTEGER NOT NULL CHECK(source_id > 0),
-                source_uuid TEXT NOT NULL,
-                format TEXT NOT NULL,
-                file_generation TEXT NOT NULL,
-                title TEXT NOT NULL,
-                size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes > 0),
-                version_backend TEXT NOT NULL CHECK(version_backend IN ('local', 'onedrive')),
-                version_token TEXT NOT NULL,
-                source_availability TEXT NOT NULL CHECK(source_availability IN ('unconfirmed', 'available', 'missing')),
-                PRIMARY KEY(library_id, source_id, source_uuid, format),
-                UNIQUE(library_id, file_generation)
-            )
-        """.trimIndent())
+        createCopies(db, "downloaded_copies")
         createQueue(db)
         createMetadata(db)
         createCovers(db)
@@ -75,8 +50,103 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createStartupSetting(db)
         createSearchHistory(db)
         createLastOpened(db)
-        // The composite primary key is also the library-scoped ordered manifest index.
-        db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, authority, root_id, account_id, drive_id)")
+        createRequestCosts(db)
+    }
+
+    /**
+     * Locations are stored as the backend code and the storage layer's opaque [LocationKeys] key; backend
+     * codes are not constrained here, so adding a backend changes no table.
+     */
+    private fun createBindings(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE library_bindings (
+                library_id TEXT PRIMARY KEY NOT NULL,
+                generation TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                location_key TEXT NOT NULL,
+                UNIQUE(backend, location_key, generation)
+            )
+        """.trimIndent())
+        db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, location_key)")
+    }
+
+    /** A null location_key is a candidate whose stable root is not chosen yet. */
+    private fun createSelection(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE current_selection (
+                singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+                token TEXT NOT NULL,
+                backend TEXT NOT NULL,
+                location_key TEXT,
+                library_id TEXT REFERENCES library_bindings(library_id),
+                authorization_id TEXT
+            )
+        """.trimIndent())
+    }
+
+    /** The composite primary key is also the library-scoped ordered manifest index. */
+    private fun createCopies(db: SQLiteDatabase, table: String) {
+        db.execSQL("""
+            CREATE TABLE $table (
+                library_id TEXT NOT NULL REFERENCES library_bindings(library_id),
+                source_id INTEGER NOT NULL CHECK(source_id > 0),
+                source_uuid TEXT NOT NULL,
+                format TEXT NOT NULL,
+                file_generation TEXT NOT NULL,
+                title TEXT NOT NULL,
+                size_bytes INTEGER CHECK(size_bytes IS NULL OR size_bytes > 0),
+                version_backend TEXT NOT NULL,
+                version_token TEXT NOT NULL,
+                source_availability TEXT NOT NULL CHECK(source_availability IN ('unconfirmed', 'available', 'missing')),
+                calibre_recorded INTEGER NOT NULL DEFAULT 0,
+                calibre_modified TEXT,
+                calibre_size INTEGER,
+                PRIMARY KEY(library_id, source_id, source_uuid, format),
+                UNIQUE(library_id, file_generation)
+            )
+        """.trimIndent())
+    }
+
+    /**
+     * Version 10: replaces the per-backend location columns of bindings and the selection with opaque
+     * keys and drops the backend CHECK constraints. Parent rows are rewritten under deferred foreign keys;
+     * commit fails if any reference is left without its binding.
+     */
+    private fun migrateLocationKeys(db: SQLiteDatabase) {
+        db.execSQL("PRAGMA defer_foreign_keys = ON")
+        fun Cursor.legacyKey(): String {
+            fun text(name: String) = getString(getColumnIndexOrThrow(name))
+            return LocationKeys.encode(when (text("backend")) {
+                "local" -> LibraryLocation.Local(text("authority"), text("root_id"))
+                else -> LibraryLocation.OneDrive(text("account_id"), text("drive_id"), text("root_id"))
+            })
+        }
+        val selection = db.rawQuery("SELECT * FROM current_selection", null).use {
+            if (!it.moveToFirst()) null else ContentValues().apply {
+                listOf("singleton", "token", "backend", "library_id", "authorization_id").forEach { column ->
+                    put(column, it.getString(it.getColumnIndexOrThrow(column)))
+                }
+                if (it.getString(it.getColumnIndexOrThrow("root_id")).isEmpty()) putNull("location_key") else put("location_key", it.legacyKey())
+            }
+        }
+        val bindings = db.rawQuery("SELECT * FROM library_bindings", null).use { cursor ->
+            buildList { while (cursor.moveToNext()) add(ContentValues().apply {
+                listOf("library_id", "generation", "backend").forEach { put(it, cursor.getString(cursor.getColumnIndexOrThrow(it))) }
+                put("location_key", cursor.legacyKey())
+            }) }
+        }
+        db.execSQL("DROP TABLE current_selection")
+        db.execSQL("DROP TABLE library_bindings")
+        createBindings(db)
+        bindings.forEach { db.insertOrThrow("library_bindings", null, it) }
+        createSelection(db)
+        if (selection != null) db.insertOrThrow("current_selection", null, selection)
+        createCopies(db, "downloaded_copies_v10")
+        val columns = "library_id,source_id,source_uuid,format,file_generation,title,size_bytes,version_backend,version_token," +
+            "source_availability,calibre_recorded,calibre_modified,calibre_size"
+        db.execSQL("INSERT INTO downloaded_copies_v10($columns) SELECT $columns FROM downloaded_copies")
+        db.execSQL("DROP TABLE downloaded_copies")
+        db.execSQL("ALTER TABLE downloaded_copies_v10 RENAME TO downloaded_copies")
     }
 
     /** Queue payloads use versioned explicit tags; relational edges enforce referential integrity. */
@@ -233,8 +303,29 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         )""".trimIndent())
     }
 
+    /**
+     * calibre_modified/calibre_size hold books.last_modified and the format size of the import a copy
+     * was published or confirmed against; calibre_recorded distinguishes unknown sizes from copies
+     * downloaded before version 9. Columns are added only when absent.
+     */
+    private fun createRequestCosts(db: SQLiteDatabase) {
+        fun add(table: String, column: String, definition: String) {
+            val present = db.rawQuery("PRAGMA table_info($table)", null).use {
+                generateSequence { if (it.moveToNext()) it.getString(1) else null }.any { name -> name == column }
+            }
+            if (!present) db.execSQL("ALTER TABLE $table ADD COLUMN $column $definition")
+        }
+        add("metadata_imports", "source_version", "TEXT")
+        add("downloaded_copies", "calibre_recorded", "INTEGER NOT NULL DEFAULT 0")
+        add("downloaded_copies", "calibre_modified", "TEXT")
+        add("downloaded_copies", "calibre_size", "INTEGER")
+        add("queued_tasks", "source_sync", "TEXT")
+        add("queued_tasks", "missing_path", "TEXT")
+        db.execSQL("CREATE TABLE IF NOT EXISTS source_throttle (scope TEXT PRIMARY KEY NOT NULL, until INTEGER NOT NULL)")
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..7 && newVersion == 8)
+        check(oldVersion in 1 until VERSION && newVersion == VERSION)
         if (oldVersion == 1) {
             db.execSQL("ALTER TABLE current_selection ADD COLUMN authorization_id TEXT")
             createQueue(db)
@@ -247,6 +338,8 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         }
         if (oldVersion <= 5) createStartupSetting(db)
         if (oldVersion <= 6) createSearchHistory(db)
-        createLastOpened(db)
+        if (oldVersion <= 7) createLastOpened(db)
+        createRequestCosts(db)
+        if (oldVersion <= 9) migrateLocationKeys(db)
     }
 }

@@ -1,5 +1,9 @@
 package io.github.chenxiex.calibrecloud.tasks
 
+import io.github.chenxiex.calibrecloud.tasks.sync.LibrarySyncTaskHandler
+import io.github.chenxiex.calibrecloud.tasks.background.StartupSync
+import io.github.chenxiex.calibrecloud.storage.api.LibrarySources
+import io.github.chenxiex.calibrecloud.model.BackendKind
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -15,6 +19,7 @@ import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.storage.local.SnapshotValidator
+import io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveLibrarySource
 import io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveSourceBackend
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.onedrive.*
@@ -59,10 +64,12 @@ class OneDriveCandidateTaskHandlerTest {
     private lateinit var state: ApplicationStateRepository
     private lateinit var queue: DurableTaskQueue
     private lateinit var service: OneDriveCandidateService
+    private lateinit var sync: StartupSync
     private lateinit var coordinator: TaskCoordinator
     private lateinit var authorization: OneDriveAuthorization
     private lateinit var oauth: FakeOAuthPlatform
     private lateinit var graph: GraphFixture
+    private lateinit var metadata: MetadataRepository
     private val configuration = OneDriveOAuthConfiguration("test-client", "test-debug:/oauth2redirect")
 
     @Before
@@ -135,13 +142,15 @@ class OneDriveCandidateTaskHandlerTest {
         assertTrue(service.choose("library-1"))
         val events = mutableListOf<TaskEvent>()
         val observer = launch(start = CoroutineStart.UNDISPATCHED) { queue.events.collect { events.add(it) } }
-        val task = service.acquire()!!
+        val task = sync.request(TaskOrigin.MANUAL_SYNC)!!
         val before = graph.requests.get()
         assertEquals(0, graph.contentReads.get())
         coordinator.drain()
         assertCompleted(task)
         assertTrue(graph.requests.get() > before)
-        assertEquals(2, graph.contentReads.get())
+        assertEquals(1, graph.contentReads.get())
+        assertEquals(listOf("metadata.db", "metadata.db-wal", "metadata.db-journal"), graph.paths)
+        assertEquals(0, graph.childrenAfterSelection.get())
         val files = File(directory, "snapshots/${task.value}").listFiles().orEmpty()
         assertEquals(1, files.size)
         assertEquals("db", files.single().extension)
@@ -154,6 +163,36 @@ class OneDriveCandidateTaskHandlerTest {
         reopen()
         assertCompleted(task)
         assertEquals(LibraryLocation.OneDrive("account", "drive", "library-1"), service.currentLocation())
+    }
+
+    @Test
+    fun unchangedSourceDatabaseEndsSyncAfterOneLookup() = runBlocking<Unit> {
+        service.browse()!!
+        coordinator.drain()
+        assertTrue(service.choose("library-1"))
+        assertCompleted(sync.request(TaskOrigin.MANUAL_SYNC)!!.also { coordinator.drain() })
+        val revision = metadata.currentRevision()!!
+        val importedAt = metadata.currentImport()!!.importedAt
+        graph.paths.clear()
+        val events = mutableListOf<TaskEvent>()
+        val observer = launch(start = CoroutineStart.UNDISPATCHED) { queue.events.collect { events.add(it) } }
+        val unchanged = sync.request(TaskOrigin.MANUAL_SYNC)!!
+        coordinator.drain()
+        assertCompleted(unchanged)
+        assertEquals(listOf("metadata.db"), graph.paths)
+        assertEquals(1, graph.contentReads.get())
+        assertEquals(revision, metadata.currentRevision())
+        assertTrue(metadata.currentImport()!!.importedAt >= importedAt)
+        assertTrue(queue.list().none { it.record.submission.request is TaskRequest.FormatCheck })
+        observer.cancel()
+        observer.join()
+        assertTrue(events.any { it is TaskEvent.CacheChanged && it.taskId == unchanged })
+        graph.tag = "content-generation-2"
+        graph.paths.clear()
+        assertCompleted(sync.request(TaskOrigin.MANUAL_SYNC)!!.also { coordinator.drain() })
+        assertEquals(listOf("metadata.db", "metadata.db-wal", "metadata.db-journal"), graph.paths)
+        assertEquals(2, graph.contentReads.get())
+        assertNotEquals(revision.generation, metadata.currentRevision()!!.generation)
     }
 
     @Test
@@ -203,7 +242,7 @@ class OneDriveCandidateTaskHandlerTest {
         val requestCount = graph.requests.get()
         val queueCount = queue.list().size
         val models = ViewModelStore()
-        val model = withContext(Dispatchers.Main) { OneDriveLibraryViewModel(service).also { models.put("browser", it) } }
+        val model = withContext(Dispatchers.Main) { OneDriveLibraryViewModel(service, sync).also { models.put("browser", it) } }
         try {
             model.restore()
             withTimeout(5_000) { while (model.page == null) delay(10) }
@@ -240,9 +279,15 @@ class OneDriveCandidateTaskHandlerTest {
             SnapshotValidator { it.readBytes().contentEquals(graph.databaseBytes) }, Dispatchers.IO,
             OkHttpClient.Builder().addInterceptor(graph).build(),
         )
-        coordinator = TaskCoordinator(queue, listOf(OneDriveCandidateTaskHandler(state, authorization, backend, results,
-            MetadataRepository(database, state, File(directory, "imports"), Dispatchers.IO))))
+        metadata = MetadataRepository(database, state, File(directory, "imports"), Dispatchers.IO)
+        val authorizations = TestAuthorizations.of(state, { authorization.sessionId() }, { authorization.issue })
+        val source = OneDriveLibrarySource(backend)
+        coordinator = TaskCoordinator(queue, listOf(
+            OneDriveCandidateTaskHandler(state, authorizations.of(BackendKind.ONEDRIVE), backend, source, results),
+            LibrarySyncTaskHandler(state, LibrarySources { source }, authorizations, metadata, Dispatchers.IO),
+        ))
         service = OneDriveCandidateService(state, authorization, queue, coordinator, results)
+        sync = StartupSync(state, coordinator, authorizations)
     }
 
     private suspend fun assertCompleted(task: TaskId) {
@@ -268,14 +313,26 @@ class OneDriveCandidateTaskHandlerTest {
         override fun close() = Unit
     }
 
+    /** Directory picker children plus path-addressed library files; logs are absent (404). */
     private class GraphFixture(val databaseBytes: ByteArray) : Interceptor {
         val requests = AtomicInteger()
         val contentReads = AtomicInteger()
+        val childrenAfterSelection = AtomicInteger()
+        val paths = java.util.Collections.synchronizedList(mutableListOf<String>())
+        @Volatile var tag = "content-generation-1"
         override fun intercept(chain: Interceptor.Chain): Response {
             requests.incrementAndGet()
             val request = chain.request()
             assertEquals("Bearer fixture-access-token", request.header("Authorization"))
             val segments = request.url.pathSegments
+            if (segments.size > 5 && segments[3] == "items" && segments[4].endsWith(":")) {
+                val name = segments.drop(5).joinToString("/")
+                paths.add(name)
+                if (name != "metadata.db") return response(request, "".toResponseBody(), 404)
+                return response(request, JSONObject().put("id", "metadata").put("name", "metadata.db").put("file", JSONObject())
+                    .put("parentReference", parent(segments[4].removeSuffix(":"))).put("cTag", tag)
+                    .put("size", databaseBytes.size).toString().toResponseBody())
+            }
             val body = when {
                 segments == listOf("v1.0", "me", "drive") -> JSONObject().put("id", "drive")
                     .put("driveType", "personal").put("owner", JSONObject().put("user", JSONObject().put("id", "account"))).toString()
@@ -286,6 +343,7 @@ class OneDriveCandidateTaskHandlerTest {
                 }
                 segments.last() == "children" -> {
                     val parent = segments[4]
+                    if (parent != "root") childrenAfterSelection.incrementAndGet()
                     val values = JSONArray()
                     val json = JSONObject().put("value", values)
                     if (parent == "root") {
@@ -305,8 +363,8 @@ class OneDriveCandidateTaskHandlerTest {
             }
             return response(request, body.toResponseBody())
         }
-        private fun response(request: okhttp3.Request, body: okhttp3.ResponseBody) = Response.Builder()
-            .request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK").body(body).build()
+        private fun response(request: okhttp3.Request, body: okhttp3.ResponseBody, code: Int = 200) = Response.Builder()
+            .request(request).protocol(Protocol.HTTP_1_1).code(code).message("fixture").body(body).build()
         private fun parent(id: String) = JSONObject().put("driveId", "drive").put("id", id)
         private fun directory(id: String, parentId: String?) = JSONObject().put("id", id).put("name", "Display $id")
             .put("folder", JSONObject()).apply { parentId?.let { put("parentReference", parent(it)) } }

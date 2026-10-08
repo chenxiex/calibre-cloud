@@ -41,6 +41,12 @@ data class DownloadedCopy(
     }
 }
 
+/**
+ * The imported Calibre record a downloaded copy was last published or confirmed against:
+ * books.last_modified and the format size. OneDrive re-checks a copy only when these change.
+ */
+data class CalibreStamp(val modified: String?, val sizeBytes: Long?)
+
 fun interface CompleteCopyQuery {
     suspend fun find(key: CopyKey): DownloadedCopy?
 }

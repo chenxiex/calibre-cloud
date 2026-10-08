@@ -7,7 +7,6 @@ import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.*
-import io.github.chenxiex.calibrecloud.tasks.local.LocalSnapshotTaskHandler
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -84,7 +83,7 @@ class LocalSourceBackendDeviceTest {
         val selected = requireNotNull(dependencies.state.current())
         val submitted = dependencies.taskCoordinator.submit(TaskSubmission(TaskRequest.CandidateConfiguration(
             CandidateContext(selected.token, BackendKind.LOCAL, selected.authorizationId ?: selected.token),
-            LocalSnapshotTaskHandler.OPERATION), TaskOrigin.MANUAL_SYNC)) as SubmissionResult.Created
+            TaskRequest.CandidateConfiguration.LIBRARY_SYNC), TaskOrigin.MANUAL_SYNC)) as SubmissionResult.Created
         dependencies.taskCoordinator.drain()
         assertEquals(TaskState.Finished(TaskResult.Completed), dependencies.taskQueue.get(submitted.taskId)!!.record.state)
         // A completed sync imports the snapshot and binds the selected directory to a library identity.

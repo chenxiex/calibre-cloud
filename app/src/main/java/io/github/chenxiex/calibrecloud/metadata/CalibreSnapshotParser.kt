@@ -31,6 +31,8 @@ data class ImportedBook(
     val path: RelativeSourcePath,
     val hasCover: Boolean,
     val customValues: Map<Long, ImportedColumnValue>,
+    /** Calibre's own books.last_modified text, compared verbatim; it changes when a format is replaced. */
+    val lastModified: String? = null,
 )
 data class ImportedFormat(val format: BookFormat, val sizeBytes: Long?, val path: RelativeSourcePath)
 data class ImportedColumn(val id: CustomColumnId, val name: String, val datatype: String, val isMultiple: Boolean, val supported: Boolean)
@@ -132,7 +134,8 @@ class CalibreSnapshotParser {
             val size = if (c.isNull(2)) null else c.getLong(2).also { if (it < 0) fail() }
             Triple(book, BookFormat.parse(c.getString(1)), name.value to size)
         }.groupBy { it.first }
-        val books = rows(db, "SELECT id,uuid,title,timestamp,path,series_index,has_cover FROM books ORDER BY id") { c ->
+        val modified = if (rows(db, "PRAGMA table_info(books)") { it.getString(1) }.contains("last_modified")) "last_modified" else "NULL"
+        val books = rows(db, "SELECT id,uuid,title,timestamp,path,series_index,has_cover,$modified FROM books ORDER BY id") { c ->
             val id = c.getLong(0)
             val path = RelativeSourcePath(c.getString(4))
             val formats = rawFormats[id].orEmpty().map { (_, format, data) ->
@@ -144,7 +147,8 @@ class CalibreSnapshotParser {
             val index = if (c.isNull(5)) null else c.getDouble(5).also { if (!it.isFinite()) fail() }
             ImportedBook(id, uuid(c.getString(1)), c.getString(2), authors[id].orEmpty().map { it.replace('|', ',') },
                 timestamp(c.getString(3)), rating?.takeIf { it != 0 }, series[id]?.singleOrNull(), index,
-                tags[id].orEmpty(), comments[id].orEmpty(), formats, path, boolean(c, 6) ?: false, columnValues[id].orEmpty())
+                tags[id].orEmpty(), comments[id].orEmpty(), formats, path, boolean(c, 6) ?: false, columnValues[id].orEmpty(),
+                if (c.isNull(7)) null else c.getString(7))
         }
         if (books.map { it.sourceUuid }.distinct().size != books.size) fail()
         return ParsedLibrary(libraryUuid, books, columns)

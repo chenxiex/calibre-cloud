@@ -11,8 +11,6 @@ import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.storage.api.*
 import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
 import io.github.chenxiex.calibrecloud.tasks.api.*
-import io.github.chenxiex.calibrecloud.tasks.copies.FormatSource
-import io.github.chenxiex.calibrecloud.tasks.copies.FormatSourceFailure
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
@@ -26,10 +24,13 @@ import java.util.UUID
  * Bounded image transfer, sampled decode and immutable PNG publication. Recovery restarts this small
  * resource rather than trusting a partially decoded image. Pause/cancel stop at checked boundaries.
  * The SQLite pointer and terminal task result commit together; failures retain the previous image.
+ * The source is observed once per transfer and asked whether it is unchanged before publication.
+ * When the source resyncs missing paths, a missing cover path first triggers one metadata sync and one retry (R11).
  */
 class CoverTaskHandler(private val state: ApplicationStateRepository, private val metadata: MetadataRepository,
-    private val covers: CoverRepository, private val source: CoverSource, private val versions: FormatSource,
-    private val io: CoroutineDispatcher) : TaskHandler {
+    private val covers: CoverRepository, private val sources: LibrarySources,
+    private val io: CoroutineDispatcher, private val queue: DurableTaskQueue? = null,
+    private val requestSync: suspend (TaskOrigin) -> TaskId? = { null }) : TaskHandler {
     override fun supports(request: TaskRequest) = request is TaskRequest.CoverLoad
     override fun controls(stage: TaskStage) = TaskControls(true, true, false, false)
     override suspend fun stopped(entry: QueueEntry) = withContext(io) { discard(entry.record.id) }
@@ -46,22 +47,26 @@ class CoverTaskHandler(private val state: ApplicationStateRepository, private va
         if (imported.identity.id != book.libraryId || item == null) return@withContext fail(StorageErrorKind.VERSION_CONFLICT)
         if (!item.hasCover) return@withContext fail(StorageErrorKind.SOURCE_MISSING)
         val path = RelativeSourcePath("${item.path.value}/cover.jpg")
+        val location = imported.identity.location
+        val source = sources.of(location)
         suspend fun checkBinding() {
             execution.checkControl()
             if (!covers.isCurrent(book, imported.generation))
-                throw FormatSourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
+                throw SourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
         }
         var transferReady = false
         try {
             checkBinding()
-            val version = versions.versionChecked(imported.identity.location, path, ::checkBinding)
+            if (entry.knownMissing(path)) throw SourceFailure(StorageError(StorageErrorKind.SOURCE_MISSING))
             val directory = staging(entry.record.id)
             if (entry.stage == TaskStage.COVER_TRANSFER) {
                 discard(entry.record.id)
                 require(directory.mkdirs() || directory.isDirectory)
                 val generation = UUID.randomUUID()
                 val raw = File(directory, "source.part")
-                source.open(imported.identity.location, path).use { input -> FileOutputStream(raw).use { output ->
+                val opened = source.openCover(location, path, CoverRepository.WIDTH, CoverRepository.HEIGHT, ::checkBinding)
+                val version = opened.version
+                opened.input.use { input -> FileOutputStream(raw).use { output ->
                     val buffer = ByteArray(32 * 1024)
                     var transferred = 0L
                     while (true) {
@@ -83,7 +88,7 @@ class CoverTaskHandler(private val state: ApplicationStateRepository, private va
                     }
                 } finally { bitmap.recycle() }
                 checkBinding()
-                if (versions.versionChecked(imported.identity.location, path, ::checkBinding) != version)
+                if (!source.unchanged(location, path, version, ::checkBinding))
                     return@withContext fail(StorageErrorKind.VERSION_CONFLICT)
                 FileOutputStream(File(directory, "import.json")).use {
                     it.write(JSONObject().put("import", imported.generation.toString()).toString().toByteArray())
@@ -95,7 +100,9 @@ class CoverTaskHandler(private val state: ApplicationStateRepository, private va
                 return@withContext StageOutcome.Advance(TaskStage.COVER_PUBLISH)
             }
             val checkpoint = entry.checkpoint ?: return@withContext fail(StorageErrorKind.CORRUPT_CONTENT)
-            if (checkpoint.version != version) return@withContext fail(StorageErrorKind.VERSION_CONFLICT)
+            val version = checkpoint.version ?: return@withContext fail(StorageErrorKind.CORRUPT_CONTENT)
+            if (!source.unchanged(location, path, version, ::checkBinding))
+                return@withContext fail(StorageErrorKind.VERSION_CONFLICT)
             val generation = checkpoint.generation
             val savedImport = UUID.fromString(JSONObject(File(directory, "import.json").readText()).getString("import"))
             if (savedImport != imported.generation) return@withContext fail(StorageErrorKind.VERSION_CONFLICT)
@@ -115,9 +122,13 @@ class CoverTaskHandler(private val state: ApplicationStateRepository, private va
             } finally { if (!published) target.delete() }
             safeDiscard(entry.record.id)
             StageOutcome.Complete(cachePublished = true)
-        } catch (failure: FormatSourceFailure) {
+        } catch (failure: SourceFailure) {
+            if (failure.error.kind == StorageErrorKind.SOURCE_MISSING && queue != null) {
+                val stale = staleSource(entry, source, path, queue, requestSync)
+                if (stale is StaleSource.Await) return@withContext stale.outcome
+            }
             val error = TaskError.Source(failure.error)
-            val wait = authorizationWait(imported.identity.location.backend, failure.error.kind)
+            val wait = authorizationWait(source, failure.error.kind)
             when {
                 failure.transient -> StageOutcome.Retry(error, failure.retryDelayMillis)
                 failure.error.kind == StorageErrorKind.NO_NETWORK -> StageOutcome.Wait(WaitingReason.NETWORK)

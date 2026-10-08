@@ -9,6 +9,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import io.github.chenxiex.calibrecloud.CalibreCloudApplication
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
+import io.github.chenxiex.calibrecloud.tasks.api.TaskOrigin
+import io.github.chenxiex.calibrecloud.tasks.background.StartupSync
 import io.github.chenxiex.calibrecloud.tasks.api.TaskRecord
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
 import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
@@ -21,7 +23,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /** Restoration reads private candidate results; only explicit controls wake source tasks. */
-class OneDriveLibraryViewModel(private val service: OneDriveCandidateService) : ViewModel() {
+class OneDriveLibraryViewModel(private val service: OneDriveCandidateService, private val sync: StartupSync) : ViewModel() {
     var record by mutableStateOf<TaskRecord?>(null)
         private set
     var page by mutableStateOf<OneDriveBrowseResult?>(null)
@@ -98,7 +100,7 @@ class OneDriveLibraryViewModel(private val service: OneDriveCandidateService) : 
         }
     }
 
-    fun acquire() = submit { service.acquire() }
+    fun acquire() = submit { if (service.currentLocation() == null) null else sync.request(TaskOrigin.MANUAL_SYNC) }
 
     fun runQueued() {
         if (submitting) return
@@ -160,7 +162,9 @@ class OneDriveLibraryViewModel(private val service: OneDriveCandidateService) : 
     companion object {
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T = modelClass.cast(
-                OneDriveLibraryViewModel((context.applicationContext as CalibreCloudApplication).dependencies.oneDriveTasks),
+                (context.applicationContext as CalibreCloudApplication).dependencies.let {
+                    OneDriveLibraryViewModel(it.oneDriveTasks, it.librarySync)
+                },
             )!!
         }
     }

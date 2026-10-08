@@ -11,7 +11,6 @@ import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
-import io.github.chenxiex.calibrecloud.tasks.local.LocalSnapshotTaskHandler
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import kotlinx.coroutines.Dispatchers
@@ -223,7 +222,7 @@ class MetadataRepositoryTest {
         val queue = DurableTaskQueue(database, Dispatchers.IO)
         val candidate = CandidateContext(selected.token, BackendKind.LOCAL, selected.token)
         val task = (queue.submit(TaskSubmission(TaskRequest.CandidateConfiguration(candidate,
-            LocalSnapshotTaskHandler.OPERATION), TaskOrigin.MANUAL_SYNC)) as SubmissionResult.Created).taskId
+            TaskRequest.CandidateConfiguration.LIBRARY_SYNC), TaskOrigin.MANUAL_SYNC)) as SubmissionResult.Created).taskId
         assertEquals(task, queue.claim(0, { emptySet() }, { true })!!.record.id)
         queue.update(task) { it.copy(record = it.record.copy(controls = TaskControls(true, true, false, false))) }
         assertNotNull(repository.importSnapshot(selected.token, fixture(), taskId = task.value))

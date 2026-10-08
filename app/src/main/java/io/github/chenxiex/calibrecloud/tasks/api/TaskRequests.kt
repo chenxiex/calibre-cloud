@@ -58,6 +58,11 @@ sealed interface TaskRequest {
             require(directoryPage >= 0)
             require(directoryItemId == null || (directoryItemId.isNotBlank() && directoryItemId.none { it.isISOControl() }))
         }
+
+        companion object {
+            /** Metadata sync of the selected library, whatever its backend; the other operations configure a root. */
+            const val LIBRARY_SYNC = "library_sync"
+        }
     }
 
     data class MetadataSync(

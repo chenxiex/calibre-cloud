@@ -12,7 +12,6 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.FilterInputStream
-import java.security.MessageDigest
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.UUID
@@ -39,8 +38,23 @@ sealed interface OneDriveSourceResult<out T> {
 data class OneDriveItem(val id: String, val name: String, val directory: Boolean, val parentId: String?, val cTag: String?, val sizeBytes: Long?)
 data class OneDriveIdentity(val accountId: String, val driveId: String, val root: OneDriveItem)
 data class OneDriveDirectoryPage(val items: List<OneDriveItem>, val nextPageUrl: String?, val parentName: String? = null)
-data class OneDriveSourceFile(val locator: SourceFileLocator.OneDrive, val version: FileVersion, val sizeBytes: Long? = null)
 data class OneDriveDatabaseSnapshot(val file: File, val version: FileVersion)
+
+/**
+ * One path lookup of a source file. The pre-signed download URL is used only by this task's
+ * immediate reads: it is never persisted, logged or exposed, and toString omits it.
+ */
+class OneDriveSourceFile internal constructor(
+    val itemId: String,
+    val version: FileVersion,
+    val sizeBytes: Long?,
+    internal val downloadUrl: HttpUrl?,
+) {
+    override fun toString() = "OneDriveSourceFile(redacted)"
+}
+
+/** A cover stream together with the cTag of the cover image it was selected from. */
+class OneDriveCover(val stream: InputStream, val version: FileVersion)
 
 /** Safe failure only: exception messages never contain HTTP bodies, tokens or download URLs. */
 class OneDriveSourceException(
@@ -52,9 +66,11 @@ class OneDriveSourceException(
 
 /**
  * Read-only personal drive access, invoked exclusively by explicit source task handlers.
- * Each operation verifies /me/drive identity; remote items and other drive types are refused.
- * The shared facet alone describes sharing of an owned item and does not change its drive boundary.
- * Item IDs are resolved component by component, checking each immediate parent and drive.
+ * Identity is established by discover at login and directory selection; each later operation only
+ * compares the signed-in subject with the stored account locally. Source files are addressed by
+ * path below the stored root item, one Graph request per lookup; only the directory picker lists
+ * children. Remote items and other drive types are refused. The shared facet alone describes
+ * sharing of an owned item and does not change its drive boundary.
  * Graph cTag is content evidence; eTag and timestamps are deliberately not used as file versions.
  * Content redirects use a separate unauthenticated client and HTTPS, at most five hops.
  * Transient failures expose Retry-After to the persistent scheduler; this backend never sleeps.
@@ -78,21 +94,11 @@ class OneDriveSourceBackend(
 
     suspend fun discover(): OneDriveSourceResult<OneDriveIdentity> = operation { discoverInternal() }
 
-    suspend fun listDirectories(
-        location: LibraryLocation.OneDrive,
-        parentItemId: String = location.rootItemId,
-        pageUrl: String? = null,
-    ): OneDriveSourceResult<OneDriveDirectoryPage> = operation {
-        verifyIdentity(location)
-        val parent = requireDescendant(location, parentItemId)
-        val page = childrenPage(location, parentItemId, pageUrl, directoriesOnly = true)
-        OneDriveDirectoryPage(page.items, page.nextPageUrl, parent.name)
-    }
-
     /**
      * Loads the complete supported directory list for one browse task. Graph may split the
      * response across nextLink pages; identity and ancestry are checked once for the load.
      * Callers retain this result and paginate locally without requesting the source again.
+     * This picker is the only operation that lists children.
      */
     suspend fun listAllDirectories(
         location: LibraryLocation.OneDrive,
@@ -103,24 +109,29 @@ class OneDriveSourceBackend(
         verifyIdentity(location)
         checkControl()
         val parent = requireDescendant(location, parentItemId)
-        val directories = allChildren(location, parentItemId, checkControl, directoriesOnly = true)
+        val directories = allChildren(location, parentItemId, checkControl)
         OneDriveDirectoryPage(directories, null, parent.name)
     }
 
-    suspend fun resolve(location: LibraryLocation.OneDrive, path: RelativeSourcePath): OneDriveSourceResult<OneDriveSourceFile> = operation {
+    /** One Graph request: cTag, size and an in-memory download URL for the file at [path]. */
+    suspend fun lookup(location: LibraryLocation.OneDrive, path: RelativeSourcePath): OneDriveSourceResult<OneDriveSourceFile> = operation {
         verifyIdentity(location)
-        val item = resolveItem(location, path)
-        OneDriveSourceFile(SourceFileLocator.OneDrive(location.driveId, item.id), versionOf(item), item.sizeBytes)
+        sourceFile(location, json(pathUrl(location, path)))
     }
 
-    /** Caller owns the response stream and closes it; stream reads remain off the UI thread. */
-    suspend fun openRead(location: LibraryLocation.OneDrive, path: RelativeSourcePath): OneDriveSourceResult<InputStream> = operation {
+    suspend fun version(location: LibraryLocation.OneDrive, path: RelativeSourcePath): OneDriveSourceResult<FileVersion> = operation {
         verifyIdentity(location)
-        openContent(location, resolveItem(location, path).id)
+        sourceFile(location, json(pathUrl(location, path))).version
+    }
+
+    /** Reads the looked-up file without another Graph request when its download URL is available. Caller closes the stream. */
+    suspend fun open(location: LibraryLocation.OneDrive, file: OneDriveSourceFile): OneDriveSourceResult<InputStream> = operation {
+        responseStream(contentResponse(location, file))
     }
 
     /**
-     * Reads thumbnails of the exact source cover image, never thumbnails of a book format.
+     * Reads thumbnails of the exact source cover image, never thumbnails of a book format. One Graph
+     * request returns the image item with its thumbnail sets.
      * Prefers the smallest image meeting both target dimensions, otherwise the largest available.
      * Missing or unusable thumbnails fall back to that same image's original content. Authorization,
      * network and throttling failures remain scheduler failures. The caller owns and decodes the stream.
@@ -132,32 +143,24 @@ class OneDriveSourceBackend(
         targetWidth: Int,
         targetHeight: Int,
         thumbnailSelected: (width: Int, height: Int) -> Unit = { _, _ -> },
-    ): OneDriveSourceResult<InputStream> = operation {
+    ): OneDriveSourceResult<OneDriveCover> = operation {
         require(targetWidth > 0 && targetHeight > 0)
         verifyIdentity(location)
-        val source = resolveItem(location, path)
-        val thumbnail = try {
-            val sets = json(url("drives", location.driveId, "items", source.id, "thumbnails"))["value"] as? List<*>
-                ?: emptyList<Any>()
-            val images = sets.filterIsInstance<Map<*, *>>().flatMap { set ->
-                listOf("small", "medium", "large").mapNotNull { size ->
-                    val value = set[size] as? Map<*, *> ?: return@mapNotNull null
-                    val width = (value["width"] as? Number)?.toInt()?.takeIf { it > 0 } ?: return@mapNotNull null
-                    val height = (value["height"] as? Number)?.toInt()?.takeIf { it > 0 } ?: return@mapNotNull null
-                    val target = (value["url"] as? String)?.let {
-                        try { it.toHttpUrl() } catch (_: IllegalArgumentException) { null }
-                    }?.takeIf { it.isHttps && it.username.isEmpty() && it.password.isEmpty() && it.fragment == null }
-                        ?: return@mapNotNull null
-                    CoverThumbnail(width, height, target)
-                }
+        val raw = json(pathUrl(location, path).newBuilder().addQueryParameter("\$expand", "thumbnails").build())
+        val source = sourceFile(location, raw)
+        val sets = raw["thumbnails"] as? List<*> ?: emptyList<Any>()
+        val images = sets.filterIsInstance<Map<*, *>>().flatMap { set ->
+            listOf("small", "medium", "large").mapNotNull { size ->
+                val value = set[size] as? Map<*, *> ?: return@mapNotNull null
+                val width = (value["width"] as? Number)?.toInt()?.takeIf { it > 0 } ?: return@mapNotNull null
+                val height = (value["height"] as? Number)?.toInt()?.takeIf { it > 0 } ?: return@mapNotNull null
+                val target = (value["url"] as? String)?.let(::safeContentUrl) ?: return@mapNotNull null
+                CoverThumbnail(width, height, target)
             }
-            images.filter { it.width >= targetWidth && it.height >= targetHeight }
-                .minByOrNull { it.width.toLong() * it.height }
-                ?: images.maxByOrNull { it.width.toLong() * it.height }
-        } catch (failure: OneDriveSourceException) {
-            if (failure.kind != StorageErrorKind.SOURCE_MISSING) throw failure
-            null
         }
+        val thumbnail = images.filter { it.width >= targetWidth && it.height >= targetHeight }
+            .minByOrNull { it.width.toLong() * it.height }
+            ?: images.maxByOrNull { it.width.toLong() * it.height }
         if (thumbnail != null) {
             val stream = try {
                 currentCoroutineContext().ensureActive()
@@ -170,27 +173,27 @@ class OneDriveSourceBackend(
             if (stream != null) {
                 try {
                     thumbnailSelected(thumbnail.width, thumbnail.height)
-                    return@operation stream
+                    return@operation OneDriveCover(stream, source.version)
                 } catch (failure: Throwable) {
                     stream.close()
                     throw failure
                 }
             }
         }
-        openContent(location, source.id)
+        OneDriveCover(responseStream(contentResponse(location, source)), source.version)
     }
 
     private data class CoverThumbnail(val width: Int, val height: Int, val url: HttpUrl)
 
-    /** Requests only the suffix from a freshly resolved, unauthenticated content URL. */
-    suspend fun openRange(location: LibraryLocation.OneDrive, path: RelativeSourcePath, offset: Long, expectedVersion: FileVersion): OneDriveSourceResult<InputStream?> = operation {
-        require(offset > 0 && expectedVersion.backend == BackendKind.ONEDRIVE)
-        verifyIdentity(location)
-        val item = resolveItem(location, path)
-        if (versionOf(item) != expectedVersion) conflict()
-        val length = item.sizeBytes ?: return@operation null
+    /**
+     * Requests only the suffix of the looked-up file from its unauthenticated content URL. The caller
+     * compares the lookup's cTag with the retained prefix before calling.
+     */
+    suspend fun openRange(location: LibraryLocation.OneDrive, file: OneDriveSourceFile, offset: Long): OneDriveSourceResult<InputStream?> = operation {
+        require(offset > 0)
+        val length = file.sizeBytes ?: return@operation null
         if (offset >= length) return@operation null
-        val response = contentResponse(location, item.id, offset)
+        val response = contentResponse(location, file, offset)
         try {
             // Providers can ignore Range. Never append a full response to the retained prefix.
             if (response.code == 200 || response.code == 416) {
@@ -241,30 +244,43 @@ class OneDriveSourceBackend(
         }
     }
 
-    suspend fun version(location: LibraryLocation.OneDrive, path: RelativeSourcePath): OneDriveSourceResult<FileVersion> = operation {
-        verifyIdentity(location)
-        versionOf(resolveItem(location, path))
-    }
-
+    /**
+     * Returns null without reading when metadata.db still has [unchangedVersion]. Otherwise transaction
+     * logs are queried by name (a WAL index or super-journal is meaningful only beside them), the
+     * database is read once, its length and private SQLite integrity are checked, and the snapshot
+     * carries the cTag observed before the read. These observations do not guarantee arbitrary
+     * concurrent source safety; a later sync observes any newer cTag.
+     */
     suspend fun acquireSnapshot(
         location: LibraryLocation.OneDrive,
         candidateId: UUID,
+        unchangedVersion: FileVersion? = null,
         checkControl: suspend () -> Unit = {},
-    ): OneDriveSourceResult<OneDriveDatabaseSnapshot> = operation {
+    ): OneDriveSourceResult<OneDriveDatabaseSnapshot?> = operation {
+        checkControl()
         verifyIdentity(location)
+        val database = sourceFile(location, json(pathUrl(location, RelativeSourcePath("metadata.db"))))
+        if (database.version == unchangedVersion) return@operation null
+        for (name in listOf("metadata.db-wal", "metadata.db-journal")) {
+            checkControl()
+            val log = try {
+                json(pathUrl(location, RelativeSourcePath(name)))
+            } catch (failure: OneDriveSourceException) {
+                if (failure.kind != StorageErrorKind.SOURCE_MISSING) throw failure
+                null
+            } ?: continue
+            val value = item(log, location.driveId)
+            if (value.directory || value.sizeBytes != 0L) conflict()
+        }
+        checkControl()
         val directory = File(snapshotsDirectory, candidateId.toString())
         if (!directory.isDirectory && !directory.mkdirs()) throw LocalFailure()
         val generation = UUID.randomUUID().toString()
         val staging = File(directory, "$generation.part")
         val published = File(directory, "$generation.db")
         try {
-            checkControl()
-            checkLogs(location, checkControl)
-            val original = resolveItem(location, RelativeSourcePath("metadata.db"), checkControl)
-            val originalVersion = versionOf(original)
-            val firstHash = openContent(location, original.id).use { input ->
+            responseStream(contentResponse(location, database)).use { input ->
                 localIo { staging.outputStream() }.use { output ->
-                    val digest = MessageDigest.getInstance("SHA-256")
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                     while (true) {
                         currentCoroutineContext().ensureActive()
@@ -272,27 +288,18 @@ class OneDriveSourceBackend(
                         val count = input.read(buffer)
                         if (count < 0) break
                         localIo { output.write(buffer, 0, count) }
-                        digest.update(buffer, 0, count)
                     }
                     localIo { output.flush(); output.fd.sync() }
-                    digest.digest()
                 }
             }
-            checkLogs(location, checkControl)
-            val refreshed = resolveItem(location, RelativeSourcePath("metadata.db"), checkControl)
-            if (original.id != refreshed.id || originalVersion != versionOf(refreshed)) conflict()
-            val secondHash = hash(openContent(location, refreshed.id), checkControl)
-            checkLogs(location, checkControl)
-            val finalItem = resolveItem(location, RelativeSourcePath("metadata.db"), checkControl)
-            if (original.id != finalItem.id || originalVersion != versionOf(finalItem) || !firstHash.contentEquals(secondHash)) conflict()
-            if (original.sizeBytes != null && original.sizeBytes != staging.length()) {
+            if (database.sizeBytes != null && database.sizeBytes != staging.length()) {
                 throw OneDriveSourceException(StorageErrorKind.CORRUPT_CONTENT)
             }
             if (!validator.validate(staging)) throw OneDriveSourceException(StorageErrorKind.CORRUPT_CONTENT)
             currentCoroutineContext().ensureActive()
             checkControl()
             if (!staging.renameTo(published)) throw LocalFailure()
-            OneDriveDatabaseSnapshot(published, originalVersion)
+            OneDriveDatabaseSnapshot(published, database.version)
         } finally {
             staging.delete()
         }
@@ -303,9 +310,8 @@ class OneDriveSourceBackend(
         if (drive["driveType"] != "personal") unsupported("drive_type")
         // owner.user.id is optional in real personal-drive responses. The authenticated
         // subject remains the same even when Graph changes its owner representation.
-        val subject = accountProvider()?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
         val owner = (drive["owner"] as? Map<*, *>)?.get("user") as? Map<*, *>
-        val account = subject?.let { "microsoft-consumers:$it" }
+        val account = signedInAccount()
             ?: (owner?.get("id") as? String)?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }
             ?: throw OneDriveSourceException(StorageErrorKind.LOGIN_REQUIRED, reason = "account_identity_unavailable")
         val driveId = drive.string("id", "drive_id")
@@ -314,11 +320,19 @@ class OneDriveSourceBackend(
         return OneDriveIdentity(account, driveId, root)
     }
 
+    private suspend fun signedInAccount(): String? =
+        accountProvider()?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }?.let { "microsoft-consumers:$it" }
+
+    /**
+     * Local comparison with the signed-in subject; no request. Only a session without a stored subject
+     * falls back to discovering the drive owner. A drive or root that the account can no longer reach
+     * fails through the Graph status of the subsequent request.
+     */
     private suspend fun verifyIdentity(location: LibraryLocation.OneDrive) {
-        val identity = discoverInternal()
-        if (identity.accountId != location.accountId || identity.driveId != location.driveId) {
-            throw OneDriveSourceException(StorageErrorKind.LOGIN_REQUIRED)
-        }
+        val account = signedInAccount() ?: discoverInternal().also {
+            if (it.driveId != location.driveId) throw OneDriveSourceException(StorageErrorKind.LOGIN_REQUIRED)
+        }.accountId
+        if (account != location.accountId) throw OneDriveSourceException(StorageErrorKind.LOGIN_REQUIRED)
     }
 
     private suspend fun requireDescendant(location: LibraryLocation.OneDrive, itemId: String): OneDriveItem {
@@ -335,85 +349,65 @@ class OneDriveSourceBackend(
         }
     }
 
-    private suspend fun resolveItem(location: LibraryLocation.OneDrive, path: RelativeSourcePath, control: suspend () -> Unit = {}): OneDriveItem {
-        control()
-        var parent = getItem(location, location.rootItemId)
-        if (!parent.directory) unsupported()
-        val segments = path.value.split('/')
-        segments.forEachIndexed { index, name ->
-            control()
-            val matches = allChildren(location, parent.id, control).filter { it.name == name }
-            if (matches.isEmpty()) throw OneDriveSourceException(StorageErrorKind.SOURCE_MISSING)
-            if (matches.size != 1) unsupported()
-            parent = matches.single()
-            if (index < segments.lastIndex && !parent.directory) throw OneDriveSourceException(StorageErrorKind.SOURCE_MISSING)
-        }
-        if (parent.directory) throw OneDriveSourceException(StorageErrorKind.SOURCE_MISSING)
-        return parent
-    }
-
     private suspend fun getItem(location: LibraryLocation.OneDrive, id: String) = item(
         json(url("drives", location.driveId, "items", id).newBuilder().addQueryParameter("\$select", itemFields).build()), location.driveId,
     ).also { if (it.id != id) unsupported() }
 
-    private suspend fun childrenPage(
-        location: LibraryLocation.OneDrive,
-        parent: String,
-        next: String?,
-        directoriesOnly: Boolean = false,
-    ): OneDriveDirectoryPage {
-        val base = url("drives", location.driveId, "items", parent, "children")
-        val target = if (next == null) base.newBuilder().addQueryParameter("\$select", itemFields).build()
-            else safeGraphUrl(next).also { if (it.encodedPath != base.encodedPath) unsupported() }
-        val response = json(target)
-        val items = (response["value"] as? List<*>)?.mapNotNull {
-            @Suppress("UNCHECKED_CAST")
-            val raw = it as? Map<String, Any?> ?: unsupported()
-            // Unsupported siblings are irrelevant to the directory picker. Source resolution
-            // and snapshot checks keep their strict parsing of every child in the source tree.
-            if (directoriesOnly && (raw["folder"] !is Map<*, *> || raw["remoteItem"] != null ||
-                raw["deleted"] != null || raw["package"] != null)) return@mapNotNull null
-            item(raw, location.driveId).also { value ->
-                if (value.parentId != parent) unsupported()
-            }
-        } ?: unsupported()
-        val nextUrl = response["@odata.nextLink"] as? String
-        if (nextUrl != null && safeGraphUrl(nextUrl).encodedPath != base.encodedPath) unsupported()
-        return OneDriveDirectoryPage(items, nextUrl)
-    }
-
+    /** Directory picker only. Files and unsupported siblings are irrelevant to choosing a root. */
     private suspend fun allChildren(
         location: LibraryLocation.OneDrive,
         parent: String,
         control: suspend () -> Unit = {},
-        directoriesOnly: Boolean = false,
     ): List<OneDriveItem> {
+        val base = url("drives", location.driveId, "items", parent, "children")
         val values = mutableListOf<OneDriveItem>()
         val seen = mutableSetOf<String>()
         var next: String? = null
         do {
             currentCoroutineContext().ensureActive()
             control()
-            val page = childrenPage(location, parent, next, directoriesOnly)
+            val target = if (next == null) base.newBuilder().addQueryParameter("\$select", itemFields).build()
+                else safeGraphUrl(next).also { if (it.encodedPath != base.encodedPath) unsupported() }
+            val response = json(target)
             control()
-            values.addAll(page.items)
-            next = page.nextPageUrl
-            if (next != null && !seen.add(next)) unsupported()
+            (response["value"] as? List<*>)?.forEach {
+                @Suppress("UNCHECKED_CAST")
+                val raw = it as? Map<String, Any?> ?: unsupported()
+                if (raw["folder"] !is Map<*, *> || raw["remoteItem"] != null || raw["deleted"] != null || raw["package"] != null) return@forEach
+                values.add(item(raw, location.driveId).also { value -> if (value.parentId != parent) unsupported() })
+            } ?: unsupported()
+            next = response["@odata.nextLink"] as? String
+            if (next != null && (safeGraphUrl(next).encodedPath != base.encodedPath || !seen.add(next))) unsupported()
         } while (next != null)
         if (values.map { it.id }.toSet().size != values.size) unsupported()
         return values
     }
 
-    private suspend fun checkLogs(location: LibraryLocation.OneDrive, control: suspend () -> Unit) {
-        control()
-        val logs = allChildren(location, location.rootItemId, control).filter {
-            it.name in setOf("metadata.db-wal", "metadata.db-journal", "metadata.db-shm") || it.name.startsWith("metadata.db-mj")
+    /**
+     * Graph path addressing below the stored root item. Every component is percent-encoded per
+     * RFC 3986, so characters such as '#', '%', '+' and spaces stay inside their segment;
+     * RelativeSourcePath already excludes '..', ':' and empty components.
+     */
+    private fun pathUrl(location: LibraryLocation.OneDrive, path: RelativeSourcePath): HttpUrl =
+        url("drives", location.driveId, "items").newBuilder().apply {
+            addEncodedPathSegment(encodeSegment(checkSegment(location.rootItemId)) + ":")
+            path.value.split('/').forEach { addEncodedPathSegment(encodeSegment(it)) }
+        }.build()
+
+    private fun encodeSegment(value: String): String = buildString {
+        value.toByteArray(Charsets.UTF_8).forEach { byte ->
+            val char = (byte.toInt() and 0xff).toChar()
+            if (char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' || char in "-._~") append(char)
+            else append('%').append("%02X".format(byte.toInt() and 0xff))
         }
-        for (log in logs) {
-            control()
-            if (log.directory) unsupported()
-            if (log.name == "metadata.db-shm" || openContent(location, log.id).use { it.read() != -1 }) conflict()
-        }
+    }
+
+    /** A path response must be a file inside the stored drive; a folder at a book path is missing. */
+    private fun sourceFile(location: LibraryLocation.OneDrive, value: Map<String, Any?>): OneDriveSourceFile {
+        val item = item(value, location.driveId)
+        if (item.directory) throw OneDriveSourceException(StorageErrorKind.SOURCE_MISSING)
+        return OneDriveSourceFile(item.id, versionOf(item), item.sizeBytes,
+            (value["@microsoft.graph.downloadUrl"] as? String)?.let(::safeContentUrl))
     }
 
     private fun item(value: Map<String, Any?>, driveId: String): OneDriveItem {
@@ -451,11 +445,6 @@ class OneDriveSourceBackend(
         throw OneDriveSourceException(StorageErrorKind.LOGIN_REQUIRED)
     }
 
-    private suspend fun openContent(location: LibraryLocation.OneDrive, itemId: String): InputStream {
-        val response = contentResponse(location, itemId)
-        return responseStream(response)
-    }
-
     private fun responseStream(response: Response): InputStream {
         try {
             checkResponse(response)
@@ -468,10 +457,22 @@ class OneDriveSourceBackend(
         }
     }
 
-    private suspend fun contentResponse(location: LibraryLocation.OneDrive, itemId: String, offset: Long? = null): Response {
-        // Graph /content resolves the URL; Range belongs to the redirected content request only.
-        return followContentRedirects(graph(url("drives", location.driveId, "items", itemId, "content")), offset)
+    /**
+     * The looked-up download URL needs no further Graph request. Without it, Graph /content resolves
+     * the URL; Range belongs to the unauthenticated content request only.
+     */
+    private suspend fun contentResponse(location: LibraryLocation.OneDrive, file: OneDriveSourceFile, offset: Long? = null): Response {
+        val direct = file.downloadUrl ?: return followContentRedirects(graph(url("drives", location.driveId, "items", file.itemId, "content")), offset)
+        currentCoroutineContext().ensureActive()
+        return followContentRedirects(contentClient.newCall(contentRequest(direct, offset)).execute(), offset)
     }
+
+    private fun contentRequest(target: HttpUrl, offset: Long?) = Request.Builder().url(target).apply {
+        if (offset != null) header("Range", "bytes=$offset-").header("Accept-Encoding", "identity")
+    }.build()
+
+    private fun safeContentUrl(value: String): HttpUrl? = try { value.toHttpUrl() } catch (_: IllegalArgumentException) { null }
+        ?.takeIf { it.isHttps && it.username.isEmpty() && it.password.isEmpty() && it.fragment == null }
 
     private suspend fun followContentRedirects(initial: Response, offset: Long? = null): Response {
         var response = initial
@@ -483,10 +484,7 @@ class OneDriveSourceBackend(
                 if (!target.isHttps || target.username.isNotEmpty() || target.password.isNotEmpty()) unsupported()
                 response.close()
                 currentCoroutineContext().ensureActive()
-                val request = Request.Builder().url(target).apply {
-                    if (offset != null) header("Range", "bytes=$offset-").header("Accept-Encoding", "identity")
-                }.build()
-                response = contentClient.newCall(request).execute()
+                response = contentClient.newCall(contentRequest(target, offset)).execute()
             }
             return response
         } catch (error: Throwable) {
@@ -528,24 +526,13 @@ class OneDriveSourceBackend(
     }
 
     private fun url(vararg segments: String): HttpUrl = graphBase.newBuilder().apply {
-        segments.forEach {
-            // Preserve opaque IDs as one endpoint segment, without path normalization.
-            if (it.isBlank() || it == "." || it == ".." || it.any(Char::isISOControl) || '/' in it || '\\' in it) unsupported()
-            addPathSegment(it)
-        }
+        segments.forEach { addPathSegment(checkSegment(it)) }
     }.build()
 
-    private suspend fun hash(input: InputStream, control: suspend () -> Unit): ByteArray = input.use {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        while (true) {
-            currentCoroutineContext().ensureActive()
-            control()
-            val count = it.read(buffer)
-            if (count < 0) break
-            digest.update(buffer, 0, count)
-        }
-        digest.digest()
+    /** Preserve opaque IDs as one endpoint segment, without path normalization. */
+    private fun checkSegment(value: String): String {
+        if (value.isBlank() || value == "." || value == ".." || value.any(Char::isISOControl) || '/' in value || '\\' in value) unsupported()
+        return value
     }
 
     private inline fun <T> localIo(block: () -> T): T = try {

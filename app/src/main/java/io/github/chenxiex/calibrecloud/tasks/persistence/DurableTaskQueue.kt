@@ -1,11 +1,14 @@
 package io.github.chenxiex.calibrecloud.tasks.persistence
 
+import io.github.chenxiex.calibrecloud.storage.api.LocationKeys
 import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.FileVersion
 import io.github.chenxiex.calibrecloud.model.LibraryId
+import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
+import io.github.chenxiex.calibrecloud.storage.api.CalibreStamp
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.*
@@ -25,6 +28,10 @@ data class QueueEntry(
     val checkpoint: RecoveryCheckpoint? = null,
     val recoveryRequired: Boolean = false,
     val control: TaskControl? = null,
+    /** Metadata sync submitted for this task's stale OneDrive path; set at most once until user retry (R11). */
+    val sourceSync: TaskId? = null,
+    /** The path that was not found; after the sync an unchanged path fails without another request. */
+    val missingPath: RelativeSourcePath? = null,
 )
 enum class TaskControl(val code: String) { PAUSE("pause"), CANCEL("cancel"), RESUME("resume"), RETRY("retry") }
 
@@ -135,6 +142,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         val claimed = transaction {
             val all = entries(this)
             if (all.any { it.record.state is TaskState.Running }) return@transaction null
+            execSQL("DELETE FROM source_throttle WHERE until <= ?", arrayOf<Any>(now))
             val reserved = all.firstOrNull { it.record.submission.request is TaskRequest.ReadStatusWrite &&
                 it.record.commit != CommitState.NotCommitted && !safeTerminal(it.record) && active(this, it.record) }
             val eligible = mutableListOf<QueueEntry>()
@@ -152,16 +160,23 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 // Backoff keeps the reason recorded by the retry: server throttling or an unreachable network.
                 if (entry.retryAt > now) reasons.add(if ((record.state as? TaskState.Waiting)?.reasons?.contains(WaitingReason.THROTTLED) == true)
                     WaitingReason.THROTTLED else WaitingReason.NETWORK)
+                // A throttled library holds all of its source work until the server's deadline.
+                val throttled = throttleScope(this, record)?.let { throttleDeadline(this, it) }?.takeIf { it > now }
+                if (throttled != null) reasons.add(WaitingReason.THROTTLED)
+                if (entry.sourceSync != null && all.find { it.record.id == entry.sourceSync }?.record?.state.let {
+                        it != null && it !is TaskState.Finished }) reasons.add(WaitingReason.DEPENDENCY)
                 if (record.submission.dependencies.any { edge ->
                         val parent = all.find { it.record.id == edge.taskId }?.record
                         parent == null || !satisfies(parent, edge.requirement)
                     }) reasons.add(WaitingReason.DEPENDENCY)
                 val after = (record.submission.request as? TaskRequest.MetadataSync)?.freshness as? SnapshotFreshness.AfterWrite
                 if (reserved != null && record.id != reserved.record.id && after?.writeTaskId != reserved.record.id) reasons.add(WaitingReason.RECOVERY)
+                val retryAt = maxOf(entry.retryAt, throttled ?: 0)
                 if (reasons.isEmpty()) eligible.add(entry)
-                else if (record.state != TaskState.Waiting(FrozenSet(reasons))) {
-                    val waiting = entry.copy(record = record.copy(state = TaskState.Waiting(FrozenSet(reasons)), controls = queuedControls))
-                    save(this, waiting); changed.add(waiting.record)
+                else if (record.state != TaskState.Waiting(FrozenSet(reasons)) || retryAt != entry.retryAt) {
+                    // The deadline doubles as this task's wakeup time for background scheduling.
+                    val waiting = entry.copy(retryAt = retryAt, record = record.copy(state = TaskState.Waiting(FrozenSet(reasons)), controls = queuedControls))
+                    save(this, waiting); if (waiting.record != record) changed.add(waiting.record)
                 }
             }
             val next = eligible.minWithOrNull { a, b -> compareSchedulingPositions(a.record.scheduling, b.record.scheduling) } ?: return@transaction null
@@ -197,7 +212,9 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 r.state is TaskState.Running -> entry.copy(control = command)
                 command == TaskControl.CANCEL -> entry.copy(record = r.copy(state = TaskState.Finished(TaskResult.Cancelled(r.commit)), controls = TaskControls(false, false, false, r.commit != CommitState.NotCommitted)), control = null)
                 else -> entry.copy(record = r.copy(state = TaskState.Queued, controls = queuedControls), control = null,
-                    recoveryRequired = true, retryAt = 0, attempts = 0, stage = when (r.commit) {
+                    recoveryRequired = true, retryAt = 0, attempts = 0,
+                    sourceSync = if (command == TaskControl.RETRY) null else entry.sourceSync,
+                    missingPath = if (command == TaskControl.RETRY) null else entry.missingPath, stage = when (r.commit) {
                         is CommitState.Unknown -> TaskStage.RECOVERY_CHECK
                         CommitState.Confirmed -> TaskStage.WRITE_REFETCH
                         CommitState.NotCommitted -> entry.stage
@@ -229,6 +246,33 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         if (cachePublished) eventBus.tryEmit(TaskEvent.CacheChanged(id, updated.record.submission.request))
         updated
     }
+
+    /**
+     * Records a server throttling deadline for the task's library (or, before an import, its candidate
+     * selection), whatever its backend. Other libraries are unaffected; an earlier deadline never
+     * shortens a later one. The row survives process death.
+     */
+    internal suspend fun throttle(id: TaskId, until: Long) = withContext(io) {
+        transaction {
+            val record = entries(this).find { it.record.id == id }?.record ?: return@transaction
+            val scope = throttleScope(this, record) ?: return@transaction
+            execSQL("""INSERT INTO source_throttle(scope, until) VALUES(?, ?)
+                ON CONFLICT(scope) DO UPDATE SET until = max(until, excluded.until)""", arrayOf<Any>(scope, until))
+        }
+    }
+
+    private fun throttleScope(db: SQLiteDatabase, record: TaskRecord): String? {
+        val request = record.submission.request
+        if (request is TaskRequest.CandidateConfiguration) {
+            return db.rawQuery("SELECT scope_library_id FROM queued_tasks WHERE task_id = ?", arrayOf(record.id.value.toString())).use {
+                if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null
+            } ?: "selection:${request.context.selectionToken}"
+        }
+        return request.libraryId?.value?.toString()
+    }
+
+    private fun throttleDeadline(db: SQLiteDatabase, scope: String): Long? =
+        db.rawQuery("SELECT until FROM source_throttle WHERE scope = ?", arrayOf(scope)).use { if (it.moveToFirst()) it.getLong(0) else null }
 
     private suspend fun mutateAll(action: (QueueEntry) -> QueueEntry) = withContext(io) {
         val changed = transaction { entries(this).mapNotNull { old -> action(old).takeIf { it != old }?.also { save(this, it) } } }
@@ -284,11 +328,13 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         return QueueSequence(next)
     }
 
-    private fun entries(db: SQLiteDatabase): List<QueueEntry> = db.rawQuery("SELECT record, stage, attempts, retry_at, checkpoint, checkpoint_backend, checkpoint_version, recovery_required, control FROM queued_tasks ORDER BY rowid", null).use { c ->
+    private fun entries(db: SQLiteDatabase): List<QueueEntry> = db.rawQuery("SELECT record, stage, attempts, retry_at, checkpoint, checkpoint_backend, checkpoint_version, recovery_required, control, source_sync, missing_path FROM queued_tasks ORDER BY rowid", null).use { c ->
         buildList { while (c.moveToNext()) add(QueueEntry(TaskCodec.decode(c.getString(0)), TaskStage.entries.first { it.code == c.getString(1) },
             c.getInt(2), c.getLong(3), if (c.isNull(4)) null else RecoveryCheckpoint(UUID.fromString(c.getString(4)),
                 if (c.isNull(5)) null else FileVersion(BackendKind.entries.first { backendCode(it) == c.getString(5) }, c.getString(6))),
-            c.getInt(7) != 0, if (c.isNull(8)) null else TaskControl.entries.first { it.code == c.getString(8) })) }
+            c.getInt(7) != 0, if (c.isNull(8)) null else TaskControl.entries.first { it.code == c.getString(8) },
+            if (c.isNull(9)) null else TaskId(UUID.fromString(c.getString(9))),
+            if (c.isNull(10)) null else RelativeSourcePath(c.getString(10)))) }
     }
 
     private fun save(db: SQLiteDatabase, entry: QueueEntry) {
@@ -297,6 +343,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             put("attempts", entry.attempts); put("retry_at", entry.retryAt); put("recovery_required", if (entry.recoveryRequired) 1 else 0)
             put("checkpoint", entry.checkpoint?.generation?.toString()); put("checkpoint_backend", entry.checkpoint?.version?.backend?.let(::backendCode))
             put("checkpoint_version", entry.checkpoint?.version?.token); put("control", entry.control?.code)
+            put("source_sync", entry.sourceSync?.value?.toString()); put("missing_path", entry.missingPath?.value)
         }
         if (db.update("queued_tasks", values, "task_id = ?", arrayOf(entry.record.id.value.toString())) == 0) db.insertOrThrow("queued_tasks", null, values)
     }
@@ -310,7 +357,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
 
     private fun publish(record: TaskRecord) { revision.update { it + 1 }; eventBus.tryEmit(TaskEvent.Changed(record)) }
     private fun rejected() = SubmissionResult.Rejected(TaskError.Source(StorageError(StorageErrorKind.UNSUPPORTED_OPERATION)))
-    private fun backendCode(kind: BackendKind) = when (kind) { BackendKind.LOCAL -> "local"; BackendKind.ONEDRIVE -> "onedrive" }
+    private fun backendCode(kind: BackendKind) = LocationKeys.backendCode(kind)
 
     companion object {
         internal fun cacheCleanupPending(db: SQLiteDatabase): Boolean = db.rawQuery("SELECT 1 FROM cache_cleanup LIMIT 1", null).use { it.moveToFirst() }
@@ -326,7 +373,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 if (!inLibrary && !inCandidate) continue
                 if (kind == "METADATA" && (request is TaskRequest.ReadStatusWrite || (request is TaskRequest.MetadataSync && request.freshness is SnapshotFreshness.AfterWrite))) continue
                 if (kind == "METADATA") {
-                    if (request is TaskRequest.CoverLoad || request is TaskRequest.MetadataSync || candidate?.operation in setOf("local_snapshot", "onedrive_snapshot")) return@use true
+                    if (request is TaskRequest.CoverLoad || request is TaskRequest.MetadataSync || candidate?.operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC) return@use true
                 } else if (kind == "COPIES") {
                     val key = when (request) {
                         is TaskRequest.FormatCopy -> io.github.chenxiex.calibrecloud.model.CopyKey(request.resource.book, request.resource.format)
@@ -381,13 +428,27 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             }, "task_id = ?", args)
         }
 
-        /** Called in the import transaction; checks survive process death before the next dispatch. */
-        internal fun enqueueDownloadedChecks(db: SQLiteDatabase, libraryId: io.github.chenxiex.calibrecloud.model.LibraryId) {
-            db.rawQuery("SELECT source_id, source_uuid, format FROM downloaded_copies WHERE library_id = ? ORDER BY source_id, source_uuid, format",
+        /**
+         * Called in the import transaction; checks survive process death before the next dispatch.
+         * [checksCopy] decides from the Calibre record stored with each copy and its record in [imported].
+         */
+        internal fun enqueueDownloadedChecks(db: SQLiteDatabase, libraryId: io.github.chenxiex.calibrecloud.model.LibraryId,
+            imported: io.github.chenxiex.calibrecloud.metadata.ParsedLibrary,
+            checksCopy: (recorded: CalibreStamp?, imported: CalibreStamp?) -> Boolean) {
+            val books = imported.books.associateBy { it.sourceId to it.sourceUuid.toString() }
+            db.rawQuery("""SELECT source_id, source_uuid, format, calibre_recorded, calibre_modified, calibre_size
+                FROM downloaded_copies WHERE library_id = ? ORDER BY source_id, source_uuid, format""",
                 arrayOf(libraryId.value.toString())).use { c ->
-                while (c.moveToNext()) enqueueAutomatic(db, TaskRequest.FormatCheck(io.github.chenxiex.calibrecloud.model.CopyKey(
-                    io.github.chenxiex.calibrecloud.model.BookKey(libraryId, c.getLong(0), UUID.fromString(c.getString(1))),
-                    io.github.chenxiex.calibrecloud.model.BookFormat.parse(c.getString(2)))))
+                while (c.moveToNext()) {
+                    val format = io.github.chenxiex.calibrecloud.model.BookFormat.parse(c.getString(2))
+                    val recorded = if (c.getInt(3) == 0) null
+                        else CalibreStamp(if (c.isNull(4)) null else c.getString(4), if (c.isNull(5)) null else c.getLong(5))
+                    val book = books[c.getLong(0) to c.getString(1)]
+                    val current = book?.formats?.find { it.format == format }?.let { CalibreStamp(book.lastModified, it.sizeBytes) }
+                    if (!checksCopy(recorded, current)) continue
+                    enqueueAutomatic(db, TaskRequest.FormatCheck(io.github.chenxiex.calibrecloud.model.CopyKey(
+                        io.github.chenxiex.calibrecloud.model.BookKey(libraryId, c.getLong(0), UUID.fromString(c.getString(1))), format)))
+                }
             }
         }
 

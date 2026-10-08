@@ -1,5 +1,7 @@
 package io.github.chenxiex.calibrecloud.tasks.persistence
 
+import io.github.chenxiex.calibrecloud.storage.api.LibrarySource
+import io.github.chenxiex.calibrecloud.storage.api.Reauthorization
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.*
@@ -17,18 +19,48 @@ sealed interface StageOutcome {
     data class Retry(val error: TaskError, val serverDelayMillis: Long? = null) : StageOutcome {
         init { require(serverDelayMillis == null || serverDelayMillis >= 0) }
     }
+    /**
+     * The source path was not found; [sync] refreshes metadata first (R11). The task waits on it, then
+     * runs again once with the new import. Only a task without a recorded sync may return this.
+     */
+    data class AwaitSync(val sync: TaskId, val missingPath: io.github.chenxiex.calibrecloud.model.RelativeSourcePath) : StageOutcome
 }
 
 data class RecoveryDecision(val stage: TaskStage, val checkpoint: RecoveryCheckpoint?)
 
 /**
  * Recoverable authorization loss waits until re-login or directory re-authorization wakes the queue.
- * A OneDrive 403 (AUTHORIZATION_EXPIRED) is permanent denial and remains a failure.
+ * Other authorization failures, such as a server's permanent denial, remain failures.
  */
-fun authorizationWait(backend: io.github.chenxiex.calibrecloud.model.BackendKind, kind: StorageErrorKind): WaitingReason? = when {
-    backend == io.github.chenxiex.calibrecloud.model.BackendKind.ONEDRIVE && kind == StorageErrorKind.LOGIN_REQUIRED -> WaitingReason.LOGIN
-    backend == io.github.chenxiex.calibrecloud.model.BackendKind.LOCAL && kind == StorageErrorKind.AUTHORIZATION_EXPIRED -> WaitingReason.DIRECTORY_AUTHORIZATION
-    else -> null
+fun authorizationWait(source: LibrarySource, kind: StorageErrorKind): WaitingReason? = when (source.reauthorization(kind)) {
+    Reauthorization.SIGN_IN -> WaitingReason.LOGIN
+    Reauthorization.DIRECTORY_GRANT -> WaitingReason.DIRECTORY_AUTHORIZATION
+    null -> null
+}
+
+/** After its stale-path sync, a task whose newly imported path is still the missing one needs no request. */
+fun QueueEntry.knownMissing(path: io.github.chenxiex.calibrecloud.model.RelativeSourcePath) = sourceSync != null && missingPath == path
+
+sealed interface StaleSource {
+    data class Await(val outcome: StageOutcome.AwaitSync) : StaleSource
+    /** The path was absent after a completed sync, or no sync applies: the source file is missing. */
+    data object Confirmed : StaleSource
+    /** The sync did not complete, so absence is not established; the task fails without marking copies. */
+    data object Unconfirmed : StaleSource
+}
+
+/**
+ * R11 for a source path that was not found. When [source] resyncs missing paths, the task first submits
+ * one metadata sync through [requestSync], inheriting its effective origin and priority, and waits for
+ * it; after that sync it is missing only if the sync completed. No loop and no directory search.
+ */
+suspend fun staleSource(entry: QueueEntry, source: LibrarySource, path: io.github.chenxiex.calibrecloud.model.RelativeSourcePath,
+    queue: DurableTaskQueue, requestSync: suspend (TaskOrigin) -> TaskId?): StaleSource {
+    if (!source.resyncsMissingPath) return StaleSource.Confirmed
+    val sync = entry.sourceSync ?: return requestSync(entry.record.effectiveOrigin)
+        ?.let { StaleSource.Await(StageOutcome.AwaitSync(it, path)) } ?: StaleSource.Confirmed
+    return if (queue.get(sync)?.record?.state == TaskState.Finished(TaskResult.Completed)) StaleSource.Confirmed
+        else StaleSource.Unconfirmed
 }
 
 /**
@@ -118,13 +150,14 @@ class TaskCoordinator(
         val deferred = mutableSetOf<TaskId>()
         while (true) {
             val entry = queue.claim(now(), conditions, { request -> handlers.count { it.supports(request) } == 1 }, excluded = deferred) ?: break
-            execute(entry)
-            // A handler Wait is retried by a subsequent explicit wakeup, not busy-looped here.
-            deferred.add(entry.record.id)
+            // A handler Wait is retried by a subsequent explicit wakeup, not busy-looped here. A task
+            // awaiting its sync stays claimable: the queue holds it until that sync finishes.
+            if (!execute(entry)) deferred.add(entry.record.id)
         }
     }
 
-    private suspend fun execute(initial: QueueEntry) {
+    /** Returns true only when the task now waits for its own stale-path sync. */
+    private suspend fun execute(initial: QueueEntry): Boolean {
         val handler = handlers.single { it.supports(initial.record.submission.request) }
         val execution = TaskExecution(queue, initial.record.id)
         try {
@@ -143,7 +176,7 @@ class TaskCoordinator(
                         record = current.record.copy(state = if (current.record.submission.request is TaskRequest.CandidateConfiguration)
                             TaskState.Finished(TaskResult.Cancelled(current.record.commit))
                             else TaskState.Waiting(FrozenSet(listOf(WaitingReason.INACTIVE_LIBRARY))), controls = DurableTaskQueue.queuedControls)) }
-                    return
+                    return false
                 }
                 val stage = entry.stage
                 val controls = handler.controls(stage)
@@ -162,13 +195,13 @@ class TaskCoordinator(
                 if (outcome is StageOutcome.Complete && outcome.cachePublished &&
                     queue.get(entry.record.id)?.record?.state == TaskState.Finished(TaskResult.Completed)) {
                     queue.update(entry.record.id, cachePublished = true) { it }
-                    return
+                    return false
                 }
                 execution.checkControl()
                 if (entry.record.submission.request is TaskRequest.CandidateConfiguration && !queue.isActive(entry.record)) {
                     queue.update(entry.record.id) { current -> current.copy(record = current.record.copy(
                         state = TaskState.Finished(TaskResult.Cancelled(current.record.commit)), controls = DurableTaskQueue.noControls)) }
-                    return
+                    return false
                 }
                 when (outcome) {
                     is StageOutcome.Advance -> {
@@ -188,25 +221,34 @@ class TaskCoordinator(
                             current.copy(record = current.record.copy(state = TaskState.Finished(outcome.result), controls = DurableTaskQueue.noControls),
                                 checkpoint = null, control = null)
                         }
-                        return
+                        return false
                     }
-                    is StageOutcome.Fail -> { fail(entry.record.id, outcome.error); return }
+                    is StageOutcome.Fail -> { fail(entry.record.id, outcome.error); return false }
+                    is StageOutcome.AwaitSync -> {
+                        require(entry.sourceSync == null && outcome.sync != entry.record.id)
+                        queue.update(entry.record.id) { it.copy(sourceSync = outcome.sync, missingPath = outcome.missingPath, recoveryRequired = true,
+                            record = it.record.copy(state = TaskState.Waiting(FrozenSet(listOf(WaitingReason.DEPENDENCY))),
+                                controls = DurableTaskQueue.queuedControls)) }
+                        return true
+                    }
                     is StageOutcome.Wait -> {
                         queue.update(entry.record.id) { it.copy(record = it.record.copy(state = TaskState.Waiting(FrozenSet(listOf(outcome.reason))),
                             controls = DurableTaskQueue.queuedControls), recoveryRequired = true) }
-                        return
+                        return false
                     }
                     is StageOutcome.Retry -> {
                         val kind = (outcome.error as? TaskError.Source)?.error?.kind
                         require(kind in setOf(StorageErrorKind.NO_NETWORK, StorageErrorKind.THROTTLED, StorageErrorKind.LOCAL_IO))
                         val reason = if (kind == StorageErrorKind.THROTTLED) WaitingReason.THROTTLED else WaitingReason.NETWORK
                         val latest = requireNotNull(queue.get(entry.record.id))
-                        if (latest.attempts >= MAX_RETRIES) { fail(entry.record.id, outcome.error); return }
+                        if (latest.attempts >= MAX_RETRIES) { fail(entry.record.id, outcome.error); return false }
                         val delay = maxOf(outcome.serverDelayMillis ?: 0, 1_000L shl latest.attempts)
                         val deadline = now().let { if (it > Long.MAX_VALUE - delay) Long.MAX_VALUE else it + delay }
+                        if (kind == StorageErrorKind.THROTTLED) queue.throttle(entry.record.id, outcome.serverDelayMillis
+                            ?.let { server -> now().let { if (it > Long.MAX_VALUE - server) Long.MAX_VALUE else it + server } } ?: deadline)
                         queue.update(entry.record.id) { it.copy(attempts = it.attempts + 1, retryAt = deadline, recoveryRequired = true,
                             record = it.record.copy(state = TaskState.Waiting(FrozenSet(listOf(reason))), controls = DurableTaskQueue.queuedControls)) }
-                        return
+                        return false
                     }
                 }
             }
@@ -225,6 +267,7 @@ class TaskCoordinator(
         } catch (_: Exception) {
             fail(initial.record.id, TaskError.Source(StorageError(StorageErrorKind.LOCAL_IO)))
         }
+        return false
     }
 
     private suspend fun fail(id: TaskId, error: TaskError) = queue.update(id) { entry ->

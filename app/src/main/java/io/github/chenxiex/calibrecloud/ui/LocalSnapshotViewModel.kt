@@ -11,7 +11,7 @@ import io.github.chenxiex.calibrecloud.CalibreCloudApplication
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.tasks.api.*
-import io.github.chenxiex.calibrecloud.tasks.local.LocalSnapshotTaskHandler
+import io.github.chenxiex.calibrecloud.tasks.background.StartupSync
 import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskCoordinator
@@ -24,6 +24,7 @@ class LocalSnapshotViewModel(
     private val state: ApplicationStateRepository,
     private val queue: DurableTaskQueue,
     private val coordinator: TaskCoordinator,
+    private val sync: StartupSync,
 ) : ViewModel() {
     var record by mutableStateOf<TaskRecord?>(null)
         private set
@@ -46,7 +47,7 @@ class LocalSnapshotViewModel(
             }
             val latest = queue.list().filter {
                 val request = it.record.submission.request as? TaskRequest.CandidateConfiguration
-                request?.context?.selectionToken == token && request?.operation == LocalSnapshotTaskHandler.OPERATION
+                request?.context?.selectionToken == token && request?.operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC
             }.maxByOrNull { it.record.scheduling.sequence.value }?.record
             if (latest != null) observe(latest.id)
         }
@@ -63,16 +64,7 @@ class LocalSnapshotViewModel(
                     return@launch
                 }
                 selectionToken = selected.token
-                val submission = TaskSubmission(TaskRequest.CandidateConfiguration(
-                    CandidateContext(selected.token, BackendKind.LOCAL, selected.authorizationId ?: selected.token),
-                    LocalSnapshotTaskHandler.OPERATION), TaskOrigin.MANUAL_SYNC)
-                val result = coordinator.submit(submission)
-                val id = when (result) {
-                    is SubmissionResult.Created -> result.taskId
-                    is SubmissionResult.Reused -> result.taskId
-                    is SubmissionResult.Promoted -> result.taskId
-                    is SubmissionResult.Rejected -> { rejected = true; return@launch }
-                }
+                val id = sync.request(TaskOrigin.MANUAL_SYNC) ?: run { rejected = true; return@launch }
                 rejected = false
                 observe(id)
                 coordinator.requestRun()
@@ -108,7 +100,7 @@ class LocalSnapshotViewModel(
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
                 return modelClass.cast(LocalSnapshotViewModel(dependencies.state, dependencies.taskQueue,
-                    dependencies.taskCoordinator))!!
+                    dependencies.taskCoordinator, dependencies.librarySync))!!
             }
         }
     }

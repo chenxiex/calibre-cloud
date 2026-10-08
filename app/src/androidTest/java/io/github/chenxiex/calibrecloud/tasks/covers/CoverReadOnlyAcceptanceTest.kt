@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks.covers
 
+import io.github.chenxiex.calibrecloud.storage.api.of
 import android.graphics.BitmapFactory
 import android.os.Bundle
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -68,13 +69,13 @@ class CoverReadOnlyAcceptanceTest {
                             AndroidLocalDocumentAccess(context).root(tree).name)
                     }
                     is LibraryLocation.OneDrive -> {
-                        val root = dependencies.oneDriveBackend.listDirectories(location)
+                        val root = dependencies.oneDriveBackend.listAllDirectories(location)
                         assertTrue(root is OneDriveSourceResult.Available)
                         assertEquals("library-a", (root as OneDriveSourceResult.Available).value.parentName)
                     }
                 }
-                val before = dependencies.formatSource.version(location, path)
-                val original = dependencies.formatSource.open(location, path).use { bounded(it) }
+                val before = dependencies.librarySources.of(location).lookup(location, path) {}.version
+                val original = dependencies.librarySources.of(location).lookup(location, path) {}.open().use { bounded(it) }
                 originalHash = hash(original)
                 assertEquals("Prepared fixture cover bytes differ", 36_903, original.size)
                 assertEquals("Prepared fixture cover content differs",
@@ -83,8 +84,8 @@ class CoverReadOnlyAcceptanceTest {
                     val result = dependencies.oneDriveBackend.openCover(location, path,
                         CoverRepository.WIDTH, CoverRepository.HEIGHT) { width, height -> thumbnail = width to height }
                     assertTrue("Real thumbnail/original cover read failed", result is OneDriveSourceResult.Available)
-                    (result as OneDriveSourceResult.Available).value
-                } else dependencies.coverSource.open(location, path)
+                    (result as OneDriveSourceResult.Available).value.stream
+                } else dependencies.librarySources.of(location).openCover(location, path, CoverRepository.WIDTH, CoverRepository.HEIGHT) {}.input
                 val bytes = input.use { bounded(it) }
                 responseBytes = bytes.size
                 responseHash = hash(bytes)
@@ -109,7 +110,7 @@ class CoverReadOnlyAcceptanceTest {
                     "Real source response must decode as an image"
                 }
                 try { assertTrue(bitmap.width > 0 && bitmap.height > 0) } finally { bitmap.recycle() }
-                assertEquals("Read-only probe must not change the source", before, dependencies.formatSource.version(location, path))
+                assertEquals("Read-only probe must not change the source", before, dependencies.librarySources.of(location).lookup(location, path) {}.version)
             }
             instrumentation.sendStatus(0, Bundle().apply {
                 putString("step07CoverBackend", location.backend.toString())

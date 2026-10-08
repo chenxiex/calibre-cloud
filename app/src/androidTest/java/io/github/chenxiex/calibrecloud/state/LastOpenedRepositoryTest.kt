@@ -78,11 +78,10 @@ class LastOpenedRepositoryTest {
     fun versionSevenMigrationAddsAnEmptyRecordAndKeepsHistory() = runBlocking<Unit> {
         val library = bound("migrated")
         SearchHistoryRepository(database, Dispatchers.IO).record(library, "kept")
-        database.writableDatabase.execSQL("DROP TABLE last_opened")
-        database.writableDatabase.version = 7
+        StateSchemaHistory.downgrade(database.writableDatabase, 7)
         database.close()
         reopen()
-        assertEquals(8, database.readableDatabase.version)
+        assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
         assertEquals(listOf("kept"), SearchHistoryRepository(database, Dispatchers.IO).list(library))
         assertNull(records.get(library))
         records.save(opened(library, 3, "EPUB", "after"))

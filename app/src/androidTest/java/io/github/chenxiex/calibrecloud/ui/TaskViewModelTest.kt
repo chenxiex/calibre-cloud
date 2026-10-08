@@ -53,6 +53,8 @@ class TaskViewModelTest {
             LibraryLocation.Local("test.documents", "fixture-root"), UUID.randomUUID())
         assertTrue(state.bindValidated(state.select(identity.location).token, identity))
         queue.submit(TaskSubmission(TaskRequest.MetadataSync(identity.id), TaskOrigin.MANUAL_SYNC))
+        // Without a composition, every idle wait blocks for the rule's two-second root timeout.
+        compose.setContent {}
         compose.runOnIdle {
             model = TaskViewModel(queue, { false }, {}, { if (wakeFails) throw IOException() },
                 { true }, application, { false })

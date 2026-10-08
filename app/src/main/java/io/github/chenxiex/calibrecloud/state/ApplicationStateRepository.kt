@@ -47,8 +47,8 @@ class ApplicationStateRepository(
         transaction {
             val token = UUID.randomUUID()
             val values = ContentValues().apply {
-                put("singleton", 1); put("token", token.toString()); put("backend", backendCode(backend))
-                put("authority", ""); put("root_id", ""); put("account_id", ""); put("drive_id", "")
+                put("singleton", 1); put("token", token.toString()); put("backend", LocationKeys.backendCode(backend))
+                putNull("location_key")
                 putNull("library_id"); put("authorization_id", authorizationId.toString())
             }
             if (update("current_selection", values, "singleton = 1", null) == 0) insertOrThrow("current_selection", null, values)
@@ -85,11 +85,14 @@ class ApplicationStateRepository(
         }
     }
 
-    /** Reauthorizing a saved position cannot overwrite a concurrent backend/directory selection. */
+    /**
+     * Binds the selected position to a new authorization under a new token, so requests bound to the old
+     * authorization are revoked; cannot overwrite a concurrent backend/directory selection.
+     */
     suspend fun reauthorizeCandidate(selectionToken: UUID, authorizationId: UUID): CandidateContext? = withContext(ioDispatcher) {
         transaction {
             val selected = current(this) ?: return@transaction null
-            if (selected.token != selectionToken || selected.backend != BackendKind.ONEDRIVE || selected.location == null) return@transaction null
+            if (selected.token != selectionToken || selected.location == null) return@transaction null
             val next = CandidateContext(UUID.randomUUID(), selected.backend, authorizationId)
             update("current_selection", ContentValues().apply {
                 put("token", next.selectionToken.toString()); put("authorization_id", authorizationId.toString())
@@ -120,12 +123,8 @@ class ApplicationStateRepository(
 
     /** Historical incarnations at this stable location; the importer must verify compatibility before reuse. */
     suspend fun bindingsAt(location: LibraryLocation): List<LibraryIdentity> = withContext(ioDispatcher) {
-        val values = locationValues(location)
         database.readableDatabase.query(
-            "library_bindings", null,
-            "backend = ? AND authority = ? AND root_id = ? AND account_id = ? AND drive_id = ?",
-            arrayOf("backend", "authority", "root_id", "account_id", "drive_id").map { values.getAsString(it) }.toTypedArray(),
-            null, null, "library_id",
+            "library_bindings", null, "backend = ? AND location_key = ?", locationArgs(location), null, null, "library_id",
         ).use { cursor -> buildList {
             while (cursor.moveToNext()) add(LibraryIdentity(
                 LibraryId(UUID.fromString(cursor.text("library_id"))), cursor.location(), UUID.fromString(cursor.text("generation")),
@@ -159,7 +158,7 @@ class ApplicationStateRepository(
      * Query/open and replacement share copyAccess; the factory retires old generations after live handles close.
      * A supplied task ID also requires the current binding/control gate and commits terminal state atomically.
      */
-    suspend fun publishComplete(copy: DownloadedCopy, taskId: UUID? = null): Boolean = withContext(ioDispatcher) { copyAccess.withLock {
+    suspend fun publishComplete(copy: DownloadedCopy, taskId: UUID? = null, stamp: CalibreStamp? = null): Boolean = withContext(ioDispatcher) { copyAccess.withLock {
         val previous = find(copy.key)
         val published = transaction {
             val identity = requireNotNull(binding(this, copy.key.book.libraryId))
@@ -174,7 +173,7 @@ class ApplicationStateRepository(
             val opened = files.open(copy.location, copy.sizeBytes)
             require(opened is HandleOpenResult.Opened) { "Complete private file is required" }
             opened.handle.use { }
-            val values = copyValues(copy)
+            val values = copyValues(copy).apply { putStamp(stamp) }
             val args = keyArgs(copy.key)
             if (update("downloaded_copies", values, KEY_WHERE, args) == 0) insertOrThrow("downloaded_copies", null, values)
             if (taskId != null) DurableTaskQueue.completePublication(this, taskId)
@@ -202,12 +201,22 @@ class ApplicationStateRepository(
         locations.forEach { files.retire(it) }
     } }
 
-    /** Only an explicit source check changes this field; transport/auth failures never call it. */
-    suspend fun confirmSource(key: CopyKey, availability: SourceAvailability) = withContext(ioDispatcher) {
+    /**
+     * Only an explicit source check changes this field; transport/auth failures never call it.
+     * A [stamp] records the imported Calibre record that an unchanged source version was confirmed against.
+     */
+    suspend fun confirmSource(key: CopyKey, availability: SourceAvailability, stamp: CalibreStamp? = null) = withContext(ioDispatcher) {
         require(availability != SourceAvailability.UNCONFIRMED)
         database.writableDatabase.update("downloaded_copies", ContentValues().apply {
             put("source_availability", if (availability == SourceAvailability.AVAILABLE) "available" else "missing")
+            if (stamp != null) putStamp(stamp)
         }, KEY_WHERE, keyArgs(key))
+    }
+
+    private fun ContentValues.putStamp(stamp: CalibreStamp?) {
+        put("calibre_recorded", if (stamp == null) 0 else 1)
+        if (stamp?.modified == null) putNull("calibre_modified") else put("calibre_modified", stamp.modified)
+        if (stamp?.sizeBytes == null) putNull("calibre_size") else put("calibre_size", stamp.sizeBytes)
     }
 
     override suspend fun find(key: CopyKey): DownloadedCopy? = withContext(ioDispatcher) {
@@ -275,22 +284,20 @@ class ApplicationStateRepository(
 
     /** Re-selecting a known position restores its last valid private import without source access. */
     private fun cachedIdentity(db: SQLiteDatabase, location: LibraryLocation): LibraryIdentity? {
-        val values = locationValues(location)
         return db.rawQuery("""
             SELECT b.library_id FROM library_bindings b JOIN library_preferences m ON b.library_id = m.library_id
-            WHERE b.backend = ? AND b.authority = ? AND b.root_id = ? AND b.account_id = ? AND b.drive_id = ?
+            WHERE b.backend = ? AND b.location_key = ?
             ORDER BY m.last_imported_at DESC, m.rowid DESC LIMIT 1
-        """.trimIndent(), arrayOf("backend", "authority", "root_id", "account_id", "drive_id")
-            .map { values.getAsString(it) }.toTypedArray()).use {
+        """.trimIndent(), locationArgs(location)).use {
             if (it.moveToFirst()) binding(db, LibraryId(UUID.fromString(it.getString(0)))) else null
         }
     }
 
     internal fun current(db: SQLiteDatabase): LibrarySelection? = db.query("current_selection", null, "singleton = 1", null, null, null, null).use {
         if (!it.moveToFirst()) null else LibrarySelection(
-            UUID.fromString(it.text("token")), if (it.text("root_id").isEmpty()) null else it.location(),
+            UUID.fromString(it.text("token")), if (it.optionalText("location_key") == null) null else it.location(),
             it.optionalText("library_id")?.let { id -> binding(db, LibraryId(UUID.fromString(id))) },
-            when (it.text("backend")) { "local" -> BackendKind.LOCAL; "onedrive" -> BackendKind.ONEDRIVE; else -> error("Unknown backend") },
+            LocationKeys.backend(it.text("backend")),
             it.optionalText("authorization_id")?.let(UUID::fromString),
         )
     }
@@ -312,21 +319,15 @@ class ApplicationStateRepository(
     }
 
     internal fun locationValues(location: LibraryLocation) = ContentValues().apply {
-        put("backend", backendCode(location.backend))
-        put("authority", (location as? LibraryLocation.Local)?.authority ?: "")
-        put("root_id", when (location) {
-            is LibraryLocation.Local -> location.treeDocumentId
-            is LibraryLocation.OneDrive -> location.rootItemId
-        })
-        put("account_id", (location as? LibraryLocation.OneDrive)?.accountId ?: "")
-        put("drive_id", (location as? LibraryLocation.OneDrive)?.driveId ?: "")
+        put("backend", LocationKeys.backendCode(location.backend))
+        put("location_key", LocationKeys.encode(location))
     }
 
-    private fun Cursor.location(): LibraryLocation = when (text("backend")) {
-        "local" -> LibraryLocation.Local(text("authority"), text("root_id"))
-        "onedrive" -> LibraryLocation.OneDrive(text("account_id"), text("drive_id"), text("root_id"))
-        else -> error("Unknown location backend")
-    }
+    /** Arguments for `backend = ? AND location_key = ?`. */
+    internal fun locationArgs(location: LibraryLocation) =
+        arrayOf(LocationKeys.backendCode(location.backend), LocationKeys.encode(location))
+
+    private fun Cursor.location(): LibraryLocation = LocationKeys.decode(LocationKeys.backend(text("backend")), text("location_key"))
 
     private fun copyValues(copy: DownloadedCopy) = ContentValues().apply {
         put("library_id", copy.key.book.libraryId.value.toString())
@@ -336,7 +337,7 @@ class ApplicationStateRepository(
         put("file_generation", copy.location.fileGeneration.toString())
         put("title", copy.title)
         if (copy.sizeBytes == null) putNull("size_bytes") else put("size_bytes", copy.sizeBytes)
-        put("version_backend", backendCode(copy.savedVersion.backend))
+        put("version_backend", LocationKeys.backendCode(copy.savedVersion.backend))
         put("version_token", copy.savedVersion.token)
         put("source_availability", when (copy.sourceAvailability) {
             SourceAvailability.UNCONFIRMED -> "unconfirmed"
@@ -351,11 +352,7 @@ class ApplicationStateRepository(
             CopyKey(BookKey(library, getLong(getColumnIndexOrThrow("source_id")), UUID.fromString(text("source_uuid"))), BookFormat.parse(text("format"))),
             CompleteCopyLocation(library, UUID.fromString(text("file_generation"))), text("title"),
             getColumnIndexOrThrow("size_bytes").let { if (isNull(it)) null else getLong(it) },
-            FileVersion(when (text("version_backend")) {
-                "local" -> BackendKind.LOCAL
-                "onedrive" -> BackendKind.ONEDRIVE
-                else -> error("Unknown version backend")
-            }, text("version_token")),
+            FileVersion(LocationKeys.backend(text("version_backend")), text("version_token")),
             when (text("source_availability")) {
                 "unconfirmed" -> SourceAvailability.UNCONFIRMED
                 "available" -> SourceAvailability.AVAILABLE
@@ -367,7 +364,6 @@ class ApplicationStateRepository(
 
     private fun Cursor.text(name: String): String = getString(getColumnIndexOrThrow(name))
     private fun Cursor.optionalText(name: String): String? = getColumnIndexOrThrow(name).let { if (isNull(it)) null else getString(it) }
-    private fun backendCode(backend: BackendKind) = when (backend) { BackendKind.LOCAL -> "local"; BackendKind.ONEDRIVE -> "onedrive" }
     private fun keyArgs(key: CopyKey) = arrayOf(key.book.libraryId.value.toString(), key.book.sourceId.toString(), key.book.sourceUuid.toString(), key.format.value)
 
     companion object {

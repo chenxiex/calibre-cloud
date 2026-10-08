@@ -1,0 +1,72 @@
+package io.github.chenxiex.calibrecloud.storage.local
+
+import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.FileVersion
+import io.github.chenxiex.calibrecloud.model.LibraryLocation
+import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
+import io.github.chenxiex.calibrecloud.storage.api.*
+import java.util.UUID
+
+/**
+ * [LibrarySource] over a granted SAF tree. The version is the SHA-256 of all bytes, so it is also the
+ * content digest and is read again before publication. Every downloaded copy is checked after each
+ * import, a missing path is missing at once, nothing needs a network, and a lost grant waits for the
+ * directory to be granted again. [treeUri] returns the grant of [LibraryLocation.Local] while it is the
+ * current selection, otherwise null.
+ */
+class LocalLibrarySource(
+    private val source: LocalSourceBackend,
+    private val treeUri: suspend (LibraryLocation.Local) -> String?,
+) : LibrarySource {
+    override val backend = BackendKind.LOCAL
+    override val requiresNetwork = false
+    override val resyncsMissingPath = false
+    override fun reauthorization(kind: StorageErrorKind) =
+        if (kind == StorageErrorKind.AUTHORIZATION_EXPIRED) Reauthorization.DIRECTORY_GRANT else null
+    override fun checksCopy(recorded: CalibreStamp?, imported: CalibreStamp?) = true
+
+    override suspend fun lookup(location: LibraryLocation, path: RelativeSourcePath, control: suspend () -> Unit): SourceFile {
+        val tree = tree(location)
+        control()
+        val observed = source.version(tree, path, control).value()
+        control()
+        val estimated = try { source.size(tree, path).value() } catch (_: SourceFailure) { null }
+        return object : SourceFile {
+            override val version = observed
+            override val size: Long? = null
+            override val estimatedSize = estimated
+            override val contentSha256 = observed.token
+            override suspend fun open() = source.openRead(tree, path).value()
+            override suspend fun openRange(offset: Long) = source.openRange(tree, path, offset, observed).value()
+        }
+    }
+
+    override suspend fun unchanged(location: LibraryLocation, path: RelativeSourcePath, version: FileVersion, control: suspend () -> Unit): Boolean {
+        val tree = tree(location)
+        control()
+        return source.version(tree, path, control).value() == version
+    }
+
+    override suspend fun openCover(location: LibraryLocation, path: RelativeSourcePath, targetWidth: Int, targetHeight: Int,
+        control: suspend () -> Unit): SourceStream {
+        val tree = tree(location)
+        val version = source.version(tree, path, control).value()
+        control()
+        return SourceStream(source.openRead(tree, path).value(), version)
+    }
+
+    /** Always reads: the content hash that would prove an unchanged database needs the full read anyway. */
+    override suspend fun acquireSnapshot(location: LibraryLocation, candidateId: UUID, unchangedVersion: FileVersion?,
+        control: suspend () -> Unit): SourceSnapshot {
+        val snapshot = source.acquireSnapshot(tree(location), candidateId, control).value()
+        return SourceSnapshot(snapshot.file, snapshot.version)
+    }
+
+    private suspend fun tree(location: LibraryLocation): String =
+        (location as? LibraryLocation.Local)?.let { treeUri(it) } ?: throw SourceFailure(StorageErrorKind.AUTHORIZATION_EXPIRED)
+
+    private fun <T> LocalSourceResult<T>.value(): T = when (this) {
+        is LocalSourceResult.Available -> value
+        is LocalSourceResult.Failed -> throw SourceFailure(error)
+    }
+}

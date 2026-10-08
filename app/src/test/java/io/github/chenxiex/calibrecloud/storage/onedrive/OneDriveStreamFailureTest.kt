@@ -1,7 +1,7 @@
-package io.github.chenxiex.calibrecloud.tasks.copies
+package io.github.chenxiex.calibrecloud.storage.onedrive
 
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
-import io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveSourceException
+import io.github.chenxiex.calibrecloud.storage.api.SourceFailure
 import java.io.IOException
 import java.io.InputStream
 import org.junit.Assert.assertEquals
@@ -9,7 +9,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class FormatSourceStreamTest {
+class OneDriveStreamFailureTest {
     @Test fun interruptedNetworkReadsAndCloseBecomeRetryableNetworkFailure() {
         val source = object : InputStream() {
             override fun read(): Int = throw IOException("fixture connection interruption")
@@ -46,8 +46,8 @@ class FormatSourceStreamTest {
         assertFalse(unauthorized.transient)
     }
 
-    private fun failure(operation: () -> Unit): FormatSourceFailure {
-        try { operation() } catch (failure: FormatSourceFailure) { return failure }
+    private fun failure(operation: () -> Unit): SourceFailure {
+        try { operation() } catch (failure: SourceFailure) { return failure }
         throw AssertionError("Expected a classified source failure")
     }
 }

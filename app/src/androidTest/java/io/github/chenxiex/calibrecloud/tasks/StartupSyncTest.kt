@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks
 
+import io.github.chenxiex.calibrecloud.state.StateSchemaHistory
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -9,8 +10,6 @@ import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.background.StartupSync
-import io.github.chenxiex.calibrecloud.tasks.local.LocalSnapshotTaskHandler
-import io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -86,7 +85,7 @@ class StartupSyncTest {
         assertEquals(TaskPriority.LOW, automatic.scheduling.priority)
         val request = automatic.submission.request as TaskRequest.CandidateConfiguration
         assertEquals(CandidateContext(selected.token, selected.backend, selected.token), request.context)
-        assertEquals(LocalSnapshotTaskHandler.OPERATION, request.operation)
+        assertEquals(TaskRequest.CandidateConfiguration.LIBRARY_SYNC, request.operation)
         assertTrue(startup.manualSync())
         val promoted = queue.list().single().record
         assertEquals(automatic.id, promoted.id)
@@ -107,7 +106,7 @@ class StartupSyncTest {
         assertNotNull(id)
         val request = queue.list().single().record.submission.request as TaskRequest.CandidateConfiguration
         assertEquals(candidate, request.context)
-        assertEquals(OneDriveCandidateTaskHandler.SNAPSHOT, request.operation)
+        assertEquals(TaskRequest.CandidateConfiguration.LIBRARY_SYNC, request.operation)
         assertTrue(startup.manualSync())
         assertEquals(id, queue.list().single().record.id)
     }
@@ -115,15 +114,12 @@ class StartupSyncTest {
     @Test
     fun versionFiveMigrationRetainsSelectionAndDefaultsOff() = runBlocking<Unit> {
         val selected = state.select(LibraryLocation.Local("test.documents", "fixture-root"))
-        database.writableDatabase.execSQL("DROP TABLE application_settings")
-        database.writableDatabase.execSQL("DROP TABLE search_history")
-        database.writableDatabase.execSQL("DROP TABLE last_opened")
-        database.writableDatabase.version = 5
+        StateSchemaHistory.downgrade(database.writableDatabase, 5)
         database.close()
         reopen()
         assertEquals(selected, state.current())
         assertFalse(startup.startupEnabled())
-        assertEquals(8, database.readableDatabase.version)
+        assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
     }
 
     private fun reopen() {
@@ -138,6 +134,6 @@ class StartupSyncTest {
             override suspend fun execute(entry: QueueEntry, execution: TaskExecution): StageOutcome =
                 error("Startup must not execute source handlers")
         }
-        startup = StartupSync(state, TaskCoordinator(queue, listOf(handler)))
+        startup = StartupSync(state, TaskCoordinator(queue, listOf(handler)), TestAuthorizations.of(state))
     }
 }

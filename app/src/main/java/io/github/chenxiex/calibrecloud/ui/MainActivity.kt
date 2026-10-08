@@ -458,7 +458,7 @@ internal fun oneDriveTaskStatusResource(taskState: TaskState?, operation: String
         is TaskState.Paused -> R.string.local_snapshot_paused
         is TaskState.Finished -> when (val result = taskState.result) {
             TaskResult.Completed -> if (operation ==
-                OneDriveCandidateTaskHandler.SNAPSHOT) R.string.local_snapshot_ready else R.string.onedrive_browse_completed
+                TaskRequest.CandidateConfiguration.LIBRARY_SYNC) R.string.local_snapshot_ready else R.string.onedrive_browse_completed
             is TaskResult.Cancelled -> R.string.onedrive_task_cancelled
             is TaskResult.Failed -> when ((result.failure.error as? TaskError.Source)?.error?.kind) {
                 StorageErrorKind.NO_NETWORK -> R.string.onedrive_task_network_failed
@@ -482,7 +482,7 @@ internal fun oneDriveTaskStatusResource(taskState: TaskState?, operation: String
 /** Snapshot tasks belong to the task page and cannot stand in for directory results. */
 internal fun directoryStatusResource(taskState: TaskState?, operation: String?, rejected: Boolean, submitting: Boolean): Int {
     if (rejected) return R.string.onedrive_task_rejected
-    if (operation == OneDriveCandidateTaskHandler.SNAPSHOT) return R.string.onedrive_task_pending
+    if (operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC) return R.string.onedrive_task_pending
     if (submitting && (taskState == null || taskState is TaskState.Finished)) return R.string.onedrive_task_queued
     return oneDriveTaskStatusResource(
         if (operation == OneDriveCandidateTaskHandler.BROWSE) taskState else null,

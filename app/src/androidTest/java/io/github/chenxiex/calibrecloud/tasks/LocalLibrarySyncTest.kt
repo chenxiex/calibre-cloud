@@ -13,10 +13,12 @@ import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.storage.local.LocalDocument
 import io.github.chenxiex.calibrecloud.storage.local.LocalDocumentAccess
+import io.github.chenxiex.calibrecloud.storage.local.LocalLibrarySource
 import io.github.chenxiex.calibrecloud.storage.local.LocalSourceBackend
 import io.github.chenxiex.calibrecloud.storage.local.SnapshotValidator
 import io.github.chenxiex.calibrecloud.tasks.api.*
-import io.github.chenxiex.calibrecloud.tasks.local.LocalSnapshotTaskHandler
+import io.github.chenxiex.calibrecloud.tasks.sync.LibrarySyncTaskHandler
+import io.github.chenxiex.calibrecloud.storage.api.LibrarySources
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -39,7 +41,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /** Real persisted scheduling and production handler; injected documents never touch a real library. */
 @RunWith(AndroidJUnit4::class)
-class LocalSnapshotTaskHandlerTest {
+class LocalLibrarySyncTest {
     private lateinit var context: Context
     private lateinit var databaseName: String
     private lateinit var database: ApplicationStateDatabase
@@ -159,15 +161,20 @@ class LocalSnapshotTaskHandlerTest {
     }
 
     private fun submission(candidate: CandidateContext) = TaskSubmission(
-        TaskRequest.CandidateConfiguration(candidate, LocalSnapshotTaskHandler.OPERATION), TaskOrigin.MANUAL_SYNC,
+        TaskRequest.CandidateConfiguration(candidate, TaskRequest.CandidateConfiguration.LIBRARY_SYNC), TaskOrigin.MANUAL_SYNC,
     )
 
     private suspend fun submit(context: CandidateContext? = null): TaskId =
         (queue.submit(submission(context ?: candidate())) as SubmissionResult.Created).taskId
 
-    private fun coordinator() = TaskCoordinator(queue, listOf(LocalSnapshotTaskHandler(
-        state, LocalSourceBackend(documents, snapshots, SnapshotValidator { it.length() > 0 }, Dispatchers.IO), importer, Dispatchers.IO,
-    )))
+    private fun coordinator(): TaskCoordinator {
+        val source = LocalLibrarySource(LocalSourceBackend(documents, snapshots, SnapshotValidator { it.length() > 0 }, Dispatchers.IO)) { location ->
+            if (state.current()?.location == location) state.localTreeUri() else null
+        }
+        return TaskCoordinator(queue, listOf(LibrarySyncTaskHandler(
+            state, LibrarySources { source }, TestAuthorizations.of(state), importer, Dispatchers.IO,
+        )))
+    }
 
     private fun snapshot(task: TaskId): File = File(snapshots, task.value.toString()).listFiles().orEmpty().single { it.extension == "db" }
 

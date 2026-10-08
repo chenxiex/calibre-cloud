@@ -10,6 +10,7 @@
 - 最小清单以 LibraryId、源数字 ID、源 UUID、格式为复合键，只保存完整文件代次、友好标题、可空大小、源版本和明确源状态，不充当元数据索引。查询不探测源，读取错误不删除记录，也不将源状态改为缺失。
 - 完整记录发布前检查私有文件可读、非空及已知大小。格式内容与源版本验证由真实副本任务处理器负责；不能把长度校验当成格式验证。生产发布核对当前书库及任务控制，在同一事务保存完整清单与任务成功；暂存、快照、索引、封面和保护资料不能放入 books 或进入完整查询。
 - Schema 使用显式持久化 code、外键、约束和事务。增加 schema 版本必须提供非破坏性迁移，保留清单、任务及恢复证据；不能删库重建或访问源库解决升级问题。
+- 版本号只定义在 `ApplicationStateDatabase.VERSION`。提升版本时，在 androidTest 的 [StateSchemaHistory](../../../../../../../androidTest/java/io/github/chenxiex/calibrecloud/state/StateSchemaHistory.kt) 增加新版本的逆变换（使用冻结的旧 DDL）；未增加前全部迁移测试在该处以明确提示失败，这是升级唯一需要改的测试代码。迁移测试只经它构造旧 schema，断言升级后版本等于 `VERSION`，不写版本字面量；测试写状态库表时列出列名，不按位置插入。用 `rg StateSchemaHistory` 可找到全部迁移测试。
 
 平台 SQLite 验证见 [第二阶段验证记录](../../../../../../../../verification/phase-2.md)。真实下载／发布、句柄回收及精确清理协调已实现。
 
@@ -21,5 +22,7 @@
 - 清理事务同时保存冻结范围、待删私有路径、待 retire 文件代次及任务撤销标记，并移除相应元数据／清单引用。生产发布须在同一事务拒绝 revoked 任务。保留的完整副本在元数据清理后仍可读取，源状态改为 `UNCONFIRMED`；配置、绑定及保护资料不随普通缓存清理删除。具体文件删除和恢复由[缓存维护](../storage/cache/CacheMaintenance.kt)负责，不在状态库操作中访问源。
 
 - Schema v7 非破坏性增加 `search_history`（书库 ID、查询文字、顺序号），由 [SearchHistoryRepository](SearchHistoryRepository.kt) 读写：只保存执行过的非空查询，重复查询移到最前，每库保留最近 50 条。历史属于书库绑定，清元数据、移除副本和清理其它书库缓存都不删除它，清除历史只删当前书库的记录；查询文字不得写入日志。
+- Schema v9 非破坏性增加 OneDrive 请求开销状态：`metadata_imports.source_version`、清单的 `calibre_recorded`／`calibre_modified`／`calibre_size`、任务的 `source_sync`／`missing_path` 与 `source_throttle` 截止时间表；各列仅在缺失时添加，旧副本 `calibre_recorded=0`。
+- Schema v10 把绑定与当前选择的按后端位置列（authority、root_id、account_id、drive_id）换成存储层 [LocationKeys](../storage/api/LocationKeys.kt) 的不透明 `location_key`（未选根的候选为 null），并去掉绑定、选择与清单上的后端 CHECK 约束；新增后端不再改 schema。迁移在延迟外键检查下重写父表，提交时有任何引用失去绑定即失败；其它行不变。
 - Schema v8 非破坏性增加 `last_opened`（每个书库一条：书籍身份、格式、显示标题），由 [LastOpenedRepository](LastOpenedRepository.kt) 读写；只在系统打开调用成功后保存，不表示阅读进度或已读。清元数据、移除副本和清理其它书库缓存都保留它。
 - Schema v6 非破坏性增加独立 `application_settings`，启动自动同步默认关闭；设置与书库代次无关，清元数据、移除副本和其它书库清理均保留它。读取／更新通过共享 repository 在 I/O dispatcher 上执行，不在 Activity 或 worker 另建状态库。

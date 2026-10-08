@@ -9,7 +9,7 @@ import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.model.*
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
-import io.github.chenxiex.calibrecloud.state.LegacyCacheSchemaFixture
+import io.github.chenxiex.calibrecloud.state.StateSchemaHistory
 import io.github.chenxiex.calibrecloud.storage.api.*
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
@@ -297,10 +297,10 @@ class CacheMaintenanceTest {
         val imported = requireNotNull(metadata.currentImport())
         val column = CustomColumnId(1, "#finished")
         assertTrue(metadata.selectReadColumn(imported, column))
-        LegacyCacheSchemaFixture.downgradeToFour(database.writableDatabase)
+        StateSchemaHistory.downgrade(database.writableDatabase, 4)
         database.close()
         reopen()
-        assertEquals(8, database.readableDatabase.version)
+        assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
         assertEquals(column, metadata.currentImport()!!.selectedReadColumn)
         state.setStartupEnabled(true)
         assertTrue(maintenance.execute(requireNotNull(maintenance.previewMetadata())))
@@ -567,7 +567,7 @@ class CacheMaintenanceTest {
         val file = File(files, "covers/${key.libraryId.value}/$generation.png").apply {
             parentFile!!.mkdirs(); writeText("private image fixture")
         }
-        database.writableDatabase.execSQL("INSERT INTO cover_cache VALUES(?,?,?,?,?,?)",
+        database.writableDatabase.execSQL("INSERT INTO cover_cache(library_id,source_id,source_uuid,file_generation,size_bytes,last_access) VALUES(?,?,?,?,?,?)",
             arrayOf<Any>(key.libraryId.value.toString(), key.sourceId, key.sourceUuid.toString(), generation.toString(), file.length(), 1L))
         return file
     }

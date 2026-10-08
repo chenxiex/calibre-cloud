@@ -5,6 +5,8 @@ import android.database.sqlite.SQLiteDatabase
 import io.github.chenxiex.calibrecloud.model.*
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
+import io.github.chenxiex.calibrecloud.storage.api.CalibreStamp
+import io.github.chenxiex.calibrecloud.storage.api.LibrarySource
 import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
 import kotlinx.coroutines.CoroutineDispatcher
@@ -53,7 +55,28 @@ class MetadataRepository(
 ) {
     private val publication = Mutex()
 
-    suspend fun importSnapshot(selectionToken: UUID, file: File, taskId: UUID? = null, check: suspend () -> Unit = {}): LibraryIdentity? =
+    /**
+     * One metadata sync of the current selection from [source]: an unchanged source database only
+     * confirms the current import; otherwise the acquired snapshot is imported. Source failures are
+     * thrown as SourceFailure and invalid snapshots as [SnapshotParseException]; null means the
+     * selection or task changed.
+     */
+    suspend fun sync(source: LibrarySource, selectionToken: UUID, taskId: UUID, check: suspend () -> Unit): LibraryIdentity? {
+        val location = state.current()?.takeIf { it.token == selectionToken }?.location ?: return null
+        val imported = sourceVersion(location)
+        val snapshot = source.acquireSnapshot(location, taskId, imported, check)
+        check()
+        return if (snapshot == null) confirmUnchanged(selectionToken, imported ?: return null, taskId, check)
+            else importSnapshot(selectionToken, snapshot.file, taskId, snapshot.version, source::checksCopy, check)
+    }
+
+    /**
+     * [sourceVersion] is the backend version the snapshot was read at; the next sync passes it to the
+     * source to skip an unchanged database. [checksCopy] selects the downloaded copies to check (R11).
+     */
+    suspend fun importSnapshot(selectionToken: UUID, file: File, taskId: UUID? = null, sourceVersion: FileVersion? = null,
+        checksCopy: (recorded: CalibreStamp?, imported: CalibreStamp?) -> Boolean = { _, _ -> true },
+        check: suspend () -> Unit = {}): LibraryIdentity? =
         withContext(io) { publication.withLock {
             check()
             val selected = state.current() ?: return@withLock null
@@ -103,6 +126,7 @@ class MetadataRepository(
                     val values = ContentValues().apply {
                         put("library_id", key[0]); put("import_generation", generation.toString())
                         put("imported_at", System.currentTimeMillis()); put("payload", payload)
+                        if (sourceVersion?.backend == location.backend) put("source_version", sourceVersion.token) else putNull("source_version")
                     }
                     val preferences = db.rawQuery("SELECT read_column_id,read_column_lookup FROM library_preferences WHERE library_id = ?", key).use {
                         if (it.moveToFirst() && !it.isNull(0)) Pair(it.getLong(0), it.getString(1)) else null
@@ -121,7 +145,7 @@ class MetadataRepository(
                         put("title", book.title); put("added_at", book.addedAt)
                     }) }
                     db.update("current_selection", ContentValues().apply { put("library_id", key[0]) }, "singleton = 1", null)
-                    DurableTaskQueue.enqueueDownloadedChecks(db, identity.id)
+                    DurableTaskQueue.enqueueDownloadedChecks(db, identity.id, parsed, checksCopy)
                     if (taskId != null) DurableTaskQueue.completePublication(db, taskId)
                     db.setTransactionSuccessful()
                     identity
@@ -136,6 +160,52 @@ class MetadataRepository(
             } finally {
                 if (!published) directory.deleteRecursively()
             }
+        } }
+
+    /** Source version of the current import at [location]; null when no comparable import exists. */
+    suspend fun sourceVersion(location: LibraryLocation): FileVersion? = withContext(io) {
+        val db = database.readableDatabase
+        db.beginTransactionNonExclusive()
+        try {
+            val identity = state.current(db)?.identity?.takeIf { it.location == location } ?: return@withContext null
+            db.rawQuery("SELECT source_version FROM metadata_imports WHERE library_id = ?", arrayOf(identity.id.value.toString())).use {
+                if (it.moveToFirst() && !it.isNull(0)) FileVersion(location.backend, it.getString(0)) else null
+            }
+        } finally { db.endTransaction() }
+    }
+
+    /**
+     * Completes a sync whose source database still has the imported version: the current import,
+     * its derived views and downloaded-format checks stay as they are; only the sync time advances.
+     * Uses the same selection and task-control gates as a complete import.
+     */
+    suspend fun confirmUnchanged(selectionToken: UUID, version: FileVersion, taskId: UUID? = null, check: suspend () -> Unit = {}): LibraryIdentity? =
+        withContext(io) { publication.withLock {
+            check()
+            val db = database.writableDatabase
+            db.beginTransaction()
+            try {
+                if (taskId != null && db.rawQuery("SELECT control FROM queued_tasks WHERE task_id = ? AND revoked = 0",
+                    arrayOf(taskId.toString())).use { it.moveToFirst() && it.getString(0) in setOf("pause", "cancel") }) return@withLock null
+                if (taskId != null && DurableTaskQueue.isRevoked(db, TaskId(taskId))) return@withLock null
+                val current = state.current(db)
+                val identity = current?.identity
+                if (current?.token != selectionToken || identity == null || identity.location != current.location) return@withLock null
+                val key = arrayOf(identity.id.value.toString())
+                val recorded = db.rawQuery("SELECT source_version FROM metadata_imports WHERE library_id = ?", key).use {
+                    if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null
+                }
+                if (version.backend != identity.location.backend || recorded != version.token) return@withLock null
+                val now = System.currentTimeMillis()
+                db.execSQL("UPDATE metadata_imports SET imported_at = ? WHERE library_id = ?", arrayOf<Any>(now, key[0]))
+                db.execSQL("UPDATE library_preferences SET last_imported_at = ? WHERE library_id = ?", arrayOf<Any>(now, key[0]))
+                if (taskId != null) {
+                    db.execSQL("UPDATE queued_tasks SET scope_library_id = ? WHERE task_id = ?", arrayOf(key[0], taskId.toString()))
+                    DurableTaskQueue.completePublication(db, taskId)
+                }
+                db.setTransactionSuccessful()
+                identity
+            } finally { db.endTransaction() }
         } }
 
     suspend fun currentImport(): ImportedLibrary? = withContext(io) {
@@ -202,13 +272,11 @@ class MetadataRepository(
     }
 
     private fun compatibleBinding(db: SQLiteDatabase, location: LibraryLocation, parsed: ParsedLibrary): LibraryIdentity? {
-        val args = state.locationValues(location)
         return db.rawQuery("""
             SELECT b.library_id FROM library_bindings b JOIN library_preferences m ON b.library_id = m.library_id
-            WHERE b.backend = ? AND b.authority = ? AND b.root_id = ? AND b.account_id = ? AND b.drive_id = ?
+            WHERE b.backend = ? AND b.location_key = ?
             ORDER BY m.last_imported_at DESC, m.rowid DESC
-        """.trimIndent(), arrayOf("backend", "authority", "root_id", "account_id", "drive_id")
-            .map { args.getAsString(it) }.toTypedArray()).use { cursor ->
+        """.trimIndent(), state.locationArgs(location)).use { cursor ->
             while (cursor.moveToNext()) {
                 val identity = requireNotNull(state.binding(db, LibraryId(UUID.fromString(cursor.getString(0)))))
                 val old = imported(db, identity)?.metadata

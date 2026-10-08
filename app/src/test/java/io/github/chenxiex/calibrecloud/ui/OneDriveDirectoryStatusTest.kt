@@ -44,7 +44,7 @@ class OneDriveDirectoryStatusTest {
     @Test
     fun snapshotCompletionDoesNotClaimThatDirectoryBrowsingCompleted() {
         assertEquals(R.string.onedrive_task_pending, directoryStatusResource(
-            TaskState.Finished(TaskResult.Completed), OneDriveCandidateTaskHandler.SNAPSHOT, false, false,
+            TaskState.Finished(TaskResult.Completed), io.github.chenxiex.calibrecloud.tasks.api.TaskRequest.CandidateConfiguration.LIBRARY_SYNC, false, false,
         ))
         assertEquals(R.string.onedrive_browse_completed, browseStatus(TaskState.Finished(TaskResult.Completed)))
     }

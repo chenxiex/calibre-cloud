@@ -9,6 +9,7 @@ import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
+import io.github.chenxiex.calibrecloud.tasks.TestAuthorizations
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import kotlinx.coroutines.Dispatchers
@@ -47,7 +48,7 @@ class AuthorizationResumeTest {
             override suspend fun recover(entry: QueueEntry, execution: TaskExecution): RecoveryDecision = error("Not executed")
             override suspend fun execute(entry: QueueEntry, execution: TaskExecution): StageOutcome = error("Not executed")
         }
-        startup = StartupSync(state, TaskCoordinator(queue, listOf(handler)))
+        startup = StartupSync(state, TaskCoordinator(queue, listOf(handler)), authorizations())
     }
 
     @After
@@ -113,6 +114,8 @@ class AuthorizationResumeTest {
         return id
     }
 
-    private suspend fun resume() = AuthorizationResume(queue, state, oneDriveReady = { false }, localReady = { localReady },
-        resubmitSync = startup::resubmit, browse = { error("No OneDrive browse in local fixtures") }).resume()
+    private fun authorizations() = TestAuthorizations.of(state, localGranted = { localReady })
+
+    private suspend fun resume() = AuthorizationResume(queue, state, authorizations(), requestSync = startup::request,
+        continueConfiguration = { error("No OneDrive browse in local fixtures") }).resume()
 }

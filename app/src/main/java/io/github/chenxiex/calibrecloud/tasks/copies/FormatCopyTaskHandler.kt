@@ -33,16 +33,20 @@ import java.util.zip.ZipFile
  * one transaction. Unpublished generations are collected on the next transfer; old open handles
  * retain their generation until close. No ordinary read invokes this handler.
  * The space check deliberately uses usableSpace: without allocateBytes, clearable cache is not free yet.
+ * A transfer observes its source once and asks the source whether it is unchanged before publication.
+ * When the source resyncs missing paths, a path that no longer exists first triggers one metadata sync
+ * through [requestSync] and is retried once with the new import; only then is it reported missing (R11).
  */
 @SuppressLint("UsableSpace")
 class FormatCopyTaskHandler(
     private val state: ApplicationStateRepository,
     private val metadata: MetadataRepository,
     private val queue: DurableTaskQueue,
-    private val source: FormatSource,
+    private val sources: LibrarySources,
     private val filesDir: File,
     private val io: CoroutineDispatcher,
     private val availableBytes: () -> Long = { filesDir.usableSpace },
+    private val requestSync: suspend (TaskOrigin) -> TaskId? = { null },
 ) : TaskHandler {
     override fun supports(request: TaskRequest) = request is TaskRequest.FormatCopy || request is TaskRequest.FormatCheck
     override fun controls(stage: TaskStage) = TaskControls(true, true, false, false)
@@ -78,8 +82,12 @@ class FormatCopyTaskHandler(
             return@withContext if (request is TaskRequest.FormatCheck) StageOutcome.Complete() else fail(StorageErrorKind.SOURCE_MISSING)
         }
         val location = imported.identity.location
+        val source = sources.of(location)
         val path = format.path
-        if (request is TaskRequest.FormatCopy && request.resource.source != SourceFileLocator.Relative(location.backend, path))
+        val stamp = CalibreStamp(book.lastModified, format.sizeBytes)
+        // After its stale-path sync, a copy follows the book to the newly imported path.
+        if (request is TaskRequest.FormatCopy && entry.sourceSync == null &&
+            request.resource.source != SourceFileLocator.Relative(location.backend, path))
             return@withContext fail(StorageErrorKind.VERSION_CONFLICT)
         suspend fun check() {
             execution.checkControl()
@@ -88,24 +96,29 @@ class FormatCopyTaskHandler(
         var retainTransfer = entry.checkpoint?.let { readEvidence(entry.record.id, it) } != null
         try {
             check()
-            val version = source.versionChecked(location, path, ::check)
-            check()
+            if (entry.knownMissing(path)) throw SourceFailure(StorageErrorKind.SOURCE_MISSING)
             if (request is TaskRequest.FormatCheck) {
-                state.confirmSource(key, SourceAvailability.AVAILABLE)
-                if (previous!!.savedVersion != version) queue.submit(TaskSubmission(
-                    TaskRequest.FormatCopy(FormatResource(key.book, key.format, SourceFileLocator.Relative(location.backend, path)), version),
-                    TaskOrigin.DOWNLOADED_FORMAT_UPDATE))
+                val version = source.lookup(location, path, ::check).version
+                check()
+                if (previous!!.savedVersion != version) {
+                    state.confirmSource(key, SourceAvailability.AVAILABLE)
+                    queue.submit(TaskSubmission(
+                        TaskRequest.FormatCopy(FormatResource(key.book, key.format, SourceFileLocator.Relative(location.backend, path)), version),
+                        TaskOrigin.DOWNLOADED_FORMAT_UPDATE))
+                } else state.confirmSource(key, SourceAvailability.AVAILABLE, stamp)
                 return@withContext StageOutcome.Complete()
             }
             request as TaskRequest.FormatCopy
-            if (request.expectedVersion != null && request.expectedVersion != version)
-                throw FormatSourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
             if (entry.stage == TaskStage.FORMAT_TRANSFER) {
+                val found = source.lookup(location, path, ::check)
+                val version = found.version
+                if (request.expectedVersion != null && request.expectedVersion != version)
+                    throw SourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
+                check()
                 state.collectUnreferenced(key.book.libraryId)
-                val size = source.size(location, path)
-                // Display and space pre-check only: local integrity rests on the complete SHA-256.
-                val expected = size ?: try { source.estimatedSize(location, path) } catch (_: FormatSourceFailure) { null }
-                    ?: format.sizeBytes
+                val size = found.size
+                // Display and space pre-check only: without an exact size, integrity rests on the content digest.
+                val expected = found.estimatedSize ?: format.sizeBytes
                 fun progress(done: Long) = TaskProgress(done, expected?.takeIf { it >= done })
                 var checkpoint = entry.checkpoint?.takeIf { it.version == version }
                 var evidence = checkpoint?.let { readEvidence(entry.record.id, it) }
@@ -121,7 +134,7 @@ class FormatCopyTaskHandler(
                 val target = privateFile("book-staging/${entry.record.id.value}/$generation.part")
                 var transferred = evidence?.offset ?: 0L
                 var input = if (transferred > 0 && (size == null || transferred < size))
-                    source.openRange(location, path, transferred, version) else null
+                    found.openRange(transferred) else null
                 if (transferred > 0 && (size == null || transferred < size) && input == null) {
                     execution.markTransferRestart()
                     transferred = 0
@@ -138,7 +151,7 @@ class FormatCopyTaskHandler(
                     }
                     var lastProgress = System.nanoTime()
                     if (size == null || transferred < size || transferred == 0L) {
-                        if (input == null) input = source.open(location, path)
+                        if (input == null) input = found.open()
                         val transferInput = input!!
                         input = null
                         transferInput.use { stream -> FileOutputStream(target, transferred > 0).use { output ->
@@ -151,7 +164,7 @@ class FormatCopyTaskHandler(
                                     if (count == 0) continue
                                     requireSpace(count.toLong())
                                     if (size != null && count > size - transferred)
-                                        throw FormatSourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
+                                        throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
                                     output.write(buffer, 0, count)
                                     digest.update(buffer, 0, count)
                                     transferred += count
@@ -172,13 +185,14 @@ class FormatCopyTaskHandler(
                     }
                     check()
                     if (transferred <= 0 || (size != null && transferred != size))
-                        throw FormatSourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
-                    if (location.backend == BackendKind.LOCAL && version.token != digest.digest().joinToString("") { "%02x".format(it) }) {
-                        throw FormatSourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
+                        throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
+                    val sha256 = found.contentSha256
+                    if (sha256 != null && sha256 != digest.digest().joinToString("") { "%02x".format(it) }) {
+                        throw SourceFailure(StorageErrorKind.VERSION_CONFLICT)
                     }
                     validate(target, key.format, ::check)
-                    if (source.versionChecked(location, path, ::check) != version) {
-                        throw FormatSourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
+                    if (!source.unchanged(location, path, version, ::check)) {
+                        throw SourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
                     }
                     check()
                     saveEvidence(entry.record.id, checkpoint, target, transferred, size, true)
@@ -199,7 +213,9 @@ class FormatCopyTaskHandler(
                 }
             }
             val checkpoint = entry.checkpoint ?: return@withContext fail(StorageErrorKind.CORRUPT_CONTENT)
-            if (checkpoint.version != version) throw FormatSourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
+            val version = checkpoint.version ?: return@withContext fail(StorageErrorKind.CORRUPT_CONTENT)
+            if ((request.expectedVersion != null && request.expectedVersion != version) || !source.unchanged(location, path, version, ::check))
+                throw SourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
             val target = privateFile("book-staging/${entry.record.id.value}/${checkpoint.generation}.part")
             validate(target, key.format, ::check)
             check()
@@ -215,18 +231,24 @@ class FormatCopyTaskHandler(
                 syncDirectory(staging(entry.record.id))
                 check()
                 published = state.publishComplete(DownloadedCopy(key, CompleteCopyLocation(key.book.libraryId, checkpoint.generation),
-                    book.title, complete.length(), version, SourceAvailability.AVAILABLE), entry.record.id.value)
+                    book.title, complete.length(), version, SourceAvailability.AVAILABLE), entry.record.id.value, stamp)
                 if (!published) { execution.checkControl(); return@withContext fail(StorageErrorKind.VERSION_CONFLICT) }
                 StageOutcome.Complete(cachePublished = true)
             } finally {
                 if (!published) complete.delete()
                 discardStaging(entry.record.id)
             }
-        } catch (failure: FormatSourceFailure) {
+        } catch (failure: SourceFailure) {
             if (failure.error.kind in setOf(StorageErrorKind.VERSION_CONFLICT, StorageErrorKind.CORRUPT_CONTENT,
                     StorageErrorKind.SOURCE_MISSING)) retainTransfer = false
-            if (failure.error.kind == StorageErrorKind.SOURCE_MISSING) state.confirmSource(key, SourceAvailability.CONFIRMED_MISSING)
-            val wait = authorizationWait(location.backend, failure.error.kind)
+            if (failure.error.kind == StorageErrorKind.SOURCE_MISSING) {
+                when (val stale = staleSource(entry, source, path, queue, requestSync)) {
+                    is StaleSource.Await -> return@withContext stale.outcome
+                    StaleSource.Confirmed -> state.confirmSource(key, SourceAvailability.CONFIRMED_MISSING)
+                    StaleSource.Unconfirmed -> Unit
+                }
+            }
+            val wait = authorizationWait(source, failure.error.kind)
             when {
                 wait != null -> StageOutcome.Wait(wait)
                 failure.transient || failure.error.kind == StorageErrorKind.NO_NETWORK -> StageOutcome.Retry(TaskError.Source(failure.error), failure.retryDelayMillis)
@@ -301,7 +323,7 @@ class FormatCopyTaskHandler(
 
     private fun requireSpace(bytes: Long) {
         if (bytes < 0 || availableBytes() < RESERVE_BYTES || availableBytes() - RESERVE_BYTES < bytes)
-            throw FormatSourceFailure(StorageError(StorageErrorKind.INSUFFICIENT_SPACE))
+            throw SourceFailure(StorageError(StorageErrorKind.INSUFFICIENT_SPACE))
     }
     private class StaleCopyBinding : RuntimeException()
 
@@ -310,7 +332,7 @@ class FormatCopyTaskHandler(
         var component = root
         relative.split('/').forEach { name ->
             component = component.resolve(name)
-            if (Files.isSymbolicLink(component)) throw FormatSourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
+            if (Files.isSymbolicLink(component)) throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
         }
         return component.toFile()
     }
@@ -334,7 +356,7 @@ class FormatCopyTaskHandler(
     }
 
     private suspend fun validate(file: File, format: BookFormat, control: suspend () -> Unit) {
-        if (!file.isFile || file.length() <= 0) throw FormatSourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
+        if (!file.isFile || file.length() <= 0) throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
         try {
             when (format.value) {
                 "EPUB" -> ZipFile(file).use { zip ->
@@ -371,8 +393,8 @@ class FormatCopyTaskHandler(
                     if (!tail.toString(Charsets.ISO_8859_1).contains("%%EOF")) throw IOException()
                 }
             }
-        } catch (failure: FormatSourceFailure) { throw failure }
-        catch (_: IOException) { throw FormatSourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT)) }
+        } catch (failure: SourceFailure) { throw failure }
+        catch (_: IOException) { throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT)) }
     }
     private fun fail(kind: StorageErrorKind) = StageOutcome.Fail(TaskError.Source(StorageError(kind)))
     companion object {

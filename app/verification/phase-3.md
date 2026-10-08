@@ -178,7 +178,7 @@ adb -s <PA6> shell am instrument -w -e class io.github.chenxiex.calibrecloud.ui.
 
 ### 未完成
 
-- 书籍点击打开、上次打开位置留步骤 04；选择模式下的搜索／筛选限制留步骤 05。
+- 书籍点击打开、上次打开位置留步骤 04；选择模式下的搜索／筛选限制留步骤 06。
 
 ## 步骤 04：受控文件提供、外部打开与上次打开（2026-10-07 至 2026-10-08）
 
@@ -289,5 +289,77 @@ adb shell am instrument -w -e class <BookFileProviderTest,EncryptedAuthStateStor
 ### 共同验收结论
 
 - 2026-10-08 用户确认通过：外部打开（汉王阅读器、KOReader）、Q50 显示名、Q51 下载中图标、感叹号与精简后的通知文案、OneDrive 目录选择页布局。
-- 仍未在真机执行，留步骤 07 联验：无阅读器时报错且不更新上次打开（PA6 上的格式都有处理应用）、拒绝通知权限后只显示感叹号、点击通知进入登录／授权／同步页（需真实失效）、PDF 阅读器、源已不可用的副本与更新失败后旧副本的打开。OneDrive 下载请求偏多导致的等待（见“OneDrive 打开实测”的耗时分解）另行优化。
+- 仍未在真机执行，留步骤 08 联验：无阅读器时报错且不更新上次打开（PA6 上的格式都有处理应用）、拒绝通知权限后只显示感叹号、点击通知进入登录／授权／同步页（需真实失效）、PDF 阅读器、源已不可用的副本与更新失败后旧副本的打开。OneDrive 下载请求偏多导致的等待（见“OneDrive 打开实测”的耗时分解）由新增的步骤 05 按 Q52 处理，原步骤 05–07 顺延为 06–08。
 - 清理：删除 KOReader 目录中本步骤测试导入的 `A Brief Orchard*.epub`、`Quick Start Guide-1.epub`、`山纪事.epub` 及对应 `.sdr`（KOReader 历史中的这些条目会显示为文件缺失），删除 `/sdcard/Download/tmp-step04-probe` 与 `.ko-marker`；`adb uninstall` 测试包与 debug 包均返回 `Success`，限定包名查询确认均已不存在。测试书库副本 `/sdcard/Download/calibre-step04-test-library` 保留。
+
+## 步骤 05：OneDrive 请求开销（2026-10-08）
+
+对应 R08（Q52）、R09（Q55）、R10／R11（Q53、Q54）、R17／R18 的限流等待、R31 与 AC02 的请求数核对。
+
+### Calibre 9.14.0 核对（Q53 前提）
+
+在 `assets/calibre-sample` 的临时副本上用 `calibredb (calibre 9.14)` 对书籍 1 执行两次 `add_format`（替换 EPUB）：第一次后 `books.last_modified` 由 `2026-10-06 08:18:16…` 变为 `2026-10-08 06:53:28…`，`data.uncompressed_size` 随新文件变化；第二次替换为内容不同的 EPUB 后 `last_modified` 再次更新，大小 245918 → 246013。替换格式会更新该书修改时间，Q53 的检查范围成立；副本在临时目录，仓库样本未改动。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+./gradlew :app:connectedDebugAndroidTest
+```
+
+- 常规基线 `BUILD SUCCESSFUL`；JVM 146 项通过；lint 0 错误，5 项均为依赖／Gradle 新版本提示。
+- 全量 `connectedDebugAndroidTest`（PA6，Android 14，`10.77.156.77:38991`）：**245 tests、0 failed、18 skipped**（需显式参数的真实 SAF／OneDrive／扩展库用例），结束后 Gradle 已卸载设备包。首轮 16 项失败均为测试侧：`CalibreFixture` 新增列使按位置插入书籍的用例失败（改为仅在指定修改时间时添加该列）、迁移用例按位置插入清单、版本号断言，以及新用例自身的根 ID 与重试回调；`CoverTaskHandlerTest` 的 v3 迁移用例在步骤 04 起就断言版本 7（当时库已为 8），步骤 04 只跑受影响类而未发现，本步一并改为 9。
+- `OneDriveSourceBackendTest`（JVM，按路径寻址的 Graph fixture，逐项断言请求序列）：本地身份比较零请求、无 subject 时回退 `/me/drive`；按路径取文件 1 个请求、无 `$select`、中文／空格／`#`／`%`／`+` 按 RFC 3986 编码；有下载地址时下载不再请求 Graph、无地址时回退 `/content`，内容请求均不带令牌，非 HTTPS 下载地址不被请求；目录／404 为源缺失，remoteItem／package／deleted／其它 drive 拒绝；封面 1 个请求（`$expand=thumbnails`）并返回图片 cTag，缩略图缺失／不安全／失效回退同一响应的原图，缩略图 403／429／503 语义保持；快照未变化只 1 个请求不读内容，变化时 3 个请求（数据库、`-wal`、`-journal`）加一遍读取并以读前 cTag 发布，非空日志或日志目录冲突、空日志通过，长度不符为损坏；续传用查到的下载地址发 Range；全程无 `children` 请求。目录选择的分页、父级与 drive 边界、不安全 nextLink、循环与任务控制用例保留，且不再请求 `/me/drive`。
+- `FormatCopyTaskHandlerTest`（平台）：OneDrive 后端桥接下载只有 1 个按路径 Graph 请求，下载不带令牌；Q53 重新导入时 Calibre 记录不变不排检查，修改时间或大小变化各排 1 个检查，检查确认未变后补记，旧副本（`calibre_recorded=0`）检查一次后补记；Q54 旧路径 404 时以 `USER_DOWNLOAD` 来源排一次同步，同步改路径后按新路径完成下载；同步后路径未变时不再请求、直接失败，同步期间副本仍为可用，失败后才标源不可用，用户重试可再同步一次；限流截止时间阻止同书库另一 OneDrive 任务（等待限流且唤醒时间为截止时间），重开数据库后仍有效，期间本地书库任务照常完成，截止后两任务执行。
+- `OneDriveCandidateTaskHandlerTest`（平台，真实 Graph JSON 解码）：快照只按路径请求 `metadata.db`、`-wal`、`-journal`，读取 1 次，选定后无 `children`；同一 cTag 的再次同步只请求 `metadata.db`，不读取、不换导入代次、不排检查并发出缓存事件；cTag 变化后完整读取并换代。
+- `TaskSchemaMigrationTest`：v8→v9 迁移保留清单、导入时间与任务，新列为默认值（`calibre_recorded=0`、版本与限流为空）；v1／v2 路径及其它迁移用例版本断言更新为 9。
+
+### 统一源接口与 schema 版本测试整理（2026-10-08）
+
+按用户要求在验收前整理：任务、元数据与队列只经 `storage/api/LibrarySource` 访问已激活书库，规格按后端区分的行为（检查范围、路径失效先同步、网络、重新授权）由各后端声明；限流不再按后端过滤，`source_throttle` 对任何报告 `THROTTLED` 的书库生效。schema 版本改为 `ApplicationStateDatabase.VERSION`，迁移测试统一经 androidTest `StateSchemaHistory` 构造旧 schema，测试中写状态库与 Calibre fixture 的插入均列出列名。产品行为不变。
+
+- `./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`：JVM 146 项通过（流失败分类测试移至 `storage/onedrive`）；lint 0 错误、5 项新版本提示。
+- 全量设备测试（PA6，`192.168.0.72:37541`，以 `adb install -r` 安装后 `am instrument -w -r` 运行，保留 debug 包数据）：**OK，245 tests，18 skipped**（同上，显式参数用例），用时约 19 分钟；输出在 `app/build/verification/phase3-step05-refactor/instrument.txt`。处理器测试的源 fixture 只替换 I/O，策略取自生产 `LocalLibrarySource`／`OneDriveLibrarySource`。
+
+随后按用户确认（Q56）继续解耦：启动／手动同步、授权恢复与书库位置持久化不再按后端分支。所有后端的同步合并为通用 `LIBRARY_SYNC` 请求和 `tasks/sync/LibrarySyncTaskHandler`（旧的按后端操作名解码时映射过来），授权差异由各后端的 `tasks/api/LibraryAuthorization`（`bind`／`check`／`within`／`ready`）实现；`OneDriveCandidateTaskHandler` 只保留选择书库根的目录浏览。状态库 schema v10 把绑定与当前选择的按后端位置列换成存储层 `LocationKeys` 的不透明 `location_key`，去掉后端 CHECK 约束；迁移在延迟外键检查下重写父表，`StateSchemaHistory` 增加 10→9 逆变换。仍按后端绑定的只有登录／目录授权本身与选择书库根。产品行为不变；选择已被替换的 OneDrive 同步改为直接失败（原为等待登录），这类请求不在界面显示，随后的授权恢复本来也会取消它们。
+
+- `./gradlew :app:testDebugUnitTest :app:lintDebug`：JVM 146 项通过；lint 0 错误、5 项新版本提示。
+- 全量设备测试（PA6，`192.168.0.72:37541`，`adb install -r` 覆盖安装后 `am instrument -w -r`，保留 debug 包数据）：**OK，246 tests，18 skipped**（同上，显式参数用例），用时约 23 分钟；新增 `TaskSchemaMigrationTest.versionNineUpgradeStoresLocationsAsOpaqueKeysWithoutTouchingRows`（v9→v10 保留选择、两种后端绑定、清单及 Calibre 记录列，外键检查为 0），v1 升级测试经过完整迁移链。输出在 `app/build/verification/phase3-step05-decouple/instrument.txt`。
+
+### 设备测试耗时（2026-10-08）
+
+全量设备测试约需 20 分钟。逐个测试记录 TestRunner 的开始与结束时间后发现，中位数仅 0.53 秒；约 940 秒耗在 17 次停顿上，每次 40–95 秒，均在每分钟 :33–:35 秒结束。`DurableTaskQueueTest` 单独运行 11.5 秒，在全量中则为 57 秒。`dumpsys batterystats --history` 显示，PA6 在亮屏、非 doze 时 CPU 仍按 `-running` 与 `+running` 周期挂起，每分钟只运行约 7 秒；测试进程不持有 wake lock，因此随之冻结。
+
+处理：新增 androidTest runner `AwakeTestRunner`，在整轮测试期间持有 `PARTIAL_WAKE_LOCK`，`testInstrumentationRunner` 改为该类。生产代码与权限均未改动，`WAKE_LOCK` 原已由 WorkManager 合并进 debug 包。
+
+- 全量设备测试（PA6，`am instrument -w -r … /io.github.chenxiex.calibrecloud.AwakeTestRunner`）：**OK，246 tests**，用时 281 秒（原 1163 秒）。该轮中 `AuthorizationResumeTest.reselectingTheSameLocalLibraryContinuesTheWaitingSync` 用了 32.6 秒，单独重跑为 0.5 秒，属偶发。
+- `TaskViewModelTest` 两项稳定在各约 11.5 秒。采样线程栈后发现，测试线程卡在 `waitForComposeRoots`：该测试创建了 Compose 规则却从未调用 `setContent`，每次 `runOnIdle` 都要等满 2 秒的根超时，每项 5 次即 10 秒。`setUp` 中补上空的 `compose.setContent {}` 后，该类从 23.8 秒降为 4.9 秒。另一个 Compose 测试 `LocalDirectoryAuthorizationDeviceTest` 启动的是有内容的 `MainActivity`，不受影响。
+- 最终全量设备测试（PA6，`192.168.0.72:41899`）：**OK，246 tests**，用时 223 秒；输出在 `app/build/verification/phase3-test-runtime/instrument.txt`。剩余耗时主要在 `LibraryScreenTest`（77 秒，26 项真实 Compose 界面测试）和 `FormatCopyTaskHandlerTest`（54 秒，43 项），与覆盖范围相称。
+
+### 真实 OneDrive 与共同验收
+
+用户在 PA6 的 debug 包登录 OneDrive、选择 `library-a` 并同步后，2026-10-08 执行 `OneDriveReadOnlyAcceptanceTest`（`-e step06ReadOnly true`，runner `AwakeTestRunner`）：`OK (2 tests)`，28.6 s；输出与日志在 `app/build/verification/phase3-onedrive/`，已检查不含令牌或 URL。
+
+请求计数（`Step05Acceptance`，计数器只记方法、端点类别与状态码）：
+
+| 阶段 | 耗时 | Graph 请求 | 全部请求 |
+| --- | --- | --- | --- |
+| `sync_first`（用户刚同步过） | 2622 ms | 1 | 按路径 GET 200 ×1 |
+| `sync_unchanged` | 1718 ms | 1 | 按路径 GET 200 ×1，无内容下载 |
+| `download`（书籍 1 EPUB） | 5698 ms | 1 | 按路径 GET ×1，下载地址 GET ×1；`download_url_returned=true`，未回退 `/content` |
+| `cover` | 3601 ms | 1 | 按路径 GET（`$expand=thumbnails`）×1，缩略图地址 GET ×1 |
+| `open_existing` | 13 ms | 0 | 无 |
+
+全程无 `children` 请求，下载副本 SHA-256 与预置样本一致。真实 OneDrive 满足 Q52／Q55 的目标：未变化同步 1 个请求、下载与封面各 1 个 Graph 请求、已有副本打开零请求。
+
+`realCloudRangeAndInterruptedTransferRecoverExactBytes` 通过：真实下载地址支持偏移 4096 的非零 Range，内容与完整响应一致；注入的 8192 字节处中断后任务等待重试、保留旧副本，恢复只请求一次偏移 8192 的 Range，发布副本与云端字节一致，暂存目录被清理，源版本前后不变。
+
+OneDrive 上原 `library-a` 与仓库样本不同（缺少书籍 4、5），用户删除后上传 agent 由 `assets/calibre-sample` 复制的新 `library-a`（书籍 1、4、5，均为 EPUB 带封面，含 `#read_status`；`calibredb check_library` 无问题，书籍 1 字节不变；准备文件在 `app/build/verification/phase3-onedrive/upload/`），重新登录、选择并同步后再次执行上述测试：`OK (2 tests)`，请求计数与前一轮相同（同步 1、下载 1＋下载地址 1、封面 1＋缩略图 1、打开 0），`download_url_returned=true`；日志在同目录 `*-new-library.txt`。
+
+Q53／Q54 真实服务验证（2026-10-08）：用户先在应用下载《哈姆莱特》（书籍 4，254235 字节），未下载《李尔王》（书籍 5）；随后在 Calibre 中将《李尔王》改名为“李尔王改名”（目录随之改名），用 `q53-replacement/哈姆莱特-替换版.epub` 替换《哈姆莱特》的 EPUB，等 OneDrive 上传完成，期间应用不同步。之后用户未同步、直接下载《李尔王》。队列记录与 `QueueWorker` 日志（`app/build/verification/phase3-onedrive/logcat-q53-q54.txt`，已去除 URL）：
+
+- Q54：下载任务按旧路径请求得到 `http_status_404`，转为等待，并以 `user_download` 来源排入 1 个书库同步；同步完成（约 8 s）后同一下载任务按新路径重试，245918 字节发布完成，副本 SHA-256 与源文件一致，标题更新为“李尔王改名”，`source_availability=available`。
+- Q53：同一次同步重新导入后，《哈姆莱特》的修改时间与格式大小变化，排入 1 个 `downloaded_format_update` 格式检查；检查发现版本变化后排入同来源下载，254293 字节发布完成，副本记录的 Calibre 修改时间与大小更新为新值。副本解压内容与替换文件完全一致（含替换标记）；ZIP 容器字节不同，系 Calibre 添加格式时重新打包。《Quick Start Guide》记录未变，没有被检查。
+- 结束后队列全部完成，暂存目录为空。
+
+外部阅读器打开：用户从应用打开下载副本，确认阅读器启动迅速。系统日志记录点击后选择器 407 ms 显示，选择 KOReader 后其主界面 998 ms 显示；本次已下载副本的打开不发网络请求（见上方 `open_existing`）。替换版与原版只差内嵌简介，阅读正文无可见差异；新版本由上文副本内容比对确认，不依赖人工判断。

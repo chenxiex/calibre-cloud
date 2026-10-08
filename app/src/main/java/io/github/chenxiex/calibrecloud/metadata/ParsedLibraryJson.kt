@@ -20,6 +20,7 @@ fun ParsedLibrary.toJson(): String = JSONObject().apply {
         put("rating", b.rating ?: JSONObject.NULL); put("series", b.series ?: JSONObject.NULL)
         put("seriesIndex", b.seriesIndex ?: JSONObject.NULL); put("tags", JSONArray(b.tags))
         put("comments", b.commentsText); put("path", b.path.value); put("cover", b.hasCover)
+        put("modified", b.lastModified ?: JSONObject.NULL)
         put("formats", JSONArray(b.formats.map { f -> JSONObject().apply {
             put("format", f.format.value); put("size", f.sizeBytes ?: JSONObject.NULL); put("path", f.path.value)
         } }))
@@ -53,7 +54,7 @@ fun parsedLibraryFromJson(raw: String): ParsedLibrary {
                     "text" -> ImportedColumnValue.Text(v.getJSONArray("value").strings())
                     else -> throw IllegalArgumentException("Unsupported derived value")
                 }
-            })
+            }, if (b.has("modified")) b.nullString("modified") else null)
     }
     return ParsedLibrary(root.nullString("libraryUuid")?.let(UUID::fromString), books, columns)
 }

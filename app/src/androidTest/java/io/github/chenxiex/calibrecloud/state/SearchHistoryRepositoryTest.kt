@@ -86,12 +86,10 @@ class SearchHistoryRepositoryTest {
     fun versionSixMigrationAddsAnEmptyHistoryAndKeepsSettings() = runBlocking<Unit> {
         val library = bound("migrated")
         state.setStartupEnabled(true)
-        database.writableDatabase.execSQL("DROP TABLE search_history")
-        database.writableDatabase.execSQL("DROP TABLE last_opened")
-        database.writableDatabase.version = 6
+        StateSchemaHistory.downgrade(database.writableDatabase, 6)
         database.close()
         reopen()
-        assertEquals(8, database.readableDatabase.version)
+        assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
         assertEquals(library, state.current()?.identity?.id)
         assertTrue(state.startupEnabled())
         assertEquals(emptyList<String>(), history.list(library))

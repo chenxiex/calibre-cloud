@@ -12,7 +12,6 @@ import io.github.chenxiex.calibrecloud.storage.local.LocalDirectoryAuthorization
 import io.github.chenxiex.calibrecloud.storage.local.PreferencesLocalDirectoryConfiguration
 import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskCoordinator
-import io.github.chenxiex.calibrecloud.tasks.local.LocalSnapshotTaskHandler
 import io.github.chenxiex.calibrecloud.storage.local.AndroidLocalDocumentAccess
 import io.github.chenxiex.calibrecloud.storage.local.AndroidSnapshotValidator
 import io.github.chenxiex.calibrecloud.storage.local.LocalSourceBackend
@@ -57,12 +56,41 @@ class ApplicationDependencies(context: Context) {
     val oneDriveBrowseStore by lazy {
         io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveBrowseStore(File(applicationContext.filesDir, "onedrive-browser"))
     }
-    val oneDriveTasks by lazy {
+    val oneDriveTasks: io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateService by lazy {
         io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateService(
             state, oneDriveAuthorization, taskQueue, taskCoordinator, oneDriveBrowseStore)
     }
-    val formatSource by lazy {
-        io.github.chenxiex.calibrecloud.tasks.copies.BackendFormatSource(state, localBackend, oneDriveBackend)
+    /** The only place that maps a backend kind to its implementation of the common source contract. */
+    val librarySources: io.github.chenxiex.calibrecloud.storage.api.LibrarySources by lazy {
+        val local = io.github.chenxiex.calibrecloud.storage.local.LocalLibrarySource(localBackend) { location ->
+            if (state.current()?.location == location) state.localTreeUri() else null
+        }
+        val oneDrive = io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveLibrarySource(oneDriveBackend)
+        io.github.chenxiex.calibrecloud.storage.api.LibrarySources { backend ->
+            when (backend) {
+                io.github.chenxiex.calibrecloud.model.BackendKind.LOCAL -> local
+                io.github.chenxiex.calibrecloud.model.BackendKind.ONEDRIVE -> oneDrive
+            }
+        }
+    }
+    /** The only place that maps a backend kind to its authorization as library syncs see it. */
+    val libraryAuthorizations: io.github.chenxiex.calibrecloud.tasks.api.LibraryAuthorizations by lazy {
+        val local = io.github.chenxiex.calibrecloud.tasks.local.LocalLibraryAuthorization {
+            localAuthorization.restore().status in setOf(io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus.AUTHORIZED,
+                io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus.READ_ONLY)
+        }
+        val oneDrive = io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveLibraryAuthorization(state,
+            { oneDriveAuthorization.sessionId() }, { oneDriveAuthorization.issue })
+        io.github.chenxiex.calibrecloud.tasks.api.LibraryAuthorizations { backend ->
+            when (backend) {
+                io.github.chenxiex.calibrecloud.model.BackendKind.LOCAL -> local
+                io.github.chenxiex.calibrecloud.model.BackendKind.ONEDRIVE -> oneDrive
+            }
+        }
+    }
+    /** Syncs the current library whatever its backend; also the stale-path sync of R11. */
+    val librarySync: io.github.chenxiex.calibrecloud.tasks.background.StartupSync by lazy {
+        io.github.chenxiex.calibrecloud.tasks.background.StartupSync(state, taskCoordinator, libraryAuthorizations)
     }
     val libraryQuery by lazy {
         io.github.chenxiex.calibrecloud.library.LibraryQueryService(
@@ -73,17 +101,19 @@ class ApplicationDependencies(context: Context) {
     val copyService by lazy { io.github.chenxiex.calibrecloud.tasks.copies.CopyService(state, metadata, taskCoordinator, taskQueue) }
     val covers by lazy { io.github.chenxiex.calibrecloud.storage.covers.CoverRepository(database, state,
         applicationContext.filesDir, Dispatchers.IO) }
-    val coverSource by lazy { io.github.chenxiex.calibrecloud.tasks.covers.BackendCoverSource(state, localBackend, oneDriveBackend) }
     val coverService by lazy { io.github.chenxiex.calibrecloud.tasks.covers.CoverService(state, metadata, taskCoordinator) }
     val backgroundTasks by lazy { io.github.chenxiex.calibrecloud.tasks.background.BackgroundTasks(applicationContext, this) }
-    private val queueConditions by lazy { io.github.chenxiex.calibrecloud.tasks.background.QueueConditions(applicationContext, database) }
-    val taskCoordinator by lazy {
-        TaskCoordinator(taskQueue, listOf(LocalSnapshotTaskHandler(state, localBackend, metadata, Dispatchers.IO),
-            io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler(
-                state, oneDriveAuthorization, oneDriveBackend, oneDriveBrowseStore, metadata),
-            io.github.chenxiex.calibrecloud.tasks.copies.FormatCopyTaskHandler(state, metadata, taskQueue, formatSource,
-                applicationContext.filesDir, Dispatchers.IO),
-            io.github.chenxiex.calibrecloud.tasks.covers.CoverTaskHandler(state, metadata, covers, coverSource, formatSource, Dispatchers.IO)), conditions = queueConditions::waiting)
+    private val queueConditions by lazy { io.github.chenxiex.calibrecloud.tasks.background.QueueConditions(applicationContext, database, librarySources) }
+    val taskCoordinator: TaskCoordinator by lazy {
+        TaskCoordinator(taskQueue, listOf(
+            io.github.chenxiex.calibrecloud.tasks.sync.LibrarySyncTaskHandler(state, librarySources, libraryAuthorizations, metadata, Dispatchers.IO),
+            io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler(state,
+                libraryAuthorizations.of(io.github.chenxiex.calibrecloud.model.BackendKind.ONEDRIVE), oneDriveBackend,
+                librarySources.of(io.github.chenxiex.calibrecloud.model.BackendKind.ONEDRIVE), oneDriveBrowseStore),
+            io.github.chenxiex.calibrecloud.tasks.copies.FormatCopyTaskHandler(state, metadata, taskQueue, librarySources,
+                applicationContext.filesDir, Dispatchers.IO, requestSync = { origin -> librarySync.request(origin) }),
+            io.github.chenxiex.calibrecloud.tasks.covers.CoverTaskHandler(state, metadata, covers, librarySources, Dispatchers.IO,
+                taskQueue) { origin -> librarySync.request(origin) }), conditions = queueConditions::waiting)
     }
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO, state.copyAccess) }
     val bookCatalog by lazy { io.github.chenxiex.calibrecloud.files.StateBookCatalog(state, applicationContext.filesDir) }

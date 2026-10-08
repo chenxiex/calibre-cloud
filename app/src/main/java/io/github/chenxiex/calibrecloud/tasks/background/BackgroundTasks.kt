@@ -8,8 +8,8 @@ import androidx.core.content.edit
 import io.github.chenxiex.calibrecloud.ApplicationDependencies
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
+import io.github.chenxiex.calibrecloud.storage.api.LibrarySources
 import io.github.chenxiex.calibrecloud.tasks.api.*
-import io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,9 +26,7 @@ class BackgroundTasks(private val context: Context, private val dependencies: Ap
     internal fun recordPlatformWaiting(waiting: Boolean) {
         platformState.edit { putBoolean("waiting", waiting) }
     }
-    private val startup by lazy { StartupSync(dependencies.state, dependencies.taskCoordinator) {
-        dependencies.oneDriveAuthorization.sessionId()
-    } }
+    private val startup get() = dependencies.librarySync
     suspend fun startupEnabled() = startup.startupEnabled()
     suspend fun setStartupEnabled(enabled: Boolean) = startup.setStartupEnabled(enabled)
     suspend fun onMainOpened() {
@@ -38,10 +36,8 @@ class BackgroundTasks(private val context: Context, private val dependencies: Ap
     suspend fun manualSync() = startup.manualSync()
 
     private val authorizationResume by lazy { AuthorizationResume(dependencies.taskQueue, dependencies.state,
-        oneDriveReady = { dependencies.oneDriveAuthorization.sessionId() != null },
-        localReady = { dependencies.localAuthorization.restore().status in setOf(
-            DirectoryAuthorizationStatus.AUTHORIZED, DirectoryAuthorizationStatus.READ_ONLY) },
-        resubmitSync = startup::resubmit, browse = { dependencies.oneDriveTasks.browse(it) }) }
+        dependencies.libraryAuthorizations, requestSync = startup::request,
+        continueConfiguration = { dependencies.oneDriveTasks.browse(it.directoryItemId) }) }
 
     /** Called after a successful login, directory re-authorization and each main-screen opening. */
     suspend fun resumeAuthorizationWaits() {
@@ -99,6 +95,7 @@ class BackgroundTasks(private val context: Context, private val dependencies: Ap
 class QueueConditions(
     private val context: Context,
     private val database: ApplicationStateDatabase,
+    private val sources: LibrarySources,
     private val networkAvailable: () -> Boolean = { connected(context) },
 ) {
     fun waiting(record: TaskRecord): Set<WaitingReason> {
@@ -106,10 +103,11 @@ class QueueConditions(
         val backend = if (request is TaskRequest.CandidateConfiguration) request.context.backend else {
             database.readableDatabase.rawQuery("SELECT backend FROM library_bindings WHERE library_id = ?",
                 arrayOf(request.libraryId?.value.toString())).use {
-                if (it.moveToFirst() && it.getString(0) == "onedrive") BackendKind.ONEDRIVE else BackendKind.LOCAL
+                if (!it.moveToFirst()) return emptySet()
+                BackendKind.entries.first { kind -> kind.name.lowercase() == it.getString(0) }
             }
         }
-        return if (backend == BackendKind.ONEDRIVE && !networkAvailable()) setOf(WaitingReason.NETWORK) else emptySet()
+        return if (sources.of(backend).requiresNetwork && !networkAvailable()) setOf(WaitingReason.NETWORK) else emptySet()
     }
     companion object {
         fun connected(context: Context): Boolean {

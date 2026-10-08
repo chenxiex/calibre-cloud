@@ -62,7 +62,7 @@ class OneDriveBrowseStore(private val directory: File) {
     }
 }
 
-/** Submission/restoration only; all Graph access is owned by the registered handler. */
+/** Root selection submission/restoration only; all Graph access is owned by the registered handler. */
 class OneDriveCandidateService(
     private val state: ApplicationStateRepository,
     private val authorization: OneDriveAuthorization,
@@ -88,15 +88,6 @@ class OneDriveCandidateService(
         val location = result.location.copy(rootItemId = itemId)
         // Choosing a root is the explicit selection boundary; directory navigation never resolves it.
         return state.chooseCandidate(CandidateContext(selected.token, BackendKind.ONEDRIVE, session), location) != null
-    }
-
-    suspend fun acquire(): TaskId? {
-        val session = authorization.sessionId() ?: return null
-        val selected = state.current() ?: return null
-        if (selected.backend != BackendKind.ONEDRIVE || selected.location == null) return null
-        val context = if (selected.authorizationId == session) CandidateContext(selected.token, BackendKind.ONEDRIVE, session)
-            else state.reauthorizeCandidate(selected.token, session) ?: return null
-        return submit(TaskRequest.CandidateConfiguration(context, OneDriveCandidateTaskHandler.SNAPSHOT))
     }
 
     suspend fun currentLocation() = state.current()?.location as? LibraryLocation.OneDrive
