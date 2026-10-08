@@ -179,3 +179,115 @@ adb -s <PA6> shell am instrument -w -e class io.github.chenxiex.calibrecloud.ui.
 ### 未完成
 
 - 书籍点击打开、上次打开位置留步骤 04；选择模式下的搜索／筛选限制留步骤 05。
+
+## 步骤 04：受控文件提供、外部打开与上次打开（2026-10-07 至 2026-10-08）
+
+对应 R28、R29、R27 的下载标记、R20 的底栏上次打开与 R31 的打开错误。实现：`files/BookFileProvider`（初版继承 AndroidX FileProvider；按 Q48 改为自定义 ContentProvider，见下文“Q48 后的 provider 改造”；按清单记录提供已发布代次，显示名／大小／MIME 取自记录，只读）、`files/BookFileNames`（显示名规范化与 MIME 映射）、`state/LastOpenedRepository`（schema v8 `last_opened`）、`ui/OpenViewModel`（打开意图状态机）与 `OpenStrip`（状态条、底栏上次打开），图书馆和搜索结果中短按书籍打开，临时“已下载文件”页增加“打开”。约束见[文件提供约束](../src/main/java/io/github/chenxiex/calibrecloud/files/AGENTS.md)、[界面约束](../src/main/java/io/github/chenxiex/calibrecloud/ui/AGENTS.md)与[应用状态约束](../src/main/java/io/github/chenxiex/calibrecloud/state/AGENTS.md)。按 Q47 不提供单本“选择格式”，先前实现的面板已移除；按 Q49 改为在书籍上显示可取消的下载进度标记，见下文“Q47／Q49 修订”。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=<受影响的 9 个类>
+```
+
+- 基线 `BUILD SUCCESSFUL`：JVM **139 tests、0 failures**。新增 `BookFileNamesTest`（5：正常标题保留、控制字符／双向覆盖字符／路径分隔符规范化、空标题兜底、255 字节截断不拆字符、MIME 映射与系统回退）、`OpenViewModelTest`（7：有副本立即打开且只有 `STARTED` 写入上次打开；缺副本时提交下载并显示排队／等待／进度后自动打开；退后台、离开页面、切换书库后下载完成不打开；新点击替代旧意图；无阅读器报错、不写记录、重试不重新下载；下载失败／提交被拒区分原因与设置／同步入口；上次打开按当前书库读取），`LibraryIndexTest` 新增 1 项（格式列表按优先级列全部格式、不受筛选限制、含已离开导入的副本及源不可用标记）。debug 与 release lint 均 0 error、5 条既有版本 warning；`git diff --check` 通过。
+- 合并后的 release Manifest：书籍 provider 为 `io.github.chenxiex.calibrecloud.files.BookFileProvider`，`exported=false`、`grantUriPermissions=true`，路径配置仍只有 `books/`；权限条目与之前相同，没有新增权限或导出组件。
+- 定向连接测试（PA6，Android 14）：`BookFileProviderTest` 10、`LastOpenedRepositoryTest` 2、`SearchHistoryRepositoryTest` 3、`StartupSyncTest` 5、`CacheMaintenanceTest` 15、`TaskSchemaMigrationTest` 2、`ApplicationStateRepositoryTest` 11、`EncryptedAuthStateStoreTest` 5 项首轮全部通过；`LibraryScreenTest` 25 项中 1 项因断言写在带标签的父节点上（文字在子节点）失败，改为断言子孙节点后单独重跑 25 项全部通过。结束后 Gradle 已卸载 debug 与测试包。
+    - `BookFileProviderTest`：真实清单与私有文件下查询返回“三体：地球往事.epub”与大小、MIME、字节；空标题为“未命名书籍-42.pdf”，未知大小取文件大小；同名两书 URI 不同、各读各的字节；`w`／`wt`／`wa`／`rw`／`rwt` 及删除／更新均被拒，文件仍在；同一格式更新后旧代次不再提供、查询无行、`getType` 为空，而更新前已打开的描述符读完旧字节；长度不符与未发布的崩溃遗留文件不提供；打开意图只带临时读授权；私有目录无法生成 URI；经已安装 provider 的路径穿越、指向私有文件的符号链接和非规范大小写 URI 均不提供；provider 非导出、使用 `.debug` authority。
+    - `LastOpenedRepositoryTest`：每库只保留最新一条、跨重开持久、相同数字书籍 ID 在不同书库互不影响；v7→v8 迁移得到空记录并保留搜索历史。
+    - `LibraryScreenTest` 新增 5 项：短按书籍以默认格式和标题发起打开、无格式的书报告原因；格式面板列出 EPUB“未下载”、PDF“已下载”，选择后发起 PDF 打开并关闭，系统返回关闭面板；阅读器启动成功后底栏出现“上次打开：书籍1”，在“更多”页点击再次打开；排队状态显示“已排队，等待下载”，切换到“更多”后状态条消失、下载完成也不打开；无阅读器时显示“没有可以打开 EPUB 格式的应用”、不出现上次打开，重试再次调用、关闭图标移除状态条。原底栏切换用例改为新签名后通过。
+
+### 设备上的阅读器
+
+`cmd package query-activities -a android.intent.action.VIEW -t <MIME> -d content://…` 在 PA6 上的结果：EPUB 为 `hanvon.aebr.hvxreader`，PDF 为 `hanvon.aebr.hvreader`，MOBI 为 `hanvon.aebr.hvepubreader` 与 `hanvon.aebr.hvxreader`，TXT 另有系统 HTML 查看器；`application/octet-stream` 没有处理应用，可用于核对“无阅读器”路径（库内未知格式）。
+
+### 未完成
+
+初稿时真实阅读器路径均未执行；后续各节已完成本地与 OneDrive 打开、阅读器无源目录权限读取、下载中退后台不跳转和同名书不冲突（汉王阅读器与 KOReader），结论见文末“共同验收结论”。
+
+### 阅读器 URI 实测（Q48，2026-10-08）
+
+用户反馈在 PA6 上打开“李尔王”时汉王阅读器提示“书籍解析失败”。核对：源 EPUB、应用私有副本与阅读器导入副本的 SHA-256 相同（`7e6cbd72…`），`unzip -t` 无错误，首条目 `mimetype` 为 `application/epub+zip`；系统以 `typ=application/epub+zip` 启动 `hanvon.aebr.hvxreader`，阅读器把 URI 路径拼成 `importBook/_books_<书库>_<代次>.book` 后解析失败，书架标题即该文件名。
+
+随后用临时 instrumentation 探针（未提交，代码已撤回）在 debug 应用进程内以临时读授权启动阅读器，结果写入 [Q48](../../questions.md#q48--交给阅读器的-uri-路径采用什么形式)：`…/x/<代次前 8 位>/李尔王.epub` 导入为 `_x_f5aa7c56_李尔王.epub` 并正常显示；`…/李尔王.epub?g=…` 导入为 `_李尔王.epub` 并正常显示，查询参数不进入文件名；两本不同内容的同名书以后者形式先后打开时写入同一文件，后者覆盖前者（导入文件哈希由 `b0e0d9b5…` 变为 `829ef00d…`）。注意：`am instrument` 结束时强停应用会撤销其授予的 URI 权限，首次探针因此出现 `Permission Denial`，改为启动后保持 45 秒再结束。截图保存在被忽略的 `app/build/verification/q48-probe/`。阅读器书架和 `importBook/` 中留下了这些测试条目，属于阅读器数据，未删除。
+
+### Q48 后的 provider 改造（2026-10-08）
+
+按 Q48 的确认结论，规格 R01、R28、R35 已改为自定义 ContentProvider，URI 为 `content://<authority>/<书名-书籍ID.后缀>?copy=<书库>:<代次>`；移除 `res/xml/book_paths.xml` 与 FileProvider 声明，`EncryptedAuthStateStoreTest`、`ApplicationStateRepositoryTest` 中依赖 `FileProvider.getUriForFile` 的断言改为“伪造 URI 无法读取”。
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+adb install -r app-debug.apk && adb install -r app-debug-androidTest.apk
+adb shell am instrument -w -e class <BookFileProviderTest,EncryptedAuthStateStoreTest,ApplicationStateRepositoryTest> …
+```
+
+- 基线 `BUILD SUCCESSFUL`：JVM **140 tests、0 failures**（`BookFileNamesTest` 新增 URI 名称：书名在前、`-书籍ID` 不被截断、空标题、规范化）；debug 与 release lint 均 0 error、5 条既有版本 warning。
+- 为保留用户在设备上已授权的测试书库，本轮用 `install -r` 加 `am instrument`，未用会卸载应用的 Gradle 连接任务。PA6 上 **26 tests 全部通过**：`BookFileProviderTest` 10（URI 路径与 `copy` 参数、显示名／大小／MIME、空标题、同名书路径不同、只按 `copy` 定位且拒绝多余路径段／参数／大写 UUID／缺失或多余字段、拒绝写入、回收代次不提供且更新后路径不变、长度不符／未发布／被替换为链接的文件不提供、只读意图、已安装 provider 拒绝伪造路径与未知代次、非导出与 debug authority）、`EncryptedAuthStateStoreTest` 5、`ApplicationStateRepositoryTest` 11。
+
+### 汉王阅读器的导入副本（2026-10-08，用户在 PA6 上操作，agent 以 ADB 核对）
+
+- `hanvon.aebr.hvxreader`（`/system/priv-app/hvXReader`，1.06.65，无桌面图标，设置“所有应用”默认不列出）每次经 content URI 打开都会把文件复制到 `Android/data/hanvon.aebr.hvxreader/files/importBook/`，同名文件被覆盖；书架条目指向该副本。
+- 阅读器设置中的“清除临时文件”不清理 `importBook`。书架删除单本并勾选“同时移除源文件”会删除条目记录的路径：对经本应用打开的书即导入副本（`_李尔王-5.epub` 被删除，应用私有副本与测试书库 620 个文件不变）；对从文件管理器打开的书则是原文件——用户移除一本早先打开的小说时，系统记录 hvLauncher 删除了外部存储上的 1 个文件，`Documents/calibre/…` 中该书 (1) 卷随之不见（推断，无删除前清单）。
+- 因此本应用的“移除下载”与缓存清理只释放应用自己的副本，阅读器的导入副本须在阅读器书架中删除。
+- 打开方式对照（同一测试 EPUB 放在 `Download/tmp-step04-probe/`，以阅读器日志与 `importBook` 前后对比判断）：
+    - MediaStore content URI（ADB 发出）：`copyUriFile` 复制为无扩展名的 `importBook/_external_file_<id>` 后崩溃退出；说明阅读器对任何 content URI 都复制，不会还原为路径。
+    - `file://` 路径（ADB 发出）：不复制，但启动时因缺少附加参数空指针退出。
+    - 汉王文件管理器（系统 uid 1000，Intent 无 data URI，仅含私有 extras）：直接解析原路径，`importBook` 无新增文件。
+- 结论：只有汉王自家的私有启动参数能让阅读器就地读取。改为导出到共享目录再打开不能避免复制（content URI 仍复制），模仿私有参数则依赖未公开接口并须放弃受控 URI，均不采用；保持 R28 的受控 URI，接受阅读器保留导入副本。
+- `importBook` 无应用内删除入口，ADB 的 shell 用户可删除其中文件（属 `ext_data_rw` 组）。用户在书架移除相关条目后，agent 以 ADB 清空了该目录（含测试副本与两卷小说的导入副本；原书仍在 `Documents/calibre/`）。
+
+### Q47／Q49 修订（2026-10-08）
+
+- Q47：删除单本格式列表（`LibraryIndex.formats`、`LibraryQueryService.formats`、`FormatOption`／`BookFormats`）、`LibraryViewModel.formatChoice` 与格式面板及其字符串和测试（`LibraryIndexTest` 1 项、`LibraryScreenTest` 1 项）。
+- Q49：`OpenViewModel.download` 给出等待中下载的书与完成比例（排队或总量未知为空），比例变化最多每 2 秒发布一次、被推迟的最新值在间隔结束时补发；`cancelDownload` 经队列 `CANCEL` 取消任务并撤销意图，任务编号尚未返回时在返回后取消。图书馆网格和列表在下载勾选位置绘制黑底白叉圆形图标与静态进度环（`download_progress_<书籍 ID>`），已下载勾选改为黑底白勾圆形图标（`download_mark`）。状态条只在等待条件、暂停和失败时出现，删除排队／进度文字。
+- 自动检查：`./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest` 通过；JVM 测试全部通过，`OpenViewModelTest` 9 项（新增进度节流与延迟补发、等待时保留比例、取消任务与提交未返回时取消）。lint 只有既有依赖版本提示。
+- 真机（PA6，`10.77.156.77:41881`，以 `install -r` 与 `am instrument` 保留测试书库数据）：`LibraryScreenTest` 25 项通过，其中新增：点击未下载书出现带“取消下载《书籍1》”描述的进度标记、排队时无状态条、等待网络时状态条显示原因、离开页面撤销；点击标记后标记消失、任务收到取消、无状态条；已下载书的圆形勾存在。首轮 1 项因勾选标记合并进可点击的书籍节点而按合并树查不到，改为查未合并树后通过。
+- 真机 ADB 目视：图书馆页已下载书显示黑底白勾圆形图标；点击未下载的 No.283 后立即截图，该书右下角显示黑底白叉与空进度环，位置与勾选一致。本地复制在约 1 秒内、点击取消前已完成，因此该书变为已下载、没有打开阅读器；运行中取消真实传输尚未在真机上目视（需较大或 OneDrive 书籍）。
+
+### 感叹号警告与系统通知（Q49 补充，2026-10-08）
+
+- 删除底栏上方的状态条（`OpenStatusStrip`、重试／设置／同步／关闭按钮及排队文字）。`OpenViewModel.mark` 统一描述书上的图标：下载中为白叉加进度环、可取消；需要用户处理的等待（等待条件、暂停）为感叹号、保留进度环和取消；失败为不带进度环的感叹号，点击书籍即重新打开。每个新的需处理状况产生一个 `OpenNotice`（同一等待原因重复上报不再通知，重新点击后同样的失败会再次通知），`MainActivity` 经 `OpenNotifications` 发送单条可替换通知（渠道 `open-problems`，ID 10），首次缺少通知权限时先请求；阅读器启动或用户取消时撤回。通知按 `openMoreTarget` 带上登录、目录授权或同步页。打开流程的下载失败改用自身文案，不再沿用临时下载页“已有完整副本保留”等说法。
+- 自动检查：`./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest` 通过；`OpenViewModelTest` 10 项（新增：等待与失败各通知一次、相同等待不重复、新原因再通知、取消与启动成功撤回、重新点击后同样失败再次通知；警告图标状态）。lint 只有既有依赖版本提示。
+- 真机 `LibraryScreenTest` 25 项通过：等待网络时进度标记改为“需要处理”描述并产生一条通知，文字为“等待网络连接后继续下载”；无阅读器时书上出现 `open_warning_1`，通知标题“无法打开《书籍1》”、正文含“没有可以打开 EPUB 格式的应用”，点击书籍再次尝试，切换页面后警告消失。
+- 真机 ADB 实测（测试书库副本）：临时把书籍 282《秋笔记》的 EPUB 改名后点击该书，本地复制任务因源缺失失败，书上出现感叹号，系统弹出通知权限请求；允许后 `dumpsys notification` 显示渠道 `open-problems`、ID 10 的通知，下拉通知栏可见。首轮正文为沿用的“源格式不可用；已有完整副本保留。”，与无副本的实际情况不符，改为打开流程专用文案后复测为“书库中找不到这本书的这个格式文件，无法下载”。随后恢复文件名，测试书库中没有遗留的改名文件。debug 包的通知权限因此处于已允许状态。
+- 过程中一次误触（封面上的“No.282”属于书籍 287）打开了《Tales of Garden》，汉王 `importBook` 因此新增 `_Tales of Garden-287.epub`。
+- 通知正文精简（用户要求）：标题仍为“无法打开《书名》”或“《书名》的下载需要处理”，正文只写原因，如“找不到源文件”“等待网络”“没有能打开 EPUB 的应用”“需要重新登录 OneDrive”，不再附“点击书籍重试”“已下载的副本保留”等说明。`./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest` 通过，真机 `LibraryScreenTest` 25 项通过（断言改为新文案）。
+- 未在真机实测：点击通知进入登录／授权／同步页（需真实的登录或授权失效），以及拒绝通知权限后只显示感叹号。
+
+### KOReader 打开实测（2026-10-08）
+
+- 环境：PA6，KOReader `org.koreader.launcher.fdroid` v2026.07.1，与汉王 hvXReader 同时安装，因此打开 EPUB 时出现系统选择器（ResolverActivity），每次选“仅此一次”交给 KOReader，未设为默认。测试书库副本。
+- 打开已下载的书籍 288《山纪事》：KOReader 日志 `UriHandler: Found content, trying to guess its path` 后 `[Non readable file]: imported to /storage/emulated/0/Android/data/org.koreader.launcher.fdroid/files/山纪事.epub`，随后打开该导入文件，阅读界面正常显示内容。也就是说 KOReader 同样复制受控 URI 的内容，文件名取自 provider 的显示名，而非 URI 路径（`山纪事-288.epub`）；`koreader/history.lua` 记录的是导入路径。
+- 再次打开同一本书：覆盖同一个 `山纪事.epub`（修改时间更新），不产生新文件，并保留旁边的 `山纪事.sdr`（进度与标注）。副本位于 KOReader 自己的外部应用目录，卸载 KOReader 时随之删除，ADB 也可删除。
+- 同名书冲突：测试书库中书籍 17 与 161 均为《A Brief Orchard》、均为 EPUB 且已下载。先打开 17，导入文件 MD5 与 17 的源文件一致；再打开 161，同名文件被覆盖为 161 的内容（MD5 与 161 的源文件一致），两本书共用一个 `A Brief Orchard.sdr`。在 KOReader 中，同一书库内的同名书会互相覆盖并混用进度，与 AC08“同名书不冲突”不符，已作为 Q50 提交确认，AC08 暂不通过。
+- 实测留下的 KOReader 导入文件：`山纪事.epub`、`A Brief Orchard.epub` 及对应 `.sdr`，均为测试书库内容。
+- Q50 选 A 后的改动：`BookFileNames.readerName` 同时生成 URI 路径与显示名“书名-书籍ID.后缀名”，原 `displayName`／`uriName` 合并。JVM `BookFileNamesTest` 随 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest` 通过；PA6 上 `BookFileProviderTest` **OK (10 tests)**，含同名书 1／2 的查询显示名分别为 `同名-1.epub`、`同名-2.epub`。- Q50 真机复验（本地测试书库，KOReader 每次“仅此一次”）：打开书籍 17 后导入为 `A Brief Orchard-17.epub`，再打开 161 导入为 `A Brief Orchard-161.epub`；两份 MD5 分别为 `3c526edb…`、`6f55451c…`，与各自源文件一致，17 有独立的 `A Brief Orchard-17.sdr`。同名书不再互相覆盖，AC08 的同名书一项通过。之前实测留下的 `A Brief Orchard.epub`／`.sdr` 仍在，与新文件互不相关。
+
+### OneDrive 打开实测（2026-10-08）
+
+- 书库：用户在个人 OneDrive 中选择并同步的示例书库（3 本，即 `assets/calibre-sample`）。阅读器：KOReader v2026.07.1，系统选择器中每次选“仅此一次”，未设默认。
+- 打开书籍 1《Quick Start Guide》（未下载）：右下角出现带进度环的叉号（`download_progress_1`），下载完成后前台弹出选择器，选 KOReader 后日志为 `imported to …/files/Quick Start Guide-1.epub`，即 Q50 的显示名生效。导入文件 MD5 `2d9e1d1c…` 与示例书库源文件一致，KOReader 显示该书第 1/37 页。回到应用后书籍显示下载勾（`download_mark`），底栏显示“上次打开：Quick Start Guide”。
+- 后台不跳转：点击未下载的书籍 3《夜叉池》约 1.5 秒后按 HOME。字节于 10:22:52 在后台写完（暂存文件修改时间），发布约在 10:23 的十余秒后（目录修改时间 10:23），其间日志没有 VIEW 启动、选择器或 KOReader 的 `UriHandler`，前台仍为桌面。约 10:23:05 回到前台时副本尚未发布，因此还没有下载勾；10:23:17 再次点击该书时已发布，立即弹出选择器。
+- 本节结论：AC08 的 OneDrive 打开、阅读器无源目录权限读取所授权文件、后台不跳转通过。同名书在 KOReader 中的复验待本地测试书库重新授权后执行。
+
+- 下载耗时分解（前台打开书籍 2，62 KB，每 0.5 秒查看私有暂存目录）：点击后约 26 秒才出现第一批字节，约 1 秒写完，再过约 18 秒才发布，发布后约 1 秒弹出选择器。界面刷新不是瓶颈；时间花在 OneDrive 请求上。每次 `version`／`resolve`／`openRead` 都重新核对身份（2 个请求）并从根逐级列目录（每层 1 个请求）；下载前做三遍（约 19 个请求），下载后的版本复核再做一遍（约 6 个请求）。设备到 Graph 的单个未授权请求约 0.6 秒，带令牌的实际请求耗时未逐个测量。
+
+### 所有下载显示下载中图标（Q51，2026-10-08）
+
+- 改动：`BookOpening.downloads` 先订阅任务事件再列出队列，持续给出所有未结束的副本下载（不论来源）；`OpenViewModel.downloads` 按书给出标记（同书优先显示运行中的任务；只有比例变化时最多每 2 秒更新，任务出现或结束立即更新），`cancelTask` 取消该任务（是当前打开计划的任务时一并放弃打开）。图书馆页优先显示打开计划的标记，否则显示该书的下载中图标。图标改为：叉的黑色圆盘缩小 3dp，进度弧宽 3dp 紧贴其外缘，两者合计与 24dp 的下载勾等大；白色底衬保证深色封面上可见，不画轨道或边框线，比例未知时没有弧。打开失败的感叹号仍为与下载勾等大的圆盘。
+- JVM：`OpenViewModelTest` 新增没有打开计划的下载（排队标记、比例按间隔更新、等待保留比例、点击取消该任务、退到后台后仍有标记、结束即消失），`testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest` 通过。
+- 平台：`LibraryScreenTest` 新增没有打开计划的下载显示 `download_progress_2` 并可取消，PA6 上 **OK (26 tests)**。该测试起初在测试内于组合中新建 view model，每次重组都重新收集并写状态而无法空闲；改为在组合外建立（与 activity 的 view model 一致），产品代码不受影响。
+- 外观：用临时截图测试（未保留）在 PA6 渲染深色封面上的下载勾、85%、排队、40% 四种标记，尺寸与位置一致，叉与弧合计与勾等大。本地书库下载太快，未在真实下载中截到图标。
+
+### OneDrive 目录选择页布局修复（2026-10-08）
+
+- 用户反馈：PA6（1072×1448，density 360，字体 1.05）上第 3 页目录列表下方“返回上层目录”“选择当前目录为书库”被压成两条细线。原因是该页内容总高超出分配给页面内容的高度，最后一行被挤压。
+- 修复：目录项放进按剩余高度分配并裁剪的区域，翻页与选择两行始终完整显示；“目录列表第 N 页”移到上一页／下一页同一行，并收紧间距。
+- 真机复查（个人 OneDrive 根目录）：3 个目录项、上一页／下一页／页码与两个选择按钮均完整显示，文字可读；尚未在该页实际进入目录或选择书库。
+
+### 共同验收结论
+
+- 2026-10-08 用户确认通过：外部打开（汉王阅读器、KOReader）、Q50 显示名、Q51 下载中图标、感叹号与精简后的通知文案、OneDrive 目录选择页布局。
+- 仍未在真机执行，留步骤 07 联验：无阅读器时报错且不更新上次打开（PA6 上的格式都有处理应用）、拒绝通知权限后只显示感叹号、点击通知进入登录／授权／同步页（需真实失效）、PDF 阅读器、源已不可用的副本与更新失败后旧副本的打开。OneDrive 下载请求偏多导致的等待（见“OneDrive 打开实测”的耗时分解）另行优化。
+- 清理：删除 KOReader 目录中本步骤测试导入的 `A Brief Orchard*.epub`、`Quick Start Guide-1.epub`、`山纪事.epub` 及对应 `.sdr`（KOReader 历史中的这些条目会显示为文件缺失），删除 `/sdcard/Download/tmp-step04-probe` 与 `.ko-marker`；`adb uninstall` 测试包与 debug 包均返回 `Success`，限定包名查询确认均已不存在。测试书库副本 `/sdcard/Download/calibre-step04-test-library` 保留。

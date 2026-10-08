@@ -159,6 +159,7 @@
     <string name="cleanup_completed">清理完成。</string>
     <string name="cleanup_failed">清理未完成或当前书库已变化，请重新查看范围后重试。</string>
     <string name="cleanup_unavailable">当前没有可清理的范围，请先确认已选择书库。</string>
+    <string name="download_open">打开</string>
     <string name="download_remove">移除此格式副本</string>
     <string name="download_remove_confirm">确认移除：%1$s，%2$d 个副本，%3$d 字节</string>
     <string name="download_all_formats">此书全部格式</string>

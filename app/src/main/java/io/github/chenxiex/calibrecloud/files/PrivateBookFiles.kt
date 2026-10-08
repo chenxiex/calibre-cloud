@@ -41,7 +41,7 @@ class PrivateBookFiles(private val filesDir: File) : ApplicationCopyHandleFactor
 
     private fun collect(location: CompleteCopyLocation) {
         if (location in retired && (readers[location] ?: 0) == 0) {
-            val file = File(filesDir, "books/${location.libraryId.value}/${location.fileGeneration}.book")
+            val file = file(filesDir, location)
             if (Files.isSymbolicLink(File(filesDir, "books").toPath()) ||
                 Files.isSymbolicLink(file.parentFile!!.toPath()) || Files.isSymbolicLink(file.toPath())) throw IOException("Linked book cache")
             if (file.exists() && !file.delete()) throw IOException("Book cache deletion failed")
@@ -105,4 +105,10 @@ class PrivateBookFiles(private val filesDir: File) : ApplicationCopyHandleFactor
     }
 
     private fun failure(kind: StorageErrorKind) = HandleOpenResult.Failed(StorageError(kind))
+
+    companion object {
+        /** The only path a generation may occupy; the name never derives from a title or source path. */
+        fun file(filesDir: File, location: CompleteCopyLocation) =
+            File(filesDir, "books/${location.libraryId.value}/${location.fileGeneration}.book")
+    }
 }

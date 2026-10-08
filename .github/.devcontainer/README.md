@@ -1,6 +1,6 @@
 # Android 开发容器
 
-本配置提供命令行编译、静态检查、SQLite 数据检查和 ADB 工具，适用于 Kotlin + Jetpack Compose + AppAuth-Android + OkHttp + 原生 SQLite + WorkManager/FileProvider。初始化容器不会创建工程、下载应用依赖或执行应用构建；应用工程的构建说明见 [Android 工程](../../app/README.md#构建)。
+本配置提供命令行编译、静态检查、SQLite 数据检查和 ADB 工具，适用于 Kotlin + Jetpack Compose + AppAuth-Android + OkHttp + 原生 SQLite + WorkManager。初始化容器不会创建工程、下载应用依赖或执行应用构建；应用工程的构建说明见 [Android 工程](../../app/README.md#构建)。
 
 ## 镜像内的工具
 
@@ -76,7 +76,7 @@ gradle wrapper \
 ./gradlew testDebugUnitTest lintDebug
 ```
 
-Compose、AppAuth-Android、OkHttp、WorkManager、AndroidX Core 等通过项目 Gradle 添加，下载结果自动进入 Gradle volume。原生 SQLite 使用 Android SDK 提供的 API，FileProvider 由 AndroidX Core 提供。无需在容器中通过额外包管理器安装这些应用库；镜像中的 `sqlite3` 仅用于开发期间检查数据库。
+Compose、AppAuth-Android、OkHttp、WorkManager、AndroidX Core 等通过项目 Gradle 添加，下载结果自动进入 Gradle volume。原生 SQLite 与书籍副本的 ContentProvider 使用 Android SDK 提供的 API。无需在容器中通过额外包管理器安装这些应用库；镜像中的 `sqlite3` 仅用于开发期间检查数据库。
 
 如果工作区已有宿主机生成的 `local.properties`，其中的 `sdk.dir` 会覆盖 SDK 环境变量。容器使用时应移除该项，或在这个被 Git 忽略的文件中设置 `sdk.dir=/home/vscode/.local/share/android-sdk`。
 

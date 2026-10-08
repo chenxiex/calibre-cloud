@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.ui
 
+import android.graphics.Bitmap
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.chenxiex.calibrecloud.R
+import io.github.chenxiex.calibrecloud.state.LastOpened
 
 private const val TAB_LIBRARY = 0
 private const val TAB_MORE = 1
@@ -47,39 +50,75 @@ private const val TAB_MORE = 1
 /**
  * Top-level frame: the selected tab fills the space above a static bottom bar. Test tags are exposed
  * as resource IDs so device checks can select controls without relying on position or page number.
- * [more] draws the "更多" page for the given temporary page index.
+ * [more] draws the "更多" page for the given temporary page index. A book being opened shows its
+ * mark: a cancellable progress mark while it downloads, a warning when it needs the user, whose
+ * reason [notify] posts as a system notification. [moreRequest] (from such a notification) shows a
+ * "更多" page once. [startReader] hands a ready copy to the system, and leaving the page revokes the
+ * wait so a finished download never opens a reader later.
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-internal fun MainScreen(library: LibraryViewModel, more: @Composable (page: Int, onPage: (Int) -> Unit) -> Unit) {
+internal fun MainScreen(
+    library: LibraryViewModel,
+    open: OpenViewModel,
+    startReader: (OpenLaunch) -> LaunchOutcome,
+    notify: (OpenNotice) -> Unit = {},
+    moreRequest: Int? = null,
+    onMoreRequestHandled: () -> Unit = {},
+    more: @Composable (page: Int, onPage: (Int) -> Unit) -> Unit,
+) {
     var tab by rememberSaveable { mutableIntStateOf(TAB_LIBRARY) }
     var morePage by rememberSaveable { mutableIntStateOf(0) }
+    val select = { target: Int ->
+        if (target != tab) open.revoke()
+        tab = target
+        open.refresh()
+    }
+    val openMore = { target: Int ->
+        morePage = target
+        select(TAB_MORE)
+    }
+    LaunchedEffect(open) { open.refresh() }
+    val launch = open.launch
+    LaunchedEffect(launch) { if (launch != null) open.launched(launch, startReader(launch)) }
+    val notice = open.notice
+    LaunchedEffect(notice) {
+        if (notice != null) {
+            notify(notice)
+            open.noticeHandled(notice.id)
+        }
+    }
+    LaunchedEffect(moreRequest) {
+        if (moreRequest != null) {
+            openMore(moreRequest)
+            onMoreRequestHandled()
+        }
+    }
     Column(
         Modifier.fillMaxSize().background(Color.White).windowInsetsPadding(WindowInsets.safeDrawing)
             .semantics { testTagsAsResourceId = true },
     ) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (tab == TAB_LIBRARY) {
-                LibraryScreen(library) { target ->
-                    morePage = target
-                    tab = TAB_MORE
-                }
+                LibraryScreen(library, onOpen = open::open, onNoFormat = open::failNoFormat, mark = open.mark,
+                    onCancelDownload = open::cancelDownload, downloads = open.downloads, onCancelTask = open::cancelTask, openMore = openMore)
             } else {
                 more(morePage) { morePage = it }
             }
         }
         HorizontalRule()
-        BottomBar(tab) { tab = it }
+        BottomBar(tab, open.lastOpened, open.lastOpenedCover, open::openLastOpened, select)
     }
 }
 
 @Composable
-private fun BottomBar(selected: Int, onSelect: (Int) -> Unit) {
+private fun BottomBar(selected: Int, lastOpened: LastOpened?, cover: Bitmap?, onLastOpened: () -> Unit, onSelect: (Int) -> Unit) {
     Row(Modifier.fillMaxWidth().height(56.dp).testTag("bottom_bar")) {
         BottomTab(stringResource(R.string.nav_library), R.drawable.ic_library_outline, R.drawable.ic_library_filled,
             selected == TAB_LIBRARY, "nav_library", Modifier.weight(1f)) { onSelect(TAB_LIBRARY) }
         BottomTab(stringResource(R.string.nav_more), R.drawable.ic_more_outline, R.drawable.ic_more_filled,
             selected == TAB_MORE, "nav_more", Modifier.weight(1f)) { onSelect(TAB_MORE) }
+        if (lastOpened != null) LastOpenedTab(lastOpened, cover, Modifier.weight(1f), onLastOpened)
     }
 }
 

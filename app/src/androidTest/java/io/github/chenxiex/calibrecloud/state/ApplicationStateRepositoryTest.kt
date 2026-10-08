@@ -1,7 +1,6 @@
 package io.github.chenxiex.calibrecloud.state
 
 import android.content.Context
-import androidx.core.content.FileProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
@@ -79,9 +78,9 @@ class ApplicationStateRepositoryTest {
         assertEquals(identity, repository.binding(identity.id))
         assertEquals(copy, repository.find(copy.key))
         assertEquals(listOf(copy), repository.listCopies(identity.id, limit = 10, offset = 0))
-        assertThrows(IllegalArgumentException::class.java) {
-            FileProvider.getUriForFile(context, "${context.packageName}.books", context.getDatabasePath(databaseName))
-        }
+        // The book provider resolves only published generations, never the state database.
+        val forged = android.net.Uri.parse("content://${context.packageName}.books/$databaseName")
+        assertThrows(java.io.FileNotFoundException::class.java) { context.contentResolver.openInputStream(forged)?.close() }
     }
 
     @Test

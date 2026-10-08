@@ -221,6 +221,14 @@ class ApplicationStateRepository(
         }
     }
 
+    /** The complete record that currently owns [location]; null once that generation is replaced or removed. */
+    suspend fun findAt(location: CompleteCopyLocation): DownloadedCopy? = withContext(ioDispatcher) {
+        database.readableDatabase.query("downloaded_copies", null, "library_id = ? AND file_generation = ?",
+            arrayOf(location.libraryId.value.toString(), location.fileGeneration.toString()), null, null, null).use {
+            if (it.moveToFirst()) it.copy() else null
+        }
+    }
+
     /** Bounded local manifest pagination, independent of the full metadata index and source access. */
     suspend fun listCopies(libraryId: LibraryId, limit: Int, offset: Int): List<DownloadedCopy> = withContext(ioDispatcher) {
         require(limit in 1..200 && offset >= 0)

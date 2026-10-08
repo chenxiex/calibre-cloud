@@ -26,7 +26,7 @@
 
 显式源访问由任务处理器经 `FormatSource`、`CoverSource` 及各后端快照接口完成。`CopyMaintenance` 仅声明精确副本移除和元数据清理，由 `CacheMaintenance` 实现。没有一般源上传／删除接口。`ReadStatusIntent` 只表达书籍、动态栏目和固定布尔目标，第四阶段再实现安全准备／提交和写后刷新协议。
 
-文件工厂和 FileProvider 的路径范围、完整文件发布及只读授权规则见 [文件提供开发约束](../files/AGENTS.md)。
+文件工厂、书籍 provider 的提供范围、完整文件发布及只读授权规则见 [文件提供开发约束](../files/AGENTS.md)。
 
 必要测试分别位于 `app/src/test` 的身份／副本读取测试和 `app/src/androidTest` 的 provider 路径测试；实际结果与未完成验收见 [第一阶段验证记录](../../../../../../../../verification/phase-1.md)。
 

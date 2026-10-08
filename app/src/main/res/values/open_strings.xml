@@ -1,0 +1,31 @@
+<resources>
+    <string name="book_untitled_name">未命名书籍-%1$d</string>
+    <string name="open_waiting">等待条件满足</string>
+    <string name="open_waiting_network">等待网络</string>
+    <string name="open_waiting_throttled">服务繁忙，稍后自动重试</string>
+    <string name="open_waiting_login">需要重新登录 OneDrive</string>
+    <string name="open_waiting_authorization">需要重新授权书库目录</string>
+    <string name="open_paused">下载已暂停</string>
+    <string name="open_no_format">没有可打开的格式</string>
+    <string name="open_no_app">没有能打开 %1$s 的应用</string>
+    <string name="open_launch_failed">阅读器启动失败</string>
+    <string name="open_copy_unreadable">副本无法读取</string>
+    <string name="open_no_metadata">请先同步书库</string>
+    <string name="open_unavailable">书库中已无此格式</string>
+    <string name="open_download_cancelled">下载已取消</string>
+    <string name="open_download_network">网络不可用</string>
+    <string name="open_download_throttled">服务繁忙</string>
+    <string name="open_download_missing">找不到源文件</string>
+    <string name="open_download_changed">源文件已变化</string>
+    <string name="open_download_space">存储空间不足</string>
+    <string name="open_download_corrupt">下载内容已损坏</string>
+    <string name="open_download_failed">下载失败</string>
+    <string name="open_notice_channel">打开书籍的问题</string>
+    <string name="open_notice_failed">无法打开《%1$s》</string>
+    <string name="open_notice_waiting">《%1$s》的下载需要处理</string>
+    <string name="open_warning">《%1$s》需要处理，原因见通知</string>
+    <string name="open_warning_cancel">《%1$s》的下载需要处理，原因见通知；点击取消下载</string>
+    <string name="open_cancel_download">取消下载《%1$s》</string>
+    <string name="open_download_progress">已下载 %1$d%%</string>
+    <string name="last_opened_description">上次打开：%1$s</string>
+</resources>

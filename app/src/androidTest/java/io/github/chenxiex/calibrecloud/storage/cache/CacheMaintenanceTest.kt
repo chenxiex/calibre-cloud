@@ -300,7 +300,7 @@ class CacheMaintenanceTest {
         LegacyCacheSchemaFixture.downgradeToFour(database.writableDatabase)
         database.close()
         reopen()
-        assertEquals(7, database.readableDatabase.version)
+        assertEquals(8, database.readableDatabase.version)
         assertEquals(column, metadata.currentImport()!!.selectedReadColumn)
         state.setStartupEnabled(true)
         assertTrue(maintenance.execute(requireNotNull(maintenance.previewMetadata())))

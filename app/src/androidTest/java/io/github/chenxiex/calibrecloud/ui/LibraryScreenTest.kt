@@ -19,6 +19,7 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -67,7 +68,13 @@ import io.github.chenxiex.calibrecloud.state.SearchHistoryStore
 import io.github.chenxiex.calibrecloud.storage.api.CompleteCopyLocation
 import io.github.chenxiex.calibrecloud.storage.api.DownloadedCopy
 import io.github.chenxiex.calibrecloud.storage.api.SourceAvailability
+import io.github.chenxiex.calibrecloud.tasks.api.FrozenSet
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
+import kotlinx.coroutines.flow.MutableStateFlow
+import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
+import io.github.chenxiex.calibrecloud.tasks.api.TaskState
+import io.github.chenxiex.calibrecloud.tasks.api.WaitingReason
+import io.github.chenxiex.calibrecloud.state.LastOpened
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.emptyFlow
@@ -133,8 +140,34 @@ class LibraryScreenTest {
         return LibraryViewModel({ selection }, LibraryQueryService(imports, LibraryCopies { copies }, Dispatchers.Default), covers, emptyFlow(), history)
     }
 
+    /** Copies exist for [available] keys; downloads stay queued in [tasks] until a test finishes them. */
+    private val opening = object : BookOpening {
+        val available = mutableMapOf<CopyKey, DownloadedCopy>()
+        val tasks = mutableMapOf<TaskId, MutableStateFlow<TaskState>>()
+        val records = mutableMapOf<LibraryId, LastOpened>()
+        val cancelled = mutableListOf<TaskId>()
+        val active = MutableStateFlow<List<ActiveDownload>>(emptyList())
+        override suspend fun selection() = this@LibraryScreenTest.selection
+        override suspend fun locate(key: CopyKey) = available[key]?.let { LocatedCopy.Available(it) } ?: LocatedCopy.Missing
+        override suspend fun download(key: CopyKey, selectionToken: UUID) =
+            TaskId(UUID(2, key.book.sourceId)).also { tasks.getOrPut(it) { MutableStateFlow(TaskState.Queued) } }
+        override suspend fun metadataAvailable() = index != null
+        override fun observe(task: TaskId) = tasks.getValue(task)
+        override suspend fun wake() {}
+        override fun downloads() = active
+        override suspend fun cancel(task: TaskId) { cancelled += task }
+        override suspend fun lastOpened(libraryId: LibraryId) = records[libraryId]
+        override suspend fun saveLastOpened(value: LastOpened) { records[value.key.book.libraryId] = value }
+        override suspend fun cover(value: LastOpened): Bitmap? = null
+    }
+
+    private fun copyOf(key: CopyKey, title: String) = DownloadedCopy(key, CompleteCopyLocation(libraryId, UUID.randomUUID()), title, 9,
+        FileVersion(BackendKind.LOCAL, "v"), SourceAvailability.AVAILABLE)
+
+    private fun key(n: Int, format: BookFormat = epub) = CopyKey(BookKey(libraryId, n.toLong(), UUID(0, n.toLong())), format)
+
     private fun show(model: LibraryViewModel, size: DpSize = DpSize(360.dp, 720.dp), openMore: (Int) -> Unit = {}) {
-        compose.setContent { Box(Modifier.size(size)) { LibraryScreen(model, openMore) } }
+        compose.setContent { Box(Modifier.size(size)) { LibraryScreen(model, openMore = openMore) } }
     }
 
     private fun tagged(prefix: String) = SemanticsMatcher("tag starts with $prefix") {
@@ -571,7 +604,7 @@ class LibraryScreenTest {
     fun bottomBarSwitchesBetweenLibraryAndMoreWithoutLosingTheLibraryPosition() {
         library((1..30).map { book(it) })
         val model = model()
-        compose.setContent { MainScreen(model) { page, _ -> Text("更多页 $page") } }
+        compose.setContent { MainScreen(model, OpenViewModel(opening), { LaunchOutcome.STARTED }) { page, _ -> Text("更多页 $page") } }
         awaitTag("library_page_status")
         compose.onNodeWithTag("library_next_page").performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("book_30").fetchSemanticsNodes().isEmpty() }
@@ -626,5 +659,136 @@ class LibraryScreenTest {
         show(model)
         compose.waitUntil(10_000) { model.coverImages.size == 3 }
         assertTrue(requestedCovers.isEmpty())
+    }
+
+    @Test
+    fun tappingABookOpensItsDefaultFormatAndABookWithoutFormatsSaysSo() {
+        library(listOf(book(1), book(2, formats = false)))
+        val opened = mutableListOf<Pair<CopyKey, String>>()
+        val noFormat = mutableListOf<String>()
+        val model = model()
+        compose.setContent {
+            Box(Modifier.size(DpSize(360.dp, 720.dp))) {
+                LibraryScreen(model, onOpen = { key, title -> opened += key to title }, onNoFormat = { _, title -> noFormat += title }) {}
+            }
+        }
+        awaitTag("book_1")
+        compose.onNodeWithTag("book_1").performClick()
+        compose.onNodeWithTag("book_2").performClick()
+        compose.runOnIdle {
+            assertEquals(listOf(key(1) to "书籍1"), opened)
+            assertEquals(listOf("书籍2"), noFormat)
+        }
+    }
+
+    @Test
+    fun aStartedReaderBecomesTheLastOpenedEntryOfTheBottomBar() {
+        library(listOf(book(1)))
+        opening.available[key(1)] = copyOf(key(1), "书籍1")
+        val launched = mutableListOf<CopyKey>()
+        val open = OpenViewModel(opening)
+        compose.setContent {
+            MainScreen(model(), open, { launched += it.copy.key; LaunchOutcome.STARTED }) { page, _ -> Text("更多页 $page") }
+        }
+        awaitTag("book_1")
+        compose.onNodeWithTag("nav_last_opened").assertDoesNotExist()
+        compose.onNodeWithTag("book_1").performClick()
+        awaitTag("nav_last_opened")
+        compose.onNodeWithTag("nav_last_opened").assert(hasContentDescription("上次打开：书籍1"))
+        compose.onNode(hasTestTag("open_warning_1"), useUnmergedTree = true).assertDoesNotExist()
+        compose.runOnIdle { assertEquals(listOf(key(1)), launched) }
+        // The record reopens the same format from any page.
+        compose.onNodeWithTag("nav_more").performClick()
+        compose.onNodeWithTag("nav_last_opened").performClick()
+        compose.waitUntil(10_000) { launched.size == 2 }
+    }
+
+    @Test
+    fun aDownloadShowsAProgressMarkOnItsBookAndLeavingThePageRevokesTheOpen() {
+        library(listOf(book(1)))
+        val launched = mutableListOf<CopyKey>()
+        val notices = mutableListOf<OpenNotice>()
+        compose.setContent {
+            MainScreen(model(), OpenViewModel(opening), { launched += it.copy.key; LaunchOutcome.STARTED }, { notices += it }) { page, _ ->
+                Text("更多页 $page")
+            }
+        }
+        awaitTag("book_1")
+        compose.onNodeWithTag("book_1").performClick()
+        awaitTag("download_progress_1")
+        compose.onNodeWithTag("download_progress_1").assert(hasContentDescription("取消下载《书籍1》"))
+        // A queued or running download notifies nothing; a wait the user may have to resolve warns and notifies.
+        compose.runOnIdle { assertTrue(notices.isEmpty()) }
+        compose.runOnIdle { opening.tasks.values.single().value = TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))) }
+        compose.waitUntil(10_000) { notices.size == 1 }
+        compose.onNodeWithTag("download_progress_1").assert(hasContentDescription("《书籍1》的下载需要处理，原因见通知；点击取消下载"))
+        compose.runOnIdle { assertEquals("等待网络", openStatusText(compose.activity, notices.single().status!!)) }
+        compose.onNodeWithTag("nav_more").performClick()
+        compose.onNodeWithTag("download_progress_1").assertDoesNotExist()
+        opening.available[key(1)] = copyOf(key(1), "书籍1")
+        compose.runOnIdle { opening.tasks.values.single().value = TaskState.Finished(TaskResult.Completed) }
+        compose.waitForIdle()
+        assertTrue(launched.isEmpty())
+        compose.onNodeWithTag("nav_last_opened").assertDoesNotExist()
+    }
+
+    @Test
+    fun theProgressMarkCancelsTheDownloadTask() {
+        library(listOf(book(1), book(2)))
+        copies = listOf(copyOf(key(2), "书籍2"))
+        compose.setContent {
+            MainScreen(model(), OpenViewModel(opening), { LaunchOutcome.STARTED }) { page, _ -> Text("更多页 $page") }
+        }
+        awaitTag("book_1")
+        compose.onNode(hasTestTag("download_mark") and hasAnyAncestor(hasTestTag("book_2")), useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag("book_1").performClick()
+        awaitTag("download_progress_1")
+        compose.onNodeWithTag("download_progress_1").performClick()
+        compose.onNodeWithTag("download_progress_1").assertDoesNotExist()
+        compose.waitUntil(10_000) { opening.cancelled == listOf(TaskId(UUID(2, 1))) }
+        compose.onNode(hasTestTag("open_warning_1"), useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun aDownloadWithoutAnOpenIsMarkedAndItsMarkCancelsIt() {
+        library(listOf(book(1), book(2)))
+        val task = TaskId(UUID(3, 2))
+        opening.active.value = listOf(ActiveDownload(task, key(2).book, TaskState.Queued))
+        // Built once, as the activity's view model is: a model built in composition would collect anew each time.
+        val library = model()
+        val open = OpenViewModel(opening)
+        compose.setContent { MainScreen(library, open, { LaunchOutcome.STARTED }) { page, _ -> Text("更多页 $page") } }
+        awaitTag("download_progress_2")
+        compose.onNodeWithTag("download_progress_2").assert(hasContentDescription("取消下载《书籍2》"))
+        compose.onNodeWithTag("download_progress_1").assertDoesNotExist()
+        compose.onNodeWithTag("download_progress_2").performClick()
+        compose.waitUntil(10_000) { opening.cancelled == listOf(task) }
+        compose.onNodeWithTag("download_progress_2").assertDoesNotExist()
+    }
+
+    @Test
+    fun noReaderShowsAnErrorWithRetryAndKeepsNoRecord() {
+        library(listOf(book(1)))
+        opening.available[key(1)] = copyOf(key(1), "书籍1")
+        var attempts = 0
+        val notices = mutableListOf<OpenNotice>()
+        compose.setContent {
+            MainScreen(model(), OpenViewModel(opening), { attempts++; LaunchOutcome.NO_APP }, { notices += it }) { page, _ -> Text("更多页 $page") }
+        }
+        awaitTag("book_1")
+        compose.onNodeWithTag("book_1").performClick()
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("open_warning_1", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("open_warning_1", useUnmergedTree = true).assert(hasContentDescription("《书籍1》需要处理，原因见通知"))
+        compose.runOnIdle {
+            val status = notices.single().status!!
+            assertEquals("无法打开《书籍1》", openNoticeTitle(compose.activity, status))
+            assertTrue(openStatusText(compose.activity, status).contains("没有能打开 EPUB 的应用"))
+        }
+        compose.onNodeWithTag("nav_last_opened").assertDoesNotExist()
+        // The warning is not a control of its own: tapping the book opens it again.
+        compose.onNodeWithTag("book_1").performClick()
+        compose.waitUntil(10_000) { attempts == 2 }
+        compose.onNodeWithTag("nav_more").performClick()
+        compose.onNodeWithTag("open_warning_1", useUnmergedTree = true).assertDoesNotExist()
     }
 }

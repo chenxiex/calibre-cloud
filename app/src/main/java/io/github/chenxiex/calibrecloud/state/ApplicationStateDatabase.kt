@@ -13,11 +13,12 @@ import android.database.sqlite.SQLiteOpenHelper
  * Version 5 adds irreversible producer revocation, recoverable cleanup and retained preferences.
  * Version 6 adds the default-off process startup sync setting.
  * Version 7 adds per-library search history.
+ * Version 8 adds the per-library last opened book.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  */
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
-    SQLiteOpenHelper(context.applicationContext, name, null, 7) {
+    SQLiteOpenHelper(context.applicationContext, name, null, 8) {
     private val privateFiles = context.applicationContext.filesDir
 
     override fun onConfigure(db: SQLiteDatabase) {
@@ -73,6 +74,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createMaintenance(db)
         createStartupSetting(db)
         createSearchHistory(db)
+        createLastOpened(db)
         // The composite primary key is also the library-scoped ordered manifest index.
         db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, authority, root_id, account_id, drive_id)")
     }
@@ -220,8 +222,19 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         )""".trimIndent())
     }
 
+    /** One minimal record per library: the book and format last handed to a reader. */
+    private fun createLastOpened(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE last_opened (
+            library_id TEXT PRIMARY KEY NOT NULL REFERENCES library_bindings(library_id),
+            source_id INTEGER NOT NULL CHECK(source_id > 0),
+            source_uuid TEXT NOT NULL,
+            format TEXT NOT NULL,
+            title TEXT NOT NULL
+        )""".trimIndent())
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        check(oldVersion in 1..6 && newVersion == 7)
+        check(oldVersion in 1..7 && newVersion == 8)
         if (oldVersion == 1) {
             db.execSQL("ALTER TABLE current_selection ADD COLUMN authorization_id TEXT")
             createQueue(db)
@@ -233,6 +246,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
             migrateCandidateScopes(db)
         }
         if (oldVersion <= 5) createStartupSetting(db)
-        createSearchHistory(db)
+        if (oldVersion <= 6) createSearchHistory(db)
+        createLastOpened(db)
     }
 }

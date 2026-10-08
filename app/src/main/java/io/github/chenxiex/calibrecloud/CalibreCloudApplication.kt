@@ -86,6 +86,8 @@ class ApplicationDependencies(context: Context) {
             io.github.chenxiex.calibrecloud.tasks.covers.CoverTaskHandler(state, metadata, covers, coverSource, formatSource, Dispatchers.IO)), conditions = queueConditions::waiting)
     }
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO, state.copyAccess) }
+    val bookCatalog by lazy { io.github.chenxiex.calibrecloud.files.StateBookCatalog(state, applicationContext.filesDir) }
+    val lastOpened by lazy { io.github.chenxiex.calibrecloud.state.LastOpenedRepository(database, Dispatchers.IO) }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }
     val localConfiguration by lazy {
         DatabaseLocalDirectoryConfiguration(state, localPermissions, PreferencesLocalDirectoryConfiguration(applicationContext))

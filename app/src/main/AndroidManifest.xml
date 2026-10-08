@@ -37,15 +37,12 @@
             </intent-filter>
         </activity>
         <activity android:name="net.openid.appauth.RedirectUriReceiverActivity" tools:node="remove" />
+        <!-- Serves only published book generations, read-only, through per-URI grants. -->
         <provider
-            android:name="androidx.core.content.FileProvider"
+            android:name=".files.BookFileProvider"
             android:authorities="${applicationId}.books"
             android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/book_paths" />
-        </provider>
+            android:grantUriPermissions="true" />
         <service android:name="androidx.work.impl.foreground.SystemForegroundService"
             android:foregroundServiceType="dataSync" tools:node="merge" />
         <!-- On-demand initialization uses Application Configuration.Provider. -->

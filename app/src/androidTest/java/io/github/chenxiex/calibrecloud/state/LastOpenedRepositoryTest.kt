@@ -4,6 +4,9 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
+import io.github.chenxiex.calibrecloud.model.BookFormat
+import io.github.chenxiex.calibrecloud.model.BookKey
+import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.model.LibraryId
 import io.github.chenxiex.calibrecloud.model.LibraryIdentity
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
@@ -11,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -19,17 +23,17 @@ import java.util.UUID
 
 /** Real Android SQLite in UUID-named private test databases. */
 @RunWith(AndroidJUnit4::class)
-class SearchHistoryRepositoryTest {
+class LastOpenedRepositoryTest {
     private lateinit var context: Context
     private lateinit var name: String
     private lateinit var database: ApplicationStateDatabase
     private lateinit var state: ApplicationStateRepository
-    private lateinit var history: SearchHistoryRepository
+    private lateinit var records: LastOpenedRepository
 
     @Before
     fun setUp() {
         context = InstrumentationRegistry.getInstrumentation().targetContext
-        name = "history-test-${UUID.randomUUID()}.db"
+        name = "last-opened-test-${UUID.randomUUID()}.db"
         reopen()
     }
 
@@ -39,10 +43,10 @@ class SearchHistoryRepositoryTest {
         context.deleteDatabase(name)
     }
 
-    private fun reopen(limit: Int = SearchHistoryRepository.DEFAULT_LIMIT) {
+    private fun reopen() {
         database = ApplicationStateDatabase(context, name)
         state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
-        history = SearchHistoryRepository(database, Dispatchers.IO, limit)
+        records = LastOpenedRepository(database, Dispatchers.IO)
     }
 
     private suspend fun bound(root: String): LibraryId {
@@ -51,51 +55,37 @@ class SearchHistoryRepositoryTest {
         return identity.id
     }
 
+    private fun opened(library: LibraryId, id: Long, format: String, title: String) =
+        LastOpened(CopyKey(BookKey(library, id, UUID(0, id)), BookFormat.parse(format)), title)
+
     @Test
-    fun executedQueriesPersistNewestFirstPerLibraryAndClearOnlyTheirOwn() = runBlocking<Unit> {
+    fun eachLibraryKeepsOnlyItsNewestRecordAcrossRestarts() = runBlocking<Unit> {
         val first = bound("first")
         val second = bound("second")
-        history.record(first, "  三体 ")
-        history.record(first, "刘慈欣")
-        history.record(first, "三体")
-        history.record(first, "   ")
-        history.record(second, "other")
+        records.save(opened(first, 1, "EPUB", "旧书"))
+        records.save(opened(first, 2, "PDF", "新书"))
+        records.save(opened(second, 1, "EPUB", "other"))
 
         database.close()
         reopen()
-        // Repeating a query moves it to the front; blank input is never saved.
-        assertEquals(listOf("三体", "刘慈欣"), history.list(first))
-        assertEquals(listOf("other"), history.list(second))
-
-        history.clear(first)
-        assertEquals(emptyList<String>(), history.list(first))
-        assertEquals(listOf("other"), history.list(second))
-        assertEquals(second, state.current()?.identity?.id)
+        // Same numeric book ID in another library stays separate.
+        assertEquals(opened(first, 2, "PDF", "新书"), records.get(first))
+        assertEquals(opened(second, 1, "EPUB", "other"), records.get(second))
+        assertNull(records.get(LibraryId(UUID.randomUUID())))
     }
 
     @Test
-    fun onlyTheNewestEntriesAreKept() = runBlocking<Unit> {
-        database.close()
-        reopen(limit = 3)
-        val library = bound("limited")
-        (1..5).forEach { history.record(library, "q$it") }
-        assertEquals(listOf("q5", "q4", "q3"), history.list(library))
-    }
-
-    @Test
-    fun versionSixMigrationAddsAnEmptyHistoryAndKeepsSettings() = runBlocking<Unit> {
+    fun versionSevenMigrationAddsAnEmptyRecordAndKeepsHistory() = runBlocking<Unit> {
         val library = bound("migrated")
-        state.setStartupEnabled(true)
-        database.writableDatabase.execSQL("DROP TABLE search_history")
+        SearchHistoryRepository(database, Dispatchers.IO).record(library, "kept")
         database.writableDatabase.execSQL("DROP TABLE last_opened")
-        database.writableDatabase.version = 6
+        database.writableDatabase.version = 7
         database.close()
         reopen()
         assertEquals(8, database.readableDatabase.version)
-        assertEquals(library, state.current()?.identity?.id)
-        assertTrue(state.startupEnabled())
-        assertEquals(emptyList<String>(), history.list(library))
-        history.record(library, "after")
-        assertEquals(listOf("after"), history.list(library))
+        assertEquals(listOf("kept"), SearchHistoryRepository(database, Dispatchers.IO).list(library))
+        assertNull(records.get(library))
+        records.save(opened(library, 3, "EPUB", "after"))
+        assertEquals(opened(library, 3, "EPUB", "after"), records.get(library))
     }
 }

@@ -13,6 +13,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -82,9 +83,9 @@ internal fun DownloadControls(model: DownloadViewModel) {
     }
 }
 
-/** Uses the complete manifest even when the full imported metadata is unavailable. */
+/** Uses the complete manifest even when the full imported metadata is unavailable; [onOpen] hands a copy to a reader. */
 @Composable
-internal fun DownloadList(model: DownloadViewModel) {
+internal fun DownloadList(model: DownloadViewModel, onOpen: (io.github.chenxiex.calibrecloud.model.CopyKey, String) -> Unit) {
     Text(stringResource(R.string.download_list_title), style = MaterialTheme.typography.titleMedium)
     if (model.readFailed) {
         Text(stringResource(R.string.download_local_error))
@@ -114,6 +115,9 @@ internal fun DownloadList(model: DownloadViewModel) {
                 }))
                 if (model.removal == null) {
                     Row {
+                        StaticButton(stringResource(R.string.download_open), entry.status == DownloadCopyStatus.AVAILABLE,
+                            Modifier.testTag("download_open")) { onOpen(entry.copy.key, entry.copy.title) }
+                        Spacer(Modifier.width(8.dp))
                         StaticButton(stringResource(R.string.download_remove), !model.submitting) { model.previewRemoval(entry) }
                         Spacer(Modifier.width(8.dp))
                         StaticButton(stringResource(R.string.download_remove_all), !model.submitting) { model.previewRemoval(entry, true) }

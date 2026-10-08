@@ -25,6 +25,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -40,9 +42,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -52,6 +57,7 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -71,10 +77,14 @@ import io.github.chenxiex.calibrecloud.library.LibraryFilters
 import io.github.chenxiex.calibrecloud.library.LibraryProblem
 import io.github.chenxiex.calibrecloud.library.ReadFilter
 import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.BookKey
+import io.github.chenxiex.calibrecloud.tasks.api.TaskId
+import io.github.chenxiex.calibrecloud.model.CopyKey
 
 /** The "更多" pages that the library hands over to when it needs configuration, sync or downloads. */
 internal object MoreTarget {
     const val LOCAL_AUTHORIZATION = 0
+    const val ONEDRIVE_LOGIN = 1
     const val ONEDRIVE_TASKS = 3
     const val DOWNLOAD_LIST = 7
 }
@@ -97,7 +107,16 @@ internal val BAR_HEIGHT = 56.dp
  * query result. The view menu and the filter panel take the content area and exclude each other.
  */
 @Composable
-internal fun LibraryScreen(model: LibraryViewModel, openMore: (Int) -> Unit) {
+internal fun LibraryScreen(
+    model: LibraryViewModel,
+    onOpen: (CopyKey, String) -> Unit = { _, _ -> },
+    onNoFormat: (BookKey, String) -> Unit = { _, _ -> },
+    mark: OpenMark? = null,
+    onCancelDownload: () -> Unit = {},
+    downloads: Map<BookKey, DownloadingMark> = emptyMap(),
+    onCancelTask: (TaskId) -> Unit = {},
+    openMore: (Int) -> Unit,
+) {
     var menuOpen by rememberSaveable { mutableStateOf(false) }
     var menuPage by rememberSaveable { mutableIntStateOf(0) }
     var columnsOpen by rememberSaveable { mutableStateOf(false) }
@@ -158,7 +177,10 @@ internal fun LibraryScreen(model: LibraryViewModel, openMore: (Int) -> Unit) {
                     filterOpen -> FilterPanel(model, filterPage) { filterPage = it }
                     search != null && search.query == null && model.overview != null ->
                         SearchHome(model, historyPage, { historyPage = it }, onSubmitted = closePanels)
-                    else -> LibraryBody(model, openMore)
+                    else -> LibraryBody(model, BookMarks(mark, downloads, onCancelDownload, onCancelTask), openMore) { row ->
+                        val format = row.defaultFormat?.format
+                        if (format == null) onNoFormat(row.key, row.title) else onOpen(CopyKey(row.key, format), row.title)
+                    }
                 }
             }
         }
@@ -233,7 +255,7 @@ private fun columnName(model: LibraryViewModel, value: Categorization.Column) =
     model.overview?.categoryColumns?.firstOrNull { it.id == value.id }?.name
 
 @Composable
-private fun LibraryBody(model: LibraryViewModel, openMore: (Int) -> Unit) {
+private fun LibraryBody(model: LibraryViewModel, marks: BookMarks, openMore: (Int) -> Unit, openBook: (BookRow) -> Unit) {
     val content = model.content
     val shown = (content as? LibraryContent.Books)?.let { it.offset to it.total }
         ?: (content as? LibraryContent.Folders)?.let { it.offset to it.total }
@@ -276,15 +298,33 @@ private fun LibraryBody(model: LibraryViewModel, openMore: (Int) -> Unit) {
                     Message(stringResource(if (model.search == null && model.filters == LibraryFilters())
                         R.string.library_empty else R.string.library_empty_filtered))
                 } else {
-                    ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Book(it) })
+                    ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Book(it) }, marks, openBook)
                 }
                 is LibraryContent.Folders -> if (content.total == 0) {
                     Message(stringResource(R.string.library_empty))
                 } else {
-                    ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Folder(it) })
+                    ItemPage(model, geometry, maxWidth, maxHeight, content.rows.map { LibraryItem.Folder(it) }, marks, openBook)
                 }
             }
         }
+    }
+}
+
+/**
+ * What replaces a book's download check: the open in progress, otherwise any unfinished download of
+ * the book; and how a tap on it cancels that download.
+ */
+private class BookMarks(
+    val mark: OpenMark?,
+    val downloads: Map<BookKey, DownloadingMark>,
+    val onCancelOpen: () -> Unit,
+    val onCancelTask: (TaskId) -> Unit,
+) {
+    fun of(row: BookRow) = mark?.takeIf { it.book == row.key }
+        ?: downloads[row.key]?.let { OpenMark(row.key, it.fraction, warning = false, cancellable = true) }
+
+    fun cancel(row: BookRow) {
+        if (mark?.book == row.key) onCancelOpen() else downloads[row.key]?.let { onCancelTask(it.task) }
     }
 }
 
@@ -304,9 +344,17 @@ private fun Message(text: String, actions: @Composable () -> Unit = {}) {
 
 /** Cells keep the page geometry's size; the slack beside them is spread evenly, so a short last page stays aligned. */
 @Composable
-private fun ItemPage(model: LibraryViewModel, geometry: PageGeometry, width: Dp, height: Dp, items: List<LibraryItem>) {
+private fun ItemPage(
+    model: LibraryViewModel, geometry: PageGeometry, width: Dp, height: Dp, items: List<LibraryItem>, marks: BookMarks,
+    openBook: (BookRow) -> Unit,
+) {
     val shown = items.take(geometry.capacity)
-    val open = { item: LibraryItem -> if (item is LibraryItem.Folder) model.openFolder(item.row.key) }
+    val open = { item: LibraryItem ->
+        when (item) {
+            is LibraryItem.Folder -> model.openFolder(item.row.key)
+            is LibraryItem.Book -> openBook(item.row)
+        }
+    }
     if (model.viewMode == LibraryViewMode.GRID) {
         val columnGap = ((width.value - geometry.cellWidth * geometry.columns) / (geometry.columns + 1)).coerceAtLeast(0f).dp
         val rowGap = ((height.value - geometry.cellHeight * geometry.rows) / (geometry.rows + 1)).coerceAtLeast(0f).dp
@@ -315,7 +363,7 @@ private fun ItemPage(model: LibraryViewModel, geometry: PageGeometry, width: Dp,
                 Row(Modifier.fillMaxWidth().padding(start = columnGap), horizontalArrangement = Arrangement.spacedBy(columnGap)) {
                     line.forEach { item ->
                         Box(Modifier.size(geometry.cellWidth.dp, geometry.cellHeight.dp).padding(CELL_INSET)) {
-                            GridCell(model, item, open)
+                            GridCell(model, item, marks, open)
                         }
                     }
                 }
@@ -323,7 +371,7 @@ private fun ItemPage(model: LibraryViewModel, geometry: PageGeometry, width: Dp,
         }
     } else {
         Column(Modifier.fillMaxSize()) {
-            shown.forEach { item -> ListRow(model, item, geometry.cellHeight.dp, open) }
+            shown.forEach { item -> ListRow(model, item, geometry.cellHeight.dp, marks, open) }
         }
     }
 }
@@ -339,18 +387,22 @@ private fun representative(item: LibraryItem) = when (item) {
 }
 
 @Composable
-private fun GridCell(model: LibraryViewModel, item: LibraryItem, open: (LibraryItem) -> Unit) {
+private fun GridCell(model: LibraryViewModel, item: LibraryItem, marks: BookMarks, open: (LibraryItem) -> Unit) {
     val row = representative(item)
     val cover = model.coverImages[row.key]
     Box(Modifier.fillMaxSize().testTag(tagOf(item)).clickable(
         interactionSource = remember { MutableInteractionSource() }, indication = null,
-        enabled = item is LibraryItem.Folder,
     ) { open(item) }) {
         CoverBox(cover, if (item is LibraryItem.Book) row.title else "", Modifier.fillMaxSize())
         when (item) {
             is LibraryItem.Book -> {
                 if (item.row.read == true) ReadRibbon(Modifier.align(Alignment.TopEnd))
-                if (item.row.downloaded) DownloadMark(Modifier.align(Alignment.BottomEnd).padding(4.dp))
+                val open = marks.of(item.row)
+                when {
+                    // The touch area reaches the cell corner; the drawn ring keeps the check's inset.
+                    open != null -> OpenMarkIcon(item.row, open, { marks.cancel(item.row) }, Modifier.align(Alignment.BottomEnd))
+                    item.row.downloaded -> DownloadMark(Modifier.align(Alignment.BottomEnd).padding(MARK_INSET))
+                }
                 if (item.row.defaultFormat?.sourceMissing == true) {
                     SourceMissing(Modifier.align(Alignment.BottomStart).padding(4.dp))
                 }
@@ -378,12 +430,11 @@ private fun FolderLabel(folder: FolderRow, placeholder: Boolean, modifier: Modif
 }
 
 @Composable
-private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, open: (LibraryItem) -> Unit) {
+private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, marks: BookMarks, open: (LibraryItem) -> Unit) {
     val row = representative(item)
     Row(
         Modifier.fillMaxWidth().height(height).padding(horizontal = 8.dp, vertical = 4.dp).testTag(tagOf(item))
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
-                enabled = item is LibraryItem.Folder) { open(item) },
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { open(item) },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         CoverBox(model.coverImages[row.key], if (item is LibraryItem.Book) row.title else "",
@@ -405,9 +456,11 @@ private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, open
                 }
             }
         }
-        if (item is LibraryItem.Book && item.row.downloaded) {
-            Spacer(Modifier.width(8.dp))
-            DownloadMark(Modifier)
+        val open = (item as? LibraryItem.Book)?.let { marks.of(it.row) }
+        if (item is LibraryItem.Book && (open != null || item.row.downloaded)) {
+            Spacer(Modifier.width(4.dp))
+            if (open != null) OpenMarkIcon(item.row, open, { marks.cancel(item.row) }, Modifier)
+            else DownloadMark(Modifier.padding(MARK_INSET))
         }
     }
 }
@@ -474,12 +527,69 @@ private fun ReadRibbon(modifier: Modifier) {
     }
 }
 
+private val MARK_SIZE = 24.dp
+private val MARK_ICON = 16.dp
+private val MARK_INSET = 4.dp
+/** The progress arc; the cross disc inside it is smaller by this on each side, so both span [MARK_SIZE]. */
+private val RING_WIDTH = 3.dp
+private val CROSS_ICON = 12.dp
+
+/** White check in a black disc; a thin white rim keeps the disc apart from a dark cover. */
 @Composable
 private fun DownloadMark(modifier: Modifier) {
     val description = stringResource(R.string.library_downloaded_description)
-    Box(modifier.size(24.dp).background(Color.White).border(1.dp, Color.Black).semantics { contentDescription = description },
-        contentAlignment = Alignment.Center) {
-        Text("✓", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+    Box(modifier.size(MARK_SIZE).background(Color.Black, CircleShape).border(1.dp, Color.White, CircleShape)
+        .semantics { contentDescription = description }.testTag("download_mark"), contentAlignment = Alignment.Center) {
+        Icon(painterResource(R.drawable.ic_check), null, Modifier.size(MARK_ICON), tint = Color.White)
+    }
+}
+
+/**
+ * A downloading or opening book, in the check's place: a white cross on a black disc while it
+ * downloads, an exclamation mark when an open needs the user (its reason is in the notification). A
+ * download's disc is smaller than the check's and a static progress arc hugs it from the top,
+ * clockwise, so disc and arc together are exactly the check's size; there is no track or outline,
+ * and an unknown share shows no arc. Tapping it cancels the download task. A failure is the check's
+ * full disc with no arc and no action of its own, so a tap reaches the book and opens it again.
+ */
+@Composable
+private fun OpenMarkIcon(row: BookRow, mark: OpenMark, onCancel: () -> Unit, modifier: Modifier) {
+    val description = stringResource(when {
+        !mark.cancellable -> R.string.open_warning
+        mark.warning -> R.string.open_warning_cancel
+        else -> R.string.open_cancel_download
+    }, row.title)
+    val percent = mark.fraction?.let { (it * 100).toInt() }
+    val progress = percent?.let { stringResource(R.string.open_download_progress, it) }
+    val area = modifier.size(MARK_SIZE + MARK_INSET * 2)
+    val icon = if (mark.warning) R.drawable.ic_priority_high else R.drawable.ic_close
+    Box(
+        if (!mark.cancellable) area.testTag("open_warning_${row.key.sourceId}").semantics { contentDescription = description }
+        else area.testTag("download_progress_${row.key.sourceId}")
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onCancel)
+            .semantics {
+                contentDescription = description
+                role = Role.Button
+                if (progress != null) stateDescription = progress
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (!mark.cancellable) {
+            Box(Modifier.size(MARK_SIZE).background(Color.Black, CircleShape).border(1.dp, Color.White, CircleShape), contentAlignment = Alignment.Center) {
+                Icon(painterResource(icon), null, Modifier.size(MARK_ICON), tint = Color.White)
+            }
+        } else {
+            val fraction = mark.fraction
+            Canvas(Modifier.size(MARK_SIZE)) {
+                val stroke = RING_WIDTH.toPx()
+                // White behind the arc keeps it visible on a dark cover, as the check's rim does.
+                drawCircle(Color.White)
+                drawCircle(Color.Black, radius = size.minDimension / 2 - stroke)
+                if (fraction != null) drawArc(Color.Black, -90f, 360f * fraction, false, Offset(stroke / 2, stroke / 2),
+                    Size(size.width - stroke, size.height - stroke), style = Stroke(stroke))
+            }
+            Icon(painterResource(icon), null, Modifier.size(CROSS_ICON), tint = Color.White)
+        }
     }
 }
 

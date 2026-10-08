@@ -1,7 +1,6 @@
 package io.github.chenxiex.calibrecloud.auth
 
 import android.net.Uri
-import androidx.core.content.FileProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
@@ -104,9 +103,10 @@ class EncryptedAuthStateStoreTest {
     fun encryptedCredentialsCannotBeExposedByBookFileProvider() {
         store.write("private-test-state")
         assertTrue(encryptedFile.isFile)
-        assertThrows(IllegalArgumentException::class.java) {
-            FileProvider.getUriForFile(context, "${context.packageName}.books", encryptedFile)
-        }
+        // The book provider resolves only published generations, never a private path.
+        val forged = Uri.parse("content://${context.packageName}.books/${encryptedFile.name}")
+            .buildUpon().appendQueryParameter("copy", "${UUID.randomUUID()}:${UUID.randomUUID()}").build()
+        assertThrows(java.io.FileNotFoundException::class.java) { context.contentResolver.openInputStream(forged)?.close() }
     }
 
     @Test

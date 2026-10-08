@@ -1,6 +1,7 @@
 package io.github.chenxiex.calibrecloud.ui
 
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.Manifest
 import android.os.Bundle
@@ -42,6 +43,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
@@ -94,12 +97,21 @@ class MainActivity : ComponentActivity() {
     private val libraryModel by lazy {
         ViewModelProvider(this, LibraryViewModel.factory(applicationContext))[LibraryViewModel::class.java]
     }
+    private val openModel by lazy {
+        ViewModelProvider(this, OpenViewModel.factory(applicationContext))[OpenViewModel::class.java]
+    }
     private val taskModel by lazy {
         ViewModelProvider(this, TaskViewModel.factory(applicationContext))[TaskViewModel::class.java]
     }
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         taskModel.refreshCapabilities()
+        pendingNotice?.let { if (it.status != null) OpenNotifications.post(this, it.status) }
+        pendingNotice = null
     }
+    /** A notice held back while the notification permission is asked for. */
+    private var pendingNotice: OpenNotice? = null
+    /** The "更多" page a tapped open notification asks for. */
+    private var moreRequest by mutableStateOf<Int?>(null)
     private var pickerOpen by mutableStateOf(false)
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pickerOpen = false
@@ -113,13 +125,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         pickerOpen = savedInstanceState?.getBoolean("picker_open") ?: false
         intent.data?.toString()?.let { oneDriveModel.callback(it); intent.data = null }
+        if (savedInstanceState == null) takeMoreRequest(intent)
         val dependencies = (application as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies
         dependencies.applicationScope.launch { dependencies.backgroundTasks.onMainOpened() }
         enableEdgeToEdge()
         setContent {
             MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
-                MainScreen(libraryModel) { page, onPage ->
-                    AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel, coverModel, cleanupModel, taskModel,
+                MainScreen(libraryModel, openModel, { launchReader(this, it.copy) }, ::notify, moreRequest, { moreRequest = null }) { page, onPage ->
+                    AuthorizationPage(authorizationModel.state, authorizationModel.busy || pickerOpen, snapshotModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel, coverModel, cleanupModel, taskModel, openModel,
                         page, onPage,
                         { if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) },
                         { oneDriveModel.login { startActivity(it) } }) {
@@ -138,10 +151,44 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         intent.data?.toString()?.let { oneDriveModel.callback(it) }
         intent.data = null
+        takeMoreRequest(intent)
+    }
+
+    private fun takeMoreRequest(intent: Intent) {
+        if (!intent.hasExtra(OpenNotifications.EXTRA_MORE_TARGET)) return
+        moreRequest = intent.getIntExtra(OpenNotifications.EXTRA_MORE_TARGET, 0)
+        intent.removeExtra(OpenNotifications.EXTRA_MORE_TARGET)
+    }
+
+    /** Posts or withdraws the open notice; the first notice asks for the permission it needs. */
+    private fun notify(notice: OpenNotice) {
+        val status = notice.status
+        if (status == null) {
+            OpenNotifications.withdraw(this)
+            return
+        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            pendingNotice = notice
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        OpenNotifications.post(this, status)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        openModel.setForeground(true)
+    }
+
+    /** Only leaving the foreground revokes a waiting open; a configuration change keeps it. */
+    override fun onStop() {
+        if (!isChangingConfigurations) openModel.setForeground(false)
+        super.onStop()
     }
 
     override fun onResume() {
         super.onResume()
+        openModel.refresh()
         oneDriveModel.restore()
         oneDriveLibraryModel.restore()
         metadataModel.restore()
@@ -170,6 +217,7 @@ private fun AuthorizationPage(
     covers: CoverViewModel,
     cleanup: CleanupViewModel,
     tasks: TaskViewModel,
+    open: OpenViewModel,
     page: Int,
     onPage: (Int) -> Unit,
     onRequestNotifications: () -> Unit,
@@ -273,7 +321,7 @@ private fun AuthorizationPage(
             } else if (page == 6) {
                 DownloadControls(downloads)
             } else if (page == 7) {
-                DownloadList(downloads)
+                DownloadList(downloads, open::open)
             } else if (page == 8) {
                 CoverScreen(covers)
             } else if (page == 9) {
@@ -350,7 +398,7 @@ private fun LocalSnapshotControls(model: LocalSnapshotViewModel, authorized: Boo
 }
 
 @Composable
-private fun OneDriveDirectoryControls(model: OneDriveLibraryViewModel, authorized: Boolean) {
+private fun OneDriveDirectoryControls(model: OneDriveLibraryViewModel, authorized: Boolean) = Column(Modifier.fillMaxSize()) {
     Text(stringResource(R.string.onedrive_directory), style = MaterialTheme.typography.titleMedium)
     Text(stringResource(if (model.rootChosen) R.string.onedrive_root_chosen else R.string.onedrive_root_pending))
     StaticButton(stringResource(R.string.onedrive_browse), authorized && !model.submitting) { model.browse() }
@@ -362,17 +410,19 @@ private fun OneDriveDirectoryControls(model: OneDriveLibraryViewModel, authorize
     )), maxLines = 2, overflow = TextOverflow.Ellipsis)
     val page = model.page
     if (page != null) {
-        Spacer(Modifier.height(8.dp))
         Text(stringResource(R.string.onedrive_current_directory, page.directoryName), maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(stringResource(R.string.onedrive_directory_page, page.page + 1))
-        val directories = page.items.filter { it.directory }
-        if (directories.isEmpty()) Text(stringResource(R.string.onedrive_directory_empty))
-        directories.take(3).forEach { item ->
-            Spacer(Modifier.height(4.dp))
-            StaticButton(item.name, authorized && !model.submitting) { model.enter(item.id) }
+        // The list takes only the height left after the paging and choosing rows, so a short screen clips
+        // a directory entry instead of squashing the buttons that finish the choice.
+        Column(Modifier.weight(1f).clipToBounds()) {
+            val directories = page.items.filter { it.directory }
+            if (directories.isEmpty()) Text(stringResource(R.string.onedrive_directory_empty))
+            directories.take(3).forEach { item ->
+                Spacer(Modifier.height(4.dp))
+                StaticButton(item.name, authorized && !model.submitting) { model.enter(item.id) }
+            }
         }
-        Spacer(Modifier.height(8.dp))
-        Row {
+        Spacer(Modifier.height(4.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
             StaticButton(stringResource(R.string.page_previous), authorized && !model.submitting && page.page > 0) {
                 model.paginate(page.page - 1)
             }
@@ -380,8 +430,10 @@ private fun OneDriveDirectoryControls(model: OneDriveLibraryViewModel, authorize
             StaticButton(stringResource(R.string.page_next), authorized && !model.submitting && page.hasNext) {
                 model.paginate(page.page + 1)
             }
+            Spacer(Modifier.width(8.dp))
+            Text(stringResource(R.string.onedrive_directory_page, page.page + 1), maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(4.dp))
         Row {
             StaticButton(stringResource(R.string.onedrive_directory_up), authorized && !model.submitting && model.canGoUp) { model.up() }
             Spacer(Modifier.width(8.dp))
