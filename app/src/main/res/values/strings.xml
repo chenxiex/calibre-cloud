@@ -56,7 +56,13 @@
     <string name="download_copy_failed">副本状态：读取或完整性检查失败</string>
     <string name="cleanup_metadata_scope">清除当前书库的数据库快照、完整索引和封面，并停止既有加载任务。保留书籍副本、下载清单、配置和保护资料。</string>
     <string name="cleanup_other_libraries_scope">清除全部非当前书库的应用副本、索引、封面和暂存，并停止相关旧任务。保留当前书库及保护资料。</string>
-    <string name="cleanup_range">范围：%1$d 个书库，%2$d 个书籍副本，可释放 %3$s 应用空间。</string>
+    <string name="cleanup_range">范围：%1$s，%2$s，可释放 %3$s 应用空间。</string>
+    <plurals name="cleanup_libraries">
+        <item quantity="other">%d 个书库</item>
+    </plurals>
+    <plurals name="cleanup_copies">
+        <item quantity="other">%d 个书籍副本</item>
+    </plurals>
     <string name="cleanup_confirm">确认清理</string>
     <string name="cleanup_cancel">取消</string>
     <string name="cleanup_busy">正在核对或清理本地缓存，请等待。</string>

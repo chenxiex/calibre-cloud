@@ -1,6 +1,5 @@
 package io.github.chenxiex.calibrecloud.ui
 
-import android.graphics.Bitmap
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.BookFormat
 import io.github.chenxiex.calibrecloud.model.BookKey
@@ -88,7 +87,6 @@ class OpenViewModelTest {
         override suspend fun cancel(task: TaskId) { cancelled += task }
         override suspend fun lastOpened(libraryId: LibraryId) = records[libraryId]
         override suspend fun saveLastOpened(value: LastOpened) { records[value.key.book.libraryId] = value }
-        override suspend fun cover(value: LastOpened): Bitmap? = null
 
         fun complete(key: CopyKey) {
             copies[key] = copyOf(key)

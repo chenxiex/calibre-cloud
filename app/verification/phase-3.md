@@ -615,3 +615,67 @@ Q53／Q54 真实服务验证（2026-10-08）：用户先在应用下载《哈姆
 
 - 用户反馈：说明小字单独占用高行留下大片空白，放大字体又易与按钮混淆。改动：“上次成功同步时间”作为“立即同步”行的第二行；其余说明保持 `bodySmall`，行高按文字实测（最多三行），不再固定 64dp。
 - 检查：`compileDebugKotlin`、`compileDebugAndroidTestKotlin`、`testDebugUnitTest`、`lintDebug` 通过（0 错误）；PA6 上以 `am instrument` 运行 `MoreScreenTest` 5 项通过（新增一行说明高度不超过 32dp 的断言），保留 debug 包数据后用户在 PA6 上查看并验收通过；之后卸载 debug 包。
+
+## 步骤 09：第三阶段端到端联验（2026-10-09）
+
+对应 AC06–AC08，以及 AC01、AC03、AC09、AC10 的本阶段新增路径。设备 PA6（Android 14，`192.168.0.72:41731`），debug 包 `io.github.chenxiex.calibrecloud.debug`。本地测试副本 `/sdcard/Download/calibre-step04-test-library`（286 本：EPUB 245、PDF 83、MOBI 28）；OneDrive 为用户登录后选择的个人测试书库 `library-a`（3 本，仅 EPUB），云端只读。截图与日志在被忽略的 `app/build/verification/step09-e2e/`。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease
+./gradlew :app:connectedDebugAndroidTest
+```
+
+- 联验前基线：上述构建命令通过，JVM **154 tests、0 failures**；debug／release lint 0 errors，各 5 项既有 warning（AGP 与 4 项依赖新版本提示）。全量 `connectedDebugAndroidTest` 在 PA6 上 **288 tests、0 failures**，18 项需要显式参数（扩展库、真实后端）的跳过。
+- 联验与用户反馈修改后，同一构建命令再次通过（JVM 154 项、0 failures；两种 lint 各 0 errors、5 项既有 warning）。修改后的平台测试结果见下文“未完成”。
+- R36：修正两处写在代码中的分隔符（列表作者间的“、”、向导位置类型无障碍标签中的“，”），五处计数短语改为 plurals（文件夹“N 本”、“N 项书籍操作失败”、移除书库与清理页的“N 个书籍副本”、“N 个书库”）；屏幕上的中文不变。`rg` 检查代码中其余中文只在注释中。
+- 日志：应用只记录任务／书库 ID、阶段、状态和字节数。联验结束时 PA6 上应用进程的 584 行日志不含书名、作者、搜索词、路径、URI 或凭据。
+- 源文件：联验前后 `md5sum` 对比测试副本全部 620 个文件，完全一致（包括下文临时改名后恢复的文件）。
+
+### 本地书库
+
+- 添加与同步：helper 在系统选择器中选择测试副本，确认框写明 debug 应用与该目录；完成向导后书库页显示“正在同步书库元数据…”，书籍随后出现（补验步骤 07 遗留项）。
+- 浏览：网格每页 12 本、24 页；标签文件夹“cooking，37 本”与数据库一致；“小说”文件夹 36 本，列表视图、标题排序 6 页，封面加载；无作者的书该行不显示内容。
+- 搜索与筛选：“Orchard” 30 条，加 PDF 筛选 9 条，均与数据库一致。未配置已读栏目时已读筛选禁用并说明原因；选择 `#read_status` 后“已读”筛选为 8 页（7×12＋11＝95 本），与数据库 95 本已读一致。
+- 打开：短按《山纪事》约 1 s 下载后弹出系统选择器，KOReader 显示正文，其导入的 `山纪事-288.epub` 与源文件 MD5 相同；底栏出现上次打开。PDF《Return to Garden 280》经 KOReader 打开，导入文件 `Return to Garden 280-285.pdf` 与源文件 MD5 相同。
+- 批量与移除：选择 4 本只提交未下载的 3 本，不启动阅读器；PDF 筛选下移除确认页说明范围内没有副本，EPUB 筛选下“将删除 2 个应用内副本，共 3.5 kB”，确认后两本的下载勾消失。
+- 无元数据打开：清除元数据缓存（“1 个书库，0 个书籍副本”）后两个副本仍在“已下载文件”，《哈姆莱特》经汉王 hvXReader 打开并成为上次打开；重新同步后各页恢复。
+- 没有阅读器（用户授权）：`pm disable-user` 暂停汉王 PDF 阅读器 `hanvon.aebr.hvreader` 与 KOReader 后打开 PDF-only 书。首次需要通知时系统弹出通知权限请求（允许）；书籍显示感叹号，通知“无法打开《Return to Garden 280》／没有能打开 PDF 的应用”，上次打开不变。随即 `pm enable` 恢复两者，PDF 处理应用恢复为 2 个；再点该书弹出选择器，通知撤回。
+- 源文件缺失（用户要求由 agent 用 ADB 操作测试副本）：把《山漫游》(284) 的 EPUB 改名后点击该书，显示感叹号，通知“无法打开《山漫游》／找不到源文件”，上次打开不变；改回原名后再点即下载并弹出选择器。
+- 阅读器兼容：汉王 PDF 阅读器 `hanvon.aebr.hvreader` 收到受控 URI 后查询 `_data` 列取文件路径，失败后提示并退出（logcat `Uri2PathUtil.getFilePathFromContentUri`）。provider 按 R28 只提供显示名与大小，不公开私有路径，该阅读器不能打开内容 URI；PDF 用 KOReader 可正常打开。汉王 hvXReader（EPUB）与 KOReader 正常。
+
+### OneDrive 书库
+
+- 用户登录并在向导中选择 `library-a`，添加后自动同步。图书馆 3 本；标签分类只有“未归类，3 本”，进入后标题与系统返回正常；作者范围搜索 “Schember” 命中 1 本；格式筛选只列出 EPUB。
+- 打开：短按《哈姆莱特》下载 254 kB 后弹出选择器（约 9 s，含下载），KOReader 导入的 `哈姆莱特-4.epub` 与应用副本 MD5 相同；上次打开随之更新。批量下载其余 2 本完成后不启动阅读器；单本“移除下载”确认页为“涉及 1 本书／格式：全部格式／将删除 1 个应用内副本，共 52 kB”，确认后下载勾消失。
+- 清除元数据缓存（“1 个书库，0 个书籍副本，可释放 635 kB”）后，从“已下载文件”用 hvXReader 打开《李尔王改名》，上次打开更新；“立即同步”约 15 s 内恢复，显示上次成功同步时间。
+
+### 书库切换与隔离
+
+- 每个书库的上次打开、搜索历史与副本各自保留：OneDrive 书库首次进入时没有上次打开、搜索历史为空（本地书库有 “Orchard”）；切回本地后为《李尔王》与本地的 24 页／下载勾，切回 OneDrive 后为《李尔王改名》与 3 个下载勾，不需要重新同步。
+- 发现并修正：在书库页切换书库后，底栏仍显示原书库的上次打开，直到切换底栏标签或应用回到前台（点击时因书库不符不执行）。`MainScreen` 增加 `libraryRevision` 参数，`MainActivity` 传入书库列表的 `revision`，书库切换、添加或移除后重新读取记录；新增 `aLibraryChangeOnTheMorePageRereadsTheLastOpenedEntry`。修正后安装同一构建（保留数据）复验，切换后底栏立即变为对应书库的书。
+- 在 OneDrive 书库点击未下载的书后立即离开并切换到本地：没有启动阅读器，本地页面没有出现该书的下载图标（两书库都有 ID 1 的书）；该下载在后台完成，任务页“已完成”可见，切回 OneDrive 后显示已下载。任务执行中被停放的组合沿用前序阶段的接口测试，本轮未在真机制造。
+- 发现的问题（[Q71](../../questions.md)，用户选 B：保持现状并在 README 说明，与 R28 已接受的风险一致）：两个书库中 ID 与书名都相同但内容不同的《哈姆莱特》都以 `哈姆莱特-4.epub` 交给阅读器，KOReader 后导入的覆盖先导入的，阅读进度目录共用。
+
+### 性能现象（PA6，代表性样本）
+
+只记录观察，不作为性能通过的结论：286 本本地库翻页、分类与搜索在点击后约 1 s 内出现结果；本地单本 EPUB 下载到弹出选择器约 1 s；OneDrive 254 kB 单本约 9 s，3 本批量约 20 s 内完成；OneDrive 3 本书库清除缓存后重新同步约 15 s。
+
+### 用户反馈后的修改
+
+- 移除下载确认页去掉下方说明小字（图书馆与“已下载文件”两处）；范围内没有副本时只显示“范围内没有已下载的副本。”。
+- 列表视图每行之间加分割线，线画在行高之内，PA6 仍为每页 6 行。
+- 底栏上次打开（Q69→Q70）：先后试过向上超出底栏的大封面与居中宽入口，用户验看后定为与“图书馆”“更多”同样式的“继续阅读”按钮：空心“打开的书”图标加单行书名（过长以省略号截断），三个按钮等宽、居中；没有记录时隐藏，两侧按钮平分底栏。底栏不再加载封面。已同步 spec R20、R29。
+- 检查：`compileDebugKotlin`、`compileDebugAndroidTestKotlin`、`testDebugUnitTest`、`lintDebug` 通过；宽入口版本的 `LibraryScreenTest`／`MoreScreenTest` 在 PA6 上 35 项通过；最终按钮版本在 PA6 上经 uiautomator 核对三个按钮各宽 358 px（约 158dp）、继续阅读居中。
+
+### 最终平台测试与验收
+
+- 回归测试：撤回修正（`LaunchedEffect(open)`）后单独运行 `aLibraryChangeOnTheMorePageRereadsTheLastOpenedEntry` 失败（`ComposeTimeoutException`），恢复修正后通过。初版测试在 `setContent` 中创建 `OpenViewModel`，重组时生成新模型并自行刷新，撤回修正也能通过；改为在组合外创建模型，并等待切换底栏引起的刷新完成后再改书库。
+- 最终构建上全量 `connectedDebugAndroidTest`：**289 tests**，18 项按设计跳过，1 项失败：`aStartedReaderBecomesTheLastOpenedEntryOfTheBottomBar` 断言继续阅读按钮与“图书馆”等宽，实际 158.67dp 对 159.11dp（1072 px 按等权分配取整，相差 1 px）。断言改为允许 1dp 以内差异后，`LibraryScreenTest` 在 PA6 上 **31 tests、0 failures**；其余测试未受该改动影响，沿用全量结果。
+- 用户于 2026-10-09 确认阅读器显示、灰度、残影、触控与无动画体验通过，并回答 Q69–Q71。
+- 清理：Gradle 在设备测试后卸载 debug 与测试包；删除 KOReader 与汉王 hvXReader 本轮导入的测试书籍及 KOReader 进度目录。阅读器内部的书架／历史记录不在应用可清理范围内，可能仍有条目。本地测试副本按用户安排保留，云端测试书库未改动。
+
+### 未完成
+
+- 无。第四阶段的写回（AC04 与 AC07 写回部分）及前两阶段的条件补验保持原范围。

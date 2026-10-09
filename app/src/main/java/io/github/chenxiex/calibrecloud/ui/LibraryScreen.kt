@@ -452,7 +452,7 @@ private fun GridCell(model: LibraryViewModel, item: LibraryItem, marks: BookMark
 private fun FolderLabel(folder: FolderRow, placeholder: Boolean, modifier: Modifier) {
     val name = folder.key.name ?: stringResource(R.string.library_unnamed_folder)
     val count = pluralStringResource(R.plurals.library_folder_books, folder.bookCount, folder.bookCount)
-    val description = stringResource(R.string.library_folder_description, name, folder.bookCount)
+    val description = stringResource(R.string.library_folder_description, name, count)
     val frame = if (placeholder) modifier.fillMaxWidth() else modifier.fillMaxWidth().background(PAPER).border(BORDER, INK)
     Column(
         frame.padding(horizontal = TIGHT_GAP, vertical = TIGHT_GAP).semantics { contentDescription = description },
@@ -468,41 +468,45 @@ private fun FolderLabel(folder: FolderRow, placeholder: Boolean, modifier: Modif
 private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, marks: BookMarks, open: Activation) {
     val row = representative(item)
     val selected = model.selected?.let { model.isSelected(item) }
-    Row(
-        Modifier.fillMaxWidth().height(height).padding(horizontal = SECTION_GAP, vertical = TIGHT_GAP).testTag(tagOf(item))
-            .activation(item, open, selected),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (selected != null) {
-            SelectionBox(selected, Modifier)
+    // The rule stays inside the measured row height, so a page of rows still fits.
+    Column(Modifier.fillMaxWidth().height(height).testTag(tagOf(item)).activation(item, open, selected)) {
+        Row(
+            Modifier.fillMaxWidth().weight(1f).padding(horizontal = SECTION_GAP, vertical = TIGHT_GAP),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (selected != null) {
+                SelectionBox(selected, Modifier)
+                Spacer(Modifier.width(LEADING_GAP))
+            }
+            CoverBox(model.coverImages[row.key], if (item is LibraryItem.Book) row.title else "",
+                Modifier.fillMaxHeight().aspectRatio(1f / COVER_ASPECT))
             Spacer(Modifier.width(LEADING_GAP))
-        }
-        CoverBox(model.coverImages[row.key], if (item is LibraryItem.Book) row.title else "",
-            Modifier.fillMaxHeight().aspectRatio(1f / COVER_ASPECT))
-        Spacer(Modifier.width(LEADING_GAP))
-        // A short row gives the title fewer lines; the author and size lines always stay.
-        Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Center) {
-            when (item) {
-                is LibraryItem.Book -> {
-                    Text(row.title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleSmall, maxLines = 2,
-                        overflow = TextOverflow.Ellipsis)
-                    // Unknown authors and sizes leave no placeholder text at all.
-                    if (row.authors.isNotEmpty()) SupportingText(row.authors.joinToString("、"))
-                    ListMeta(row)
-                }
-                is LibraryItem.Folder -> {
-                    Text(item.row.key.name ?: stringResource(R.string.library_unnamed_folder), Modifier.weight(1f, fill = false),
-                        style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    SupportingText(pluralStringResource(R.plurals.library_folder_books, item.row.bookCount, item.row.bookCount))
+            // A short row gives the title fewer lines; the author and size lines always stay.
+            Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Center) {
+                when (item) {
+                    is LibraryItem.Book -> {
+                        Text(row.title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleSmall, maxLines = 2,
+                            overflow = TextOverflow.Ellipsis)
+                        // Unknown authors and sizes leave no placeholder text at all.
+                        if (row.authors.isNotEmpty()) SupportingText(row.authors.joinToString(stringResource(R.string.list_separator)))
+                        ListMeta(row)
+                    }
+                    is LibraryItem.Folder -> {
+                        Text(item.row.key.name ?: stringResource(R.string.library_unnamed_folder), Modifier.weight(1f, fill = false),
+                            style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        SupportingText(pluralStringResource(R.plurals.library_folder_books, item.row.bookCount, item.row.bookCount))
+                    }
                 }
             }
+            val open = (item as? LibraryItem.Book)?.let { marks.of(it.row) }
+            if (item is LibraryItem.Book && (open != null || item.row.downloaded)) {
+                Spacer(Modifier.width(TIGHT_GAP))
+                if (open != null) OpenMarkIcon(item.row, open, marks.cancelOf(item.row), Modifier)
+                else DownloadMark(Modifier.padding(MARK_INSET))
+            }
         }
-        val open = (item as? LibraryItem.Book)?.let { marks.of(it.row) }
-        if (item is LibraryItem.Book && (open != null || item.row.downloaded)) {
-            Spacer(Modifier.width(TIGHT_GAP))
-            if (open != null) OpenMarkIcon(item.row, open, marks.cancelOf(item.row), Modifier)
-            else DownloadMark(Modifier.padding(MARK_INSET))
-        }
+        // Aligned with the cover and the marks rather than the page margin.
+        HorizontalRule(Modifier.padding(horizontal = SECTION_GAP))
     }
 }
 
@@ -868,6 +872,5 @@ private fun RemovalDialog(model: LibraryViewModel, removal: RemovalConfirmation)
             else pluralStringResource(R.plurals.removal_copies, copies, copies, Formatter.formatShortFileSize(context, removal.plan.bytes)),
             Modifier.testTag("removal_copies"),
         )
-        Text(stringResource(R.string.removal_scope_note), style = MaterialTheme.typography.bodySmall)
     }
 }

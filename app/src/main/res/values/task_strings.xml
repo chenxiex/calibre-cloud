@@ -13,7 +13,9 @@
     <string name="task_committing">不可中断</string>
     <string name="task_paused">已暂停</string>
     <string name="task_completed">已完成</string>
-    <string name="task_partial">已完成，%1$d 项书籍操作失败</string>
+    <plurals name="task_partial">
+        <item quantity="other">已完成，%d 项书籍操作失败</item>
+    </plurals>
     <string name="task_cancelled">已取消</string>
     <string name="task_cancelled_committed">已取消 · 源变更已提交</string>
     <string name="task_failed">失败：%1$s（%2$s）</string>

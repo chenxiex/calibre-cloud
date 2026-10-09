@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
@@ -165,7 +166,7 @@ private fun taskStatusLine(record: TaskRecord, position: Int?): String = buildLi
         }
         is TaskState.Finished -> when (val result = state.result) {
             TaskResult.Completed -> add(stringResource(R.string.task_completed))
-            is TaskResult.CompletedWithBookFailures -> add(stringResource(R.string.task_partial, result.failures.size))
+            is TaskResult.CompletedWithBookFailures -> add(pluralStringResource(R.plurals.task_partial, result.failures.size, result.failures.size))
             is TaskResult.Cancelled -> add(stringResource(if (result.commit == CommitState.NotCommitted)
                 R.string.task_cancelled else R.string.task_cancelled_committed))
             is TaskResult.Failed -> add(stringResource(R.string.task_failed, stringResource(stageResource(result.failure.stage)),

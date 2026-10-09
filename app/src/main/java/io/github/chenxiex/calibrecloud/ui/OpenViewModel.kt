@@ -2,7 +2,6 @@ package io.github.chenxiex.calibrecloud.ui
 
 import android.content.ActivityNotFoundException
 import android.content.Context
-import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -80,8 +79,6 @@ interface BookOpening {
     suspend fun lastOpened(libraryId: LibraryId): LastOpened?
 
     suspend fun saveLastOpened(value: LastOpened)
-
-    suspend fun cover(value: LastOpened): Bitmap?
 }
 
 /** Why a book could not be handed to a reader. Pages resolve the text from resources. */
@@ -164,8 +161,6 @@ class OpenViewModel(
     var launch by mutableStateOf<OpenLaunch?>(null)
         private set
     var lastOpened by mutableStateOf<LastOpened?>(null)
-        private set
-    var lastOpenedCover by mutableStateOf<Bitmap?>(null)
         private set
     var downloads by mutableStateOf<Map<BookKey, DownloadingMark>>(emptyMap())
         private set
@@ -299,7 +294,6 @@ class OpenViewModel(
                 viewModelScope.launch {
                     try {
                         port.saveLastOpened(value)
-                        lastOpenedCover = port.cover(value)
                     } catch (failure: CancellationException) {
                         throw failure
                     } catch (_: Exception) {
@@ -321,10 +315,8 @@ class OpenViewModel(
                 if (intent != null && intent?.selectionToken != selected?.token) revoke()
                 val library = selected?.identity?.id
                 val value = library?.let { port.lastOpened(it) }
-                val cover = value?.let { port.cover(it) }
                 if (port.selection()?.token != selected?.token) return@launch
                 lastOpened = value
-                lastOpenedCover = cover
             } catch (failure: CancellationException) {
                 throw failure
             } catch (_: Exception) {
@@ -564,8 +556,6 @@ class QueueBookOpening(private val dependencies: ApplicationDependencies) : Book
     override suspend fun lastOpened(libraryId: LibraryId) = dependencies.lastOpened.get(libraryId)
 
     override suspend fun saveLastOpened(value: LastOpened) = dependencies.lastOpened.save(value)
-
-    override suspend fun cover(value: LastOpened) = dependencies.covers.read(value.key.book)
 }
 
 /** Hands [copy] to the system's reader chooser for its MIME type with a read-only grant. */

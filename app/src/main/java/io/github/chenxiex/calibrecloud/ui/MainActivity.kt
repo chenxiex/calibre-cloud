@@ -88,7 +88,8 @@ class MainActivity : ComponentActivity() {
                         if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                     },
                 )
-                MainScreen(libraryModel, openModel, { launchReader(this, it.copy) }, ::notify, ::notifyBatch, moreRequest, { moreRequest = null }) { request, handled, showLibrary ->
+                MainScreen(libraryModel, openModel, { launchReader(this, it.copy) }, ::notify, ::notifyBatch, moreRequest, { moreRequest = null },
+                    librariesModel.revision) { request, handled, showLibrary ->
                     MoreScreen(models, actions, pickerOpen, request, handled, showLibrary)
                 }
             }

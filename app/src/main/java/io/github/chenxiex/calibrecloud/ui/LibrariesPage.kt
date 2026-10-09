@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -104,7 +105,8 @@ internal fun LibrariesPage(model: LibraryListViewModel, oneDrive: OneDriveAuthor
                 ?: stringResource(R.string.libraries_unnamed)
             ConfirmPanel("library_delete_dialog", !model.busy, model::cancelRemoval, model::confirmRemoval,
                 stringResource(R.string.libraries_delete_title, name)) {
-                Text(stringResource(R.string.libraries_delete_scope, plan.copies.size, Formatter.formatShortFileSize(context, plan.bytes)))
+                Text(stringResource(R.string.libraries_delete_scope,
+                    pluralStringResource(R.plurals.libraries_delete_copies, plan.copies.size, plan.copies.size), Formatter.formatShortFileSize(context, plan.bytes)))
                 if (plan.deletesCurrent) Text(stringResource(R.string.libraries_delete_current))
             }
         }
@@ -288,10 +290,11 @@ private fun TypeStep(model: LibraryListViewModel, busy: Boolean, choose: (Backen
 @Composable
 private fun BackendCard(tag: String, @DrawableRes icon: Int, name: String, description: String, enabled: Boolean, onClick: () -> Unit) {
     val tint = if (enabled) INK else DISABLED_TINT
+    val label = stringResource(R.string.wizard_type_label, name, description)
     Row(
         Modifier.fillMaxWidth().border(if (enabled) FRAME else BORDER, tint, SMALL_SHAPE)
             .tap(enabled, onClick = onClick)
-            .semantics { contentDescription = "$name，$description" }
+            .semantics { contentDescription = label }
             .padding(PAGE_MARGIN).testTag(tag),
         verticalAlignment = Alignment.CenterVertically,
     ) {

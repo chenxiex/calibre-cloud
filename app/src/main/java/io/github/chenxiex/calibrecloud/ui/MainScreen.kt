@@ -1,6 +1,5 @@
 package io.github.chenxiex.calibrecloud.ui
 
-import android.graphics.Bitmap
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -62,6 +61,8 @@ internal fun MainScreen(
     notifyBatch: (BatchNotice) -> Unit = {},
     moreRequest: Int? = null,
     onMoreRequestHandled: () -> Unit = {},
+    /** Changes whenever the current library may have changed on the more page, which keeps the tab. */
+    libraryRevision: Int = 0,
     /** The "更多" tab; its last argument shows the library tab, as finishing the add-library wizard does. */
     more: @Composable (request: Int?, onRequestHandled: () -> Unit, showLibrary: () -> Unit) -> Unit,
 ) {
@@ -76,7 +77,7 @@ internal fun MainScreen(
         moreTarget = target
         select(TAB_MORE)
     }
-    LaunchedEffect(open) { open.refresh() }
+    LaunchedEffect(open, libraryRevision) { open.refresh() }
     val launch = open.launch
     LaunchedEffect(launch) { if (launch != null) open.launched(launch, startReader(launch)) }
     val notice = open.notice
@@ -115,18 +116,19 @@ internal fun MainScreen(
             }
         }
         HorizontalRule()
-        BottomBar(tab, open.lastOpened, open.lastOpenedCover, open::openLastOpened, select)
+        BottomBar(tab, open.lastOpened, open::openLastOpened, select)
     }
 }
 
 @Composable
-private fun BottomBar(selected: Int, lastOpened: LastOpened?, cover: Bitmap?, onLastOpened: () -> Unit, onSelect: (Int) -> Unit) {
+private fun BottomBar(selected: Int, lastOpened: LastOpened?, onLastOpened: () -> Unit, onSelect: (Int) -> Unit) {
     Row(Modifier.fillMaxWidth().height(BOTTOM_BAR_HEIGHT).testTag("bottom_bar")) {
         BottomTab(stringResource(R.string.nav_library), R.drawable.ic_library_outline, R.drawable.ic_library_filled,
             selected == TAB_LIBRARY, "nav_library", Modifier.weight(1f)) { onSelect(TAB_LIBRARY) }
+        // Without a record the two tabs share the bar.
+        if (lastOpened != null) LastOpenedTab(lastOpened, Modifier.weight(1f), onLastOpened)
         BottomTab(stringResource(R.string.nav_more), R.drawable.ic_more_outline, R.drawable.ic_more_filled,
             selected == TAB_MORE, "nav_more", Modifier.weight(1f)) { onSelect(TAB_MORE) }
-        if (lastOpened != null) LastOpenedTab(lastOpened, cover, Modifier.weight(1f), onLastOpened)
     }
 }
 

@@ -49,7 +49,10 @@
     <string name="libraries_issue_wrong_directory">所选目录不是此书库的目录，授权未更改。</string>
     <string name="libraries_issue_failed">操作未完成，书库列表可能已变化，请查看后重试。</string>
     <string name="libraries_delete_title">移除书库“%1$s”？</string>
-    <string name="libraries_delete_scope">将清除此书库在本应用中的全部数据，可释放 %2$s 应用空间：%1$d 个书籍副本，以及索引、封面、未完成任务、搜索历史、上次打开记录和已读栏目设置。源书库中的文件不受影响。</string>
+    <plurals name="libraries_delete_copies">
+        <item quantity="other">%d 个书籍副本</item>
+    </plurals>
+    <string name="libraries_delete_scope">将清除此书库在本应用中的全部数据，可释放 %2$s 应用空间：%1$s，以及索引、封面、未完成任务、搜索历史、上次打开记录和已读栏目设置。源书库中的文件不受影响。</string>
     <string name="libraries_delete_current">这是当前书库；移除后没有当前书库，需要另选或添加。</string>
 
     <string name="wizard_step">%2$s（%1$d/3）</string>
@@ -59,6 +62,7 @@
     <string name="wizard_type_prompt">Calibre 书库在哪里？</string>
     <string name="wizard_type_local_description">设备存储或 SD 卡中的书库目录</string>
     <string name="wizard_type_onedrive_description">个人 OneDrive 中的书库目录</string>
+    <string name="wizard_type_label">%1$s，%2$s</string>
     <string name="wizard_type_onedrive_unavailable">OneDrive 未配置，不能选择；配置方法见 README 的“OneDrive 应用注册”。</string>
     <string name="wizard_local_prompt">在系统目录选择器中选择 Calibre 书库目录，即包含 metadata.db 的目录。仅支持设备存储或 SD 卡。</string>
     <string name="wizard_local_choose">选择目录</string>

@@ -5,27 +5,22 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -103,25 +98,23 @@ internal fun openMoreTarget(status: OpenStatus): Int? {
     }
 }
 
-/** The last opened book of the current library in the bottom bar: its cover, or its title in a frame. */
+/**
+ * The continue-reading button between the bottom tabs: an open book over the last opened title, cut
+ * with an ellipsis. It opens a book rather than showing a page, so it never takes the shown-tab state.
+ */
 @Composable
-internal fun LastOpenedTab(value: LastOpened, cover: Bitmap?, modifier: Modifier, onClick: () -> Unit) {
+internal fun LastOpenedTab(value: LastOpened, modifier: Modifier, onClick: () -> Unit) {
     val description = stringResource(R.string.last_opened_description, value.title)
-    Box(
+    Column(
         modifier.fillMaxHeight().testTag("nav_last_opened")
             .tap(onClick = onClick)
             .semantics(mergeDescendants = true) { contentDescription = description }
-            .padding(vertical = TIGHT_GAP),
-        contentAlignment = Alignment.Center,
+            .padding(horizontal = TIGHT_GAP),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        if (cover != null) {
-            val image = remember(cover) { cover.asImageBitmap() }
-            Image(image, null, Modifier.fillMaxHeight().aspectRatio(1f / COVER_ASPECT).border(BORDER, INK), contentScale = ContentScale.Fit)
-        } else {
-            Box(Modifier.fillMaxHeight().fillMaxWidth(0.9f).border(BORDER, INK).padding(horizontal = TIGHT_GAP), contentAlignment = Alignment.Center) {
-                Text(value.title, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-            }
-        }
+        Icon(painterResource(R.drawable.ic_open_book), null, Modifier.size(ICON_SIZE), tint = INK)
+        Text(value.title, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

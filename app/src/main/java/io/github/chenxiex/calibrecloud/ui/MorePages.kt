@@ -204,7 +204,6 @@ internal fun DownloadsPage(model: DownloadViewModel, onOpen: (CopyKey, String) -
                     else stringResource(R.string.removal_formats, plan.formats.map { it.value }.sorted().joinToString(stringResource(R.string.removal_format_separator))))
                 Text(if (plan.copies.isEmpty()) stringResource(R.string.removal_no_copies)
                     else pluralStringResource(R.plurals.removal_copies, plan.copies.size, plan.copies.size, Formatter.formatShortFileSize(context, plan.bytes)))
-                Text(stringResource(R.string.removal_scope_note), style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -254,7 +253,9 @@ internal fun CleanupPage(model: CleanupViewModel, kind: CleanupKind) = FormColum
     Text(stringResource(if (kind == CleanupKind.METADATA) R.string.cleanup_metadata_scope else R.string.cleanup_other_libraries_scope))
     val plan = model.plan?.takeIf { it.kind == kind }
     if (plan != null) {
-        Text(stringResource(R.string.cleanup_range, plan.libraries.size, plan.copies.size, Formatter.formatShortFileSize(context, plan.bytes)),
+        Text(stringResource(R.string.cleanup_range,
+            pluralStringResource(R.plurals.cleanup_libraries, plan.libraries.size, plan.libraries.size),
+            pluralStringResource(R.plurals.cleanup_copies, plan.copies.size, plan.copies.size), Formatter.formatShortFileSize(context, plan.bytes)),
             Modifier.testTag("cleanup_range"))
         Row(horizontalArrangement = Arrangement.spacedBy(SECTION_GAP)) {
             ActionButton(stringResource(R.string.cleanup_cancel), !model.busy, Modifier.testTag("cleanup_cancel"), ButtonKind.TEXT) { model.cancel() }

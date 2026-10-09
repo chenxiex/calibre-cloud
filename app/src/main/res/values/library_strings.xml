@@ -35,7 +35,7 @@
     <string name="library_read_label">已读</string>
     <string name="library_downloaded_description">已下载</string>
     <string name="library_source_missing">源不可用</string>
-    <string name="library_folder_description">%1$s，%2$d 本</string>
+    <string name="library_folder_description">%1$s，%2$s</string>
     <string name="library_category_more">更多</string>
     <string name="library_category_more_chosen">更多：%1$s</string>
     <string name="library_category_columns_title">选择分类栏目</string>
@@ -96,8 +96,7 @@
     <plurals name="removal_copies">
         <item quantity="other">将删除 %1$d 个应用内副本，共 %2$s</item>
     </plurals>
-    <string name="removal_no_copies">范围内没有已下载的副本；范围内未完成的下载仍会停止。</string>
-    <string name="removal_scope_note">范围内未完成的下载和更新会一并停止；其它格式的副本和源书库文件不受影响。</string>
+    <string name="removal_no_copies">范围内没有已下载的副本。</string>
     <string name="removal_cancel">取消</string>
     <string name="removal_confirm">移除</string>
     <string name="notice_channel">批量操作的问题</string>

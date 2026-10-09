@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -25,6 +26,7 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -43,6 +45,7 @@ import androidx.compose.ui.test.swipeRight
 import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.width
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.chenxiex.calibrecloud.library.LibraryCopies
 import io.github.chenxiex.calibrecloud.library.LibraryImports
@@ -85,6 +88,7 @@ import io.github.chenxiex.calibrecloud.state.LastOpened
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.emptyFlow
+import kotlin.math.abs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -174,7 +178,9 @@ class LibraryScreenTest {
         val records = mutableMapOf<LibraryId, LastOpened>()
         val cancelled = mutableListOf<TaskId>()
         val active = MutableStateFlow<List<ActiveDownload>>(emptyList())
-        override suspend fun selection() = this@LibraryScreenTest.selection
+        /** Reads of the selection; a last-opened refresh makes two, the second after the record. */
+        @Volatile var selectionReads = 0
+        override suspend fun selection() = this@LibraryScreenTest.selection.also { selectionReads++ }
         override suspend fun locate(key: CopyKey) = available[key]?.let { LocatedCopy.Available(it) } ?: LocatedCopy.Missing
         override suspend fun download(key: CopyKey, selectionToken: UUID) =
             TaskId(UUID(2, key.book.sourceId)).also { tasks.getOrPut(it) { MutableStateFlow(TaskState.Queued) } }
@@ -185,7 +191,6 @@ class LibraryScreenTest {
         override suspend fun cancel(task: TaskId) { cancelled += task }
         override suspend fun lastOpened(libraryId: LibraryId) = records[libraryId]
         override suspend fun saveLastOpened(value: LastOpened) { records[value.key.book.libraryId] = value }
-        override suspend fun cover(value: LastOpened): Bitmap? = null
     }
 
     private fun copyOf(key: CopyKey, title: String) = DownloadedCopy(key, CompleteCopyLocation(libraryId, UUID.randomUUID()), title, 9,
@@ -728,15 +733,50 @@ class LibraryScreenTest {
         }
         awaitTag("book_1")
         compose.onNodeWithTag("nav_last_opened").assertDoesNotExist()
+        val tabs = listOf("nav_library", "nav_more").map { compose.onNodeWithTag(it).getBoundsInRoot() }
         compose.onNodeWithTag("book_1").performClick()
         awaitTag("nav_last_opened")
         compose.onNodeWithTag("nav_last_opened").assert(hasContentDescription("上次打开：书籍1"))
+        // Without a record the tabs share the bar; the button then sits between them, as wide as each, labelled with the title.
+        assertEquals(tabs[0].right, tabs[1].left)
+        compose.onNodeWithTag("nav_last_opened").assert(hasText("书籍1"))
+        val shown = listOf("nav_library", "nav_more").map { compose.onNodeWithTag(it).getBoundsInRoot() }
+        val entry = compose.onNodeWithTag("nav_last_opened").getBoundsInRoot()
+        assertEquals(shown[0].right, entry.left)
+        assertEquals(entry.right, shown[1].left)
+        // Equal weights split the bar to whole pixels, so widths may differ by one pixel.
+        assertTrue(abs((shown[0].width - entry.width).value) < 1f)
         compose.onNode(hasTestTag("open_warning_1"), useUnmergedTree = true).assertDoesNotExist()
         compose.runOnIdle { assertEquals(listOf(key(1)), launched) }
         // The record reopens the same format from any page.
         compose.onNodeWithTag("nav_more").performClick()
         compose.onNodeWithTag("nav_last_opened").performClick()
         compose.waitUntil(10_000) { launched.size == 2 }
+    }
+
+    @Test
+    fun aLibraryChangeOnTheMorePageRereadsTheLastOpenedEntry() {
+        library(listOf(book(1)))
+        opening.records[libraryId] = LastOpened(key(1), "书籍1")
+        var libraries by mutableIntStateOf(0)
+        // Created once: a new open model would reread the record by itself.
+        val library = model()
+        val open = OpenViewModel(opening)
+        compose.setContent {
+            MainScreen(library, open, { LaunchOutcome.STARTED }, libraryRevision = libraries) { _, _, _ -> Text("更多页") }
+        }
+        awaitTag("nav_last_opened")
+        val reads = opening.selectionReads
+        compose.onNodeWithTag("nav_more").performClick()
+        // The refresh of the tab change runs outside compose idling; it must finish before the library changes.
+        compose.waitUntil(10_000) { opening.selectionReads >= reads + 2 }
+        compose.onNodeWithTag("nav_last_opened").assertExists()
+        // Switching or removing the library on the more page keeps the tab; the entry still follows the new library.
+        compose.runOnIdle {
+            selection = null
+            libraries++
+        }
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("nav_last_opened").fetchSemanticsNodes().isEmpty() }
     }
 
     @Test
