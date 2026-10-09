@@ -610,3 +610,8 @@ Q53／Q54 真实服务验证（2026-10-08）：用户先在应用下载《哈姆
 ### 验收
 
 - 用户于 2026-10-09 在 PA6 上验收通过（整体风格、紧凑程度、灰度辨识、残影与无动画）。覆盖层点击被拒的问题按用户要求另行修改 helper，单独提交；debug 包在 helper 真机复验后卸载。
+
+### 菜单说明行调整（2026-10-09）
+
+- 用户反馈：说明小字单独占用高行留下大片空白，放大字体又易与按钮混淆。改动：“上次成功同步时间”作为“立即同步”行的第二行；其余说明保持 `bodySmall`，行高按文字实测（最多三行），不再固定 64dp。
+- 检查：`compileDebugKotlin`、`compileDebugAndroidTestKotlin`、`testDebugUnitTest`、`lintDebug` 通过（0 错误）；PA6 上以 `am instrument` 运行 `MoreScreenTest` 5 项通过（新增一行说明高度不超过 32dp 的断言），保留 debug 包数据后用户在 PA6 上查看并验收通过；之后卸载 debug 包。

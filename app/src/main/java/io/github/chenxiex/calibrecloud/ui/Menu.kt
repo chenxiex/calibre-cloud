@@ -17,8 +17,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -26,11 +28,17 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.isSpecified
 import io.github.chenxiex.calibrecloud.R
 
-/** A row of a grouped menu or settings list; each kind has a fixed height, so pages are laid out by height. */
+/**
+ * A row of a grouped menu or settings list. Each kind has a fixed height except notes, which take the
+ * height of their text, so pages are laid out by height.
+ */
 internal sealed interface MenuEntry {
     val height: Dp
 
@@ -42,9 +50,12 @@ internal sealed interface MenuEntry {
         override val height get() = HEADING_HEIGHT
     }
 
-    /** Explains why the choices that follow are unavailable. */
+    /**
+     * Explains why the choices that follow are unavailable. It keeps the small supporting style so it is
+     * not taken for an option, and is as tall as its text (up to [NOTE_LINES] lines) so no blank row is left.
+     */
     class Note(val tag: String, val text: String) : MenuEntry {
-        override val height get() = NOTE_HEIGHT
+        override val height get() = Dp.Unspecified
     }
 
     /** A place in an order, moved by the up and down buttons at the row end (tagged `<tag>_up` and `<tag>_down`). */
@@ -58,14 +69,15 @@ internal sealed interface MenuEntry {
     /**
      * An action, or an option when [selected] is set: a leading radio shows it (a check box when
      * [multiple] options may be chosen) and a chosen option is bold (Q65). [trailing] is drawn at the row
-     * end of a chosen option, such as the sort direction, and [trailingDescription] states it.
+     * end of a chosen option, such as the sort direction, and [trailingDescription] states it. A short
+     * [supporting] line under the label, such as when the action last succeeded, makes it a two-line row.
      */
     class Choice(
         val tag: String, val label: String, @DrawableRes val icon: Int? = null, val selected: Boolean? = null,
         val multiple: Boolean = false, @DrawableRes val trailing: Int? = null, val trailingDescription: String? = null,
-        val enabled: Boolean = true, val action: () -> Unit,
+        val enabled: Boolean = true, val supporting: String? = null, val action: () -> Unit,
     ) : MenuEntry {
-        override val height get() = ROW_HEIGHT
+        override val height get() = if (supporting == null) ROW_HEIGHT else TWO_LINE_ROW_HEIGHT
     }
 }
 
@@ -75,8 +87,21 @@ internal sealed interface MenuEntry {
  */
 @Composable
 internal fun PagedEntries(entries: List<MenuEntry>, page: Int, onPage: (Int) -> Unit, modifier: Modifier, tagPrefix: String, focus: Int? = null) {
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val style = MaterialTheme.typography.bodySmall
     BoxWithConstraints(modifier.fillMaxSize()) {
-        val blocks = entries.map { PageBlock(it.height.value, keepWithNext = it is MenuEntry.Heading, separator = it is MenuEntry.Rule) }
+        val width = with(density) { (maxWidth - PAGE_MARGIN * 2).roundToPx() }.coerceAtLeast(1)
+        val heights = remember(entries, width, style, density) {
+            entries.map { entry ->
+                if (entry !is MenuEntry.Note) entry.height else with(density) {
+                    measurer.measure(entry.text, style, maxLines = NOTE_LINES, constraints = Constraints(maxWidth = width)).size.height.toDp()
+                } + TIGHT_GAP * 2
+            }
+        }
+        val blocks = entries.mapIndexed { index, it ->
+            PageBlock(heights[index].value, keepWithNext = it is MenuEntry.Heading, separator = it is MenuEntry.Rule)
+        }
         val pages = paginate(blocks, maxHeight.value).takeIf { it.size <= 1 }
             ?: paginate(blocks, maxHeight.value - PAGE_BAR_HEIGHT.value)
         val current = page.coerceIn(0, pages.size - 1)
@@ -87,25 +112,26 @@ internal fun PagedEntries(entries: List<MenuEntry>, page: Int, onPage: (Int) -> 
         }
         PagedArea(current, pages.size, tagPrefix, onPage, Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize()) {
-                pages[current].forEach { MenuRow(entries[it]) }
+                pages[current].forEach { MenuRow(entries[it], heights[it]) }
             }
         }
     }
 }
 
+/** Draws [entry] at [height]; a note without one wraps its text. */
 @Composable
-internal fun MenuRow(entry: MenuEntry) {
+internal fun MenuRow(entry: MenuEntry, height: Dp = entry.height) {
     when (entry) {
-        MenuEntry.Rule -> Box(Modifier.fillMaxWidth().height(entry.height), contentAlignment = Alignment.Center) { InsetRule() }
-        is MenuEntry.Note -> Box(Modifier.fillMaxWidth().height(entry.height).padding(horizontal = PAGE_MARGIN, vertical = TIGHT_GAP).testTag(entry.tag),
-            contentAlignment = Alignment.CenterStart) {
-            Text(entry.text, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        MenuEntry.Rule -> Box(Modifier.fillMaxWidth().height(height), contentAlignment = Alignment.Center) { InsetRule() }
+        is MenuEntry.Note -> Box(Modifier.fillMaxWidth().then(if (height.isSpecified) Modifier.height(height) else Modifier)
+            .padding(horizontal = PAGE_MARGIN, vertical = TIGHT_GAP).testTag(entry.tag), contentAlignment = Alignment.CenterStart) {
+            Text(entry.text, style = MaterialTheme.typography.bodySmall, maxLines = NOTE_LINES, overflow = TextOverflow.Ellipsis)
         }
-        is MenuEntry.Heading -> Box(Modifier.fillMaxWidth().height(entry.height).padding(horizontal = PAGE_MARGIN),
+        is MenuEntry.Heading -> Box(Modifier.fillMaxWidth().height(height).padding(horizontal = PAGE_MARGIN),
             contentAlignment = Alignment.BottomStart) {
             Heading(entry.label, Modifier.padding(bottom = TIGHT_GAP))
         }
-        is MenuEntry.Ordered -> ListItem(entry.label, Modifier.testTag(entry.tag), entry.height) {
+        is MenuEntry.Ordered -> ListItem(entry.label, Modifier.testTag(entry.tag), height) {
             IconAction(R.drawable.ic_arrow_up, entry.upDescription, entry.canUp, Modifier.testTag("${entry.tag}_up"), onClick = entry.onUp)
             IconAction(R.drawable.ic_arrow_down, entry.downDescription, entry.canDown, Modifier.testTag("${entry.tag}_down"), onClick = entry.onDown)
         }
@@ -118,13 +144,14 @@ internal fun MenuRow(entry: MenuEntry) {
                     selected = chosen
                     if (chosen || entry.trailing != null) stateDescription = state
                 },
-                entry.height, entry.enabled, bold = chosen, onClick = entry.action,
+                height, entry.enabled, bold = chosen, onClick = entry.action,
                 role = when {
                     entry.selected == null -> Role.Button
                     entry.multiple -> Role.Checkbox
                     else -> Role.RadioButton
                 },
                 leading = if (entry.selected == null && entry.icon == null) null else ({ ChoiceLeading(entry) }),
+                supporting = entry.supporting?.let { text -> { SupportingText(text) } },
                 trailing = entry.trailing?.let { icon -> { IconSlot(icon, null, enabled = entry.enabled) } },
             )
         }
@@ -142,3 +169,6 @@ private fun ChoiceLeading(entry: MenuEntry.Choice) {
         }
     }
 }
+
+/** Notes longer than this are cut with an ellipsis. */
+private const val NOTE_LINES = 3

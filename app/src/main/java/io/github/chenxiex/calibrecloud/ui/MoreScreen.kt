@@ -243,8 +243,8 @@ internal fun MenuSearchResults(entries: List<MenuEntry>, query: String) {
 
 /**
  * The menu in five groups. The metadata group describes the library first: none chosen (with the
- * settings entry), no complete import, or when the last sync succeeded; a running or failed sync adds
- * its state. [includeConditional] false leaves out that state and the extra settings entry, for search.
+ * settings entry) or no complete import; a running or failed sync adds its state, and the sync action
+ * shows when the last sync succeeded. [includeConditional] false leaves out that state and the extra settings entry, for search.
  */
 @Composable
 private fun menuEntries(models: MoreModels, show: (MorePage) -> Unit, includeConditional: Boolean = true): List<MenuEntry> {
@@ -256,17 +256,20 @@ private fun menuEntries(models: MoreModels, show: (MorePage) -> Unit, includeCon
     return buildList {
         add(MenuEntry.Heading(stringResource(R.string.more_group_metadata)))
         if (includeConditional) {
-            add(MenuEntry.Note("more_library_state", when {
+            when {
                 metadata.readFailed -> stringResource(R.string.metadata_local_error)
                 !configured -> stringResource(R.string.more_unconfigured)
                 imported == null -> stringResource(R.string.more_no_metadata)
-                else -> stringResource(R.string.metadata_synced_at,
-                    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(imported.importedAt)))
-            }))
+                else -> null
+            }?.let { add(MenuEntry.Note("more_library_state", it)) }
             if (syncState != null) add(MenuEntry.Note("more_sync_status", syncState))
             if (!configured) add(MenuEntry.Choice("more_configure", stringResource(R.string.more_configure)) { show(MorePage.LIBRARIES) })
         }
-        add(MenuEntry.Choice("more_sync", stringResource(R.string.task_sync_now), enabled = configured && !metadata.busy) {
+        // The last success is one short line, so it sits under the sync action instead of taking a note.
+        val syncedAt = imported?.takeIf { includeConditional && configured && !metadata.readFailed }?.let {
+            stringResource(R.string.metadata_synced_at, DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it.importedAt)))
+        }
+        add(MenuEntry.Choice("more_sync", stringResource(R.string.task_sync_now), enabled = configured && !metadata.busy, supporting = syncedAt) {
             metadata.synchronize()
         })
         add(MenuEntry.Choice("more_clear_metadata", stringResource(R.string.more_clear_metadata), enabled = configured) {

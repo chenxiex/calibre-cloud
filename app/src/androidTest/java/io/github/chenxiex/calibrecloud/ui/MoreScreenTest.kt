@@ -10,6 +10,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
@@ -19,6 +20,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
 import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -35,6 +37,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -70,8 +73,8 @@ class MoreScreenTest {
 
     private fun menu(): List<MenuEntry> = buildList {
         add(MenuEntry.Heading("元数据"))
-        add(MenuEntry.Note("note", "上次成功同步：昨天"))
-        add(MenuEntry.Choice("more_sync", "立即同步元数据") {})
+        add(MenuEntry.Note("note", "上次同步失败：无法连接。原有效元数据保留。"))
+        add(MenuEntry.Choice("more_sync", "立即同步元数据", supporting = "上次成功同步：昨天") {})
         add(MenuEntry.Choice("more_clear_metadata", "清除元数据缓存") {})
         add(MenuEntry.Rule)
         add(MenuEntry.Heading("存储与缓存"))
@@ -104,8 +107,11 @@ class MoreScreenTest {
     @Test
     fun aShortMenuPagesWithoutLeavingAHeadingAtThePageEnd() {
         var page by mutableIntStateOf(0)
-        compose.setContent { Box(Modifier.height(240.dp)) { PagedEntries(menu(), page, { page = it }, Modifier, "more") } }
+        compose.setContent { Box(Modifier.height(240.dp).width(360.dp)) { PagedEntries(menu(), page, { page = it }, Modifier, "more") } }
         compose.onNodeWithTag("more_page_status").assertTextEquals("1 / 3")
+        compose.onNodeWithText("上次成功同步：昨天").assertIsDisplayed()
+        // A one-line note is only as tall as its text, not a fixed three-line row.
+        assertTrue(compose.onNodeWithTag("note").getUnclippedBoundsInRoot().height <= 32.dp)
         compose.onNodeWithTag("more_previous_page").assertIsNotEnabled()
         compose.onNodeWithTag("more_last_page").performClick()
         compose.onNodeWithTag("more_page_status").assertTextEquals("3 / 3")

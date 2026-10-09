@@ -65,8 +65,6 @@ internal val ROW_HEIGHT = 48.dp
 internal val TWO_LINE_ROW_HEIGHT = 56.dp
 /** Group headings of menus, set on the row's bottom so they sit with the rows that follow. */
 internal val HEADING_HEIGHT = 36.dp
-/** Explanations inside menus: up to three supporting lines inside a [TIGHT_GAP] padding, at a slightly enlarged font scale. */
-internal val NOTE_HEIGHT = 64.dp
 /** A group divider of menus: the line and the space around it. */
 internal val RULE_HEIGHT = 9.dp
 
