@@ -63,3 +63,10 @@ ADB 短诊断记录命令类别、阶段、耗时、预算及状态，保留最�
 
 - `python3 -m unittest discover -s .agents/skills/android-device-verification/scripts -p 'test_*.py'`：**69 项通过**（新增 3 项，见 `test_safety.py`）。
 - PA6／API 34 实机：`flow --elements-only` 中长按书籍并确认选择计数出现、再点击“完成”返回，2 步全部确认；单次 `long-press` 命令选中搜索结果中的书籍，后置条件确认。详见[第三阶段记录](../../../../app/verification/phase-3.md)。
+
+## 2026-10-09：覆盖层面板
+
+第三阶段步骤 08 的真机核对中，选择模式“更多”弹出菜单里的“移除下载”被拒（`target_point_obstructed`）。UI 树显示覆盖层由全屏的可点击遮罩（点外部关闭，无资源 ID）和其后的面板组成，下方页面已被系统从树中剔除；原规则不论树中顺序，把遮罩视为覆盖，因此所有覆盖层面板与确认页都无法按元素点击。现按绘制顺序放行：目标各级祖先之前的兄弟节点及其子树在目标下方，其中的同包节点不算覆盖；之后的兄弟、目标之上的节点和异包节点仍拒绝。
+
+- 先添加 `test_safety.py` 的 2 项测试，在旧规则下“遮罩上的面板可点击”失败；修复后 `python3 -m unittest discover -s .agents/skills/android-device-verification/scripts -p 'test_*.py'`：**71 项通过**。另一项确认面板之上的节点、面板后的异包节点及面板之后的兄弟仍拒绝。
+- PA6／API 34 实机（debug 包与扩展库副本）：`flow --elements-only` 打开书库页“移除”确认页，并按元素点击确认页中的“取消”，2 步全部确认，书库未移除（产物在被忽略的 `app/build/verification/phase3-step08-style/helper-overlay/`）。选择模式弹出菜单中“移除下载”因所选书籍无副本处于禁用，未作为本次证据。

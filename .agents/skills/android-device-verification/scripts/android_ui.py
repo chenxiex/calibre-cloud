@@ -380,11 +380,23 @@ def action_target(root, selector, actionable='clickable'):
     if intersection[0] >= intersection[2] or intersection[1] >= intersection[3]:
         raise UiError('target_outside_clickable_ancestor')
     x, y = (intersection[0] + intersection[2]) // 2, (intersection[1] + intersection[3]) // 2
+    # Earlier siblings of the target's lineage, and their subtrees, are drawn beneath it, such as the
+    # dismiss scrim behind an overlay panel; only same-package nodes there may overlap the point.
+    beneath = set()
+    for member in lineage:
+        parent = parents.get(member)
+        if parent is None:
+            continue
+        for sibling in parent:
+            if sibling is member:
+                break
+            beneath.update(sibling.iter())
     for other in root.iter('node'):
         if other in lineage:
             continue
-        # Reject any overlapping interactive/foreign node, regardless of tree ordering.
-        if other.get('clickable') != 'true' and other.get('long-clickable') != 'true' and other.get('package') == selector['package']:
+        # Reject any other overlapping interactive node and any foreign node.
+        if other.get('package') == selector['package'] and (other in beneath or (
+                other.get('clickable') != 'true' and other.get('long-clickable') != 'true')):
             continue
         box = bounds(other)
         if box[0] <= x < box[2] and box[1] <= y < box[3]:

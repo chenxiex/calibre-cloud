@@ -76,6 +76,23 @@ class SafetyTests(unittest.TestCase):
                 ui.tap(adb, TARGET, POST, precondition=PRE)
             self.assertEqual([], adb.taps)
 
+    def test_panel_drawn_over_an_earlier_scrim_is_tapped(self):
+        scrim = node('scrim', '[0,0][200,200]', inner=node('beneath', '[0,0][200,200]'))
+        before = screen(node('root', '[0,0][200,200]', 'false', inner=scrim + node('panel', '[0,0][100,80]', 'false', inner=node())))
+        adb = FakeAdb([before, before, screen(node('done'))])
+        ui.tap(adb, TARGET, POST, precondition=PRE)
+        self.assertEqual([(50, 40)], adb.taps)
+
+    def test_nodes_drawn_over_the_panel_or_foreign_beneath_it_still_block(self):
+        panel = node('panel', '[0,0][100,80]', 'false', inner=node())
+        for content in (node('scrim', '[0,0][200,200]', package='personal.app') + panel,
+                panel + node('scrim', '[0,0][200,200]'),
+                node('panel', '[0,0][100,80]', 'false', inner=node() + node('above', '[0,0][100,80]'))):
+            adb = FakeAdb([screen(node('root', '[0,0][200,200]', 'false', inner=content))])
+            with self.assertRaisesRegex(ui.UiError, 'obstructed|foreign'):
+                ui.tap(adb, TARGET, POST, precondition=PRE)
+            self.assertEqual([], adb.taps)
+
     def test_leaf_center_used(self):
         before = screen(node('parent', inner=node(bounds='[0,0][20,20]', clickable='false')))
         adb = FakeAdb([before, before, screen(node('done'))])
