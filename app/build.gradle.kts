@@ -7,13 +7,14 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
-// All three properties form one configuration: incomplete forks retain local authorization.
-val oneDriveProperties = Properties().apply {
+val localProperties = Properties().apply {
     val source = rootProject.file("local.properties")
     if (source.isFile) source.inputStream().use { load(it) }
 }
+
+// All three properties form one configuration: incomplete forks retain local authorization.
 val oneDriveKeys = listOf("onedrive.clientId", "onedrive.redirectUri", "onedrive.debugRedirectUri")
-val oneDriveValues = oneDriveKeys.map { oneDriveProperties.getProperty(it)?.trim().orEmpty() }
+val oneDriveValues = oneDriveKeys.map { localProperties.getProperty(it)?.trim().orEmpty() }
 val oneDriveConfigured = oneDriveValues.all { it.isNotEmpty() }
 
 // Emit Java literals without allowing a property to escape the generated string.
@@ -65,6 +66,20 @@ val oneDriveCallbacks = if (oneDriveConfigured) {
     mapOf("release" to release, "debug" to debug)
 } else emptyMap()
 
+// Upgrades in place require every release to be signed by the same key; without any of these
+// properties release stays unsigned, while a partial configuration is a mistake and fails the build.
+val releaseSigningKeys = listOf("release.storeFile", "release.storePassword", "release.keyAlias", "release.keyPassword")
+val releaseSigningValues = releaseSigningKeys.map { localProperties.getProperty(it)?.trim().orEmpty() }
+val releaseSigningConfigured = releaseSigningValues.any { it.isNotEmpty() }
+if (releaseSigningConfigured) {
+    releaseSigningKeys.zip(releaseSigningValues).firstOrNull { it.second.isEmpty() }?.let {
+        throw GradleException("${it.first}: required when any release.* signing property is set")
+    }
+    if (!rootProject.file(releaseSigningValues[0]).isFile) {
+        throw GradleException("${releaseSigningKeys[0]}: keystore file not found")
+    }
+}
+
 android {
     namespace = "io.github.chenxiex.calibrecloud"
     compileSdk = 36
@@ -80,6 +95,15 @@ android {
         testApplicationId = "io.github.chenxiex.calibrecloud.debug.test"
     }
 
+    if (releaseSigningConfigured) {
+        signingConfigs.create("release") {
+            storeFile = rootProject.file(releaseSigningValues[0])
+            storePassword = releaseSigningValues[1]
+            keyAlias = releaseSigningValues[2]
+            keyPassword = releaseSigningValues[3]
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
@@ -88,6 +112,7 @@ android {
         }
         release {
             resValue("string", "app_name", "Calibre Cloud")
+            if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release")
         }
     }
 

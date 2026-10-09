@@ -97,11 +97,41 @@
 
 | 变体 | application ID | 名称 | APK |
 | --- | --- | --- | --- |
-| release | `io.github.chenxiex.calibrecloud` | Calibre Cloud | `build/outputs/apk/release/app-release-unsigned.apk` |
+| release | `io.github.chenxiex.calibrecloud` | Calibre Cloud | 已配置签名时为 `build/outputs/apk/release/app-release.apk`，否则为 `app-release-unsigned.apk` |
 | debug | `io.github.chenxiex.calibrecloud.debug` | Calibre Cloud Debug | `build/outputs/apk/debug/app-debug.apk` |
 | debug AndroidTest | `io.github.chenxiex.calibrecloud.debug.test` | 测试包 | `build/outputs/apk/androidTest/debug/app-debug-androidTest.apk` |
 
-release 产物未签名。debug 使用独立包名和应用数据目录，可与正式版共存。
+未配置签名时 release 产物不签名。debug 使用独立包名、应用数据目录、provider authority 和 OAuth 回调，可与正式版共存；设备验证流程只安装、操作和卸载 debug 与测试包。
+
+## 发布签名
+
+覆盖升级要求每个版本都使用同一密钥签名，且 `versionCode` 递增；签名密钥丢失或更换后只能卸载重装，应用数据随之清除。应用状态数据库也拒绝降级。
+
+1. 生成发布密钥库（密码按提示输入）：
+
+    ```bash
+    keytool -genkeypair -v -keystore calibre-cloud-release.jks -alias calibre-cloud -keyalg RSA -keysize 4096 -validity 36500
+    ```
+
+    密钥库与密码自行异地备份，不提交到仓库（`*.jks`、`*.keystore` 已被 Git 忽略）。只保存在开发容器内的文件可能随容器或卷重建丢失。
+
+2. 在根目录 `local.properties` 中添加以下四项。追加前确认文件末尾已有换行；`release.storeFile` 可用绝对路径或相对项目根目录的路径。
+
+    ```properties
+    release.storeFile=calibre-cloud-release.jks
+    release.storePassword=<密钥库密码>
+    release.keyAlias=calibre-cloud
+    release.keyPassword=<密钥密码>
+    ```
+
+3. 构建并核对签名证书：
+
+    ```bash
+    ./gradlew :app:assembleRelease
+    $ANDROID_HOME/build-tools/36.0.0/apksigner verify --print-certs app/build/outputs/apk/release/app-release.apk
+    ```
+
+四项都不填时 release 保持未签名；只填部分或密钥库文件不存在时构建失败并指出对应属性。发布新版本前在 [app/build.gradle.kts](build.gradle.kts) 中递增 `versionCode`，并按需更新 `versionName`。
 
 ## OneDrive 配置
 
