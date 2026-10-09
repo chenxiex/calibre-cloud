@@ -73,7 +73,10 @@ data class BookFailure(val book: BookKey, val error: TaskError)
 sealed interface TaskResult {
     /** For write workflows, completion means source commit AND successful re-import. */
     data object Completed : TaskResult
-    /** Valid targets were committed and re-imported; invalid entries remain individually visible. */
+    /**
+     * A write: valid targets were committed and re-imported; invalid entries remain individually visible.
+     * A cover batch: the other covers were loaded; these books keep their placeholder.
+     */
     data class CompletedWithBookFailures(val failures: FrozenSet<BookFailure>) : TaskResult {
         init { require(failures.isNotEmpty()) }
     }
@@ -119,8 +122,12 @@ data class TaskRecord(
         val completed = result == TaskResult.Completed || result is TaskResult.CompletedWithBookFailures
         require(!completed || commit !is CommitState.Unknown)
         if (result is TaskResult.CompletedWithBookFailures) {
-            val write = submission.request as? TaskRequest.ReadStatusWrite
-            require(write != null && result.failures.all { it.book in write.books })
+            val books = when (val request = submission.request) {
+                is TaskRequest.ReadStatusWrite -> request.books
+                is TaskRequest.CoverLoad -> request.books
+                else -> null
+            }
+            require(books != null && result.failures.all { it.book in books })
         }
         require(!completed || submission.request !is TaskRequest.ReadStatusWrite ||
             commit == CommitState.Confirmed)

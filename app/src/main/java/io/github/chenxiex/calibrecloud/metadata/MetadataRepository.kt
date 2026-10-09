@@ -54,6 +54,7 @@ class MetadataRepository(
     private val io: CoroutineDispatcher,
 ) {
     private val publication = Mutex()
+    @Volatile private var parsedCache: Pair<Pair<LibraryId, UUID>, ParsedLibrary>? = null
 
     /**
      * One metadata sync of the current selection from [source]: an unchanged source database only
@@ -257,18 +258,30 @@ class MetadataRepository(
     }
 
     private fun imported(db: SQLiteDatabase, identity: LibraryIdentity): ImportedLibrary? = db.rawQuery(
-        "SELECT import_generation, imported_at, payload, read_column_id, read_column_lookup FROM metadata_imports WHERE library_id = ?",
+        "SELECT import_generation, imported_at, read_column_id, read_column_lookup FROM metadata_imports WHERE library_id = ?",
         arrayOf(identity.id.value.toString()),
     ).use { cursor ->
         if (!cursor.moveToFirst()) return@use null
-        val parsed = parsedLibraryFromJson(cursor.getString(2))
-        val column = if (cursor.isNull(3)) null else CustomColumnId(cursor.getLong(3), cursor.getString(4))
+        val generation = UUID.fromString(cursor.getString(0))
+        val parsed = parsed(db, identity, generation) ?: return@use null
+        val column = if (cursor.isNull(2)) null else CustomColumnId(cursor.getLong(2), cursor.getString(3))
         val status = when {
             column == null -> ReadColumnStatus.NOT_CONFIGURED
             parsed.columns.any { it.id == column && it.datatype == "bool" && it.supported } -> ReadColumnStatus.VALID
             else -> ReadColumnStatus.INVALID
         }
-        ImportedLibrary(identity, UUID.fromString(cursor.getString(0)), cursor.getLong(1), parsed, column, status)
+        ImportedLibrary(identity, generation, cursor.getLong(1), parsed, column, status)
+    }
+
+    /** Every import publishes a new generation with its payload, so a parsed payload is reused for the same generation. */
+    private fun parsed(db: SQLiteDatabase, identity: LibraryIdentity, generation: UUID): ParsedLibrary? {
+        parsedCache?.let { (key, value) -> if (key == identity.id to generation) return value }
+        val parsed = db.rawQuery("SELECT payload FROM metadata_imports WHERE library_id = ? AND import_generation = ?",
+            arrayOf(identity.id.value.toString(), generation.toString())).use {
+            if (it.moveToFirst()) parsedLibraryFromJson(it.getString(0)) else null
+        } ?: return null
+        parsedCache = (identity.id to generation) to parsed
+        return parsed
     }
 
     private fun compatibleBinding(db: SQLiteDatabase, location: LibraryLocation, parsed: ParsedLibrary): LibraryIdentity? {

@@ -109,7 +109,7 @@ class CacheReadOnlyAcceptanceTest {
         }
         if (book.hasCover) {
             assertIdle(dependencies)
-            val task = created(dependencies.coverService.submit(bookKey, selected.token))
+            val task = created(dependencies.coverService.submit(listOf(bookKey), selected.token))
             awaitOnly(dependencies, task)
             requireNotNull(dependencies.covers.read(bookKey)) { "Real cover task must publish a readable cache" }.recycle()
         }

@@ -1,5 +1,8 @@
 package io.github.chenxiex.calibrecloud.ui
 
+import kotlinx.coroutines.flow.transformWhile
+import kotlinx.coroutines.flow.map
+import io.github.chenxiex.calibrecloud.tasks.background.CpuAwake
 import android.content.Context
 import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
@@ -80,11 +83,11 @@ data class SearchSession(
 interface LibraryCovers {
     suspend fun read(book: BookKey): Bitmap?
 
-    /** Enqueues (or reuses) the low-priority load of one missing cover; null when it was rejected. */
-    suspend fun request(book: BookKey, selectionToken: UUID): TaskId?
+    /** Enqueues (or reuses) the low-priority batch of the shown page's missing covers; null when it was rejected. */
+    suspend fun request(books: List<BookKey>, selectionToken: UUID): TaskId?
 
-    /** Suspends until the task has finished in any way. */
-    suspend fun awaitFinished(task: TaskId)
+    /** Every change of the batch, ending once it has finished in any way. */
+    fun changes(task: TaskId): Flow<TaskState>
 
     suspend fun wake()
 }
@@ -97,16 +100,15 @@ class QueueLibraryCovers(
 ) : LibraryCovers {
     override suspend fun read(book: BookKey) = repository.read(book)
 
-    override suspend fun request(book: BookKey, selectionToken: UUID): TaskId? = when (val result = service.submit(book, selectionToken)) {
+    override suspend fun request(books: List<BookKey>, selectionToken: UUID): TaskId? = when (val result = service.submit(books, selectionToken)) {
         is SubmissionResult.Created -> result.taskId
         is SubmissionResult.Reused -> result.taskId
         is SubmissionResult.Promoted -> result.taskId
         is SubmissionResult.Rejected -> null
     }
 
-    override suspend fun awaitFinished(task: TaskId) {
-        queue.observe(task).first { it.state is TaskState.Finished }
-    }
+    override fun changes(task: TaskId): Flow<TaskState> =
+        queue.observe(task).map { it.state }.transformWhile { emit(it); it !is TaskState.Finished }
 
     override suspend fun wake() = coordinator.requestRun()
 }
@@ -133,6 +135,8 @@ class LibraryViewModel(
     private val historyStore: SearchHistoryStore,
     private val batch: LibraryBatch,
     private val formatPriority: suspend () -> List<BookFormat> = { LibraryRequest.DEFAULT_FORMAT_PRIORITY },
+    /** Keeps the CPU running while a page load or a finished cover's read is under way. */
+    private val keepAwake: suspend (suspend () -> Unit) -> Unit = { it() },
     /** State of the unfinished library sync of the selection with this token, or null when none is under way. */
     private val syncState: suspend (UUID) -> TaskState? = { null },
 ) : ViewModel() {
@@ -210,7 +214,8 @@ class LibraryViewModel(
     private var rootFirstVisible = 0
     private var libraryFirstVisible = 0
     private val requested = mutableSetOf<BookKey>()
-    private val waiting = mutableMapOf<BookKey, Job>()
+    /** The batches of the shown page being followed, each showing its covers as they are published. */
+    private val waiting = mutableMapOf<TaskId, Job>()
     private var pageKey: Any? = null
     private var pageBooks: Set<BookKey> = emptySet()
     private var coverToken: UUID? = null
@@ -562,7 +567,7 @@ class LibraryViewModel(
         loading?.cancel()
         loading = viewModelScope.launch {
             try {
-                load(generation)
+                keepAwake { load(generation) }
             } catch (failure: CancellationException) {
                 throw failure
             } catch (_: Exception) {
@@ -640,6 +645,8 @@ class LibraryViewModel(
             if (key != pageKey) {
                 pageKey = key
                 requested.clear()
+                // The batch of the page left behind is replaced by this page's (R10).
+                cancelCoverWaits()
             }
             loadCovers(shown, selected.token, generation)
             return
@@ -668,33 +675,37 @@ class LibraryViewModel(
         val keys = rows.map { it.key }.toSet()
         pageBooks = keys
         coverImages.keys.retainAll(keys)
-        waiting.keys.filter { it !in keys }.forEach { waiting.remove(it)?.cancel() }
-        viewModelScope.launch {
-            var submitted = false
-            for (row in rows.distinctBy { it.key }) {
-                if (row.key in coverImages) continue
-                try {
+        viewModelScope.launch { keepAwake {
+            try {
+                val missing = mutableListOf<BookKey>()
+                for (row in rows.distinctBy { it.key }) {
+                    if (row.key in coverImages) continue
                     val cached = covers.read(row.key)
-                    if (generation != loadGeneration) return@launch
-                    if (cached != null) {
-                        coverImages[row.key] = cached
-                        continue
-                    }
-                    if (!row.hasCover || !requested.add(row.key)) continue
-                    val task = covers.request(row.key, token) ?: continue
-                    if (generation != loadGeneration) return@launch
-                    submitted = true
-                    waiting[row.key] = viewModelScope.launch {
-                        covers.awaitFinished(task)
-                        if (row.key in pageBooks && coverToken == token) covers.read(row.key)?.let { coverImages[row.key] = it }
-                    }
-                } catch (failure: CancellationException) {
-                    throw failure
-                } catch (_: Exception) {
-                    // The title placeholder stays.
+                    if (generation != loadGeneration) return@keepAwake
+                    if (cached != null) coverImages[row.key] = cached
+                    else if (row.hasCover && row.key !in requested) missing.add(row.key)
                 }
+                if (missing.isEmpty()) return@keepAwake
+                val task = covers.request(missing, token) ?: return@keepAwake
+                requested.addAll(missing)
+                // Followed even if a newer load of the same page started meanwhile: it does not submit again.
+                if (task !in waiting) waiting[task] = viewModelScope.launch {
+                    covers.changes(task).collect { keepAwake { showPublished(token) } }
+                }
+                covers.wake()
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // The title placeholders stay.
             }
-            if (submitted) try { covers.wake() } catch (failure: CancellationException) { throw failure } catch (_: Exception) { }
+        } }
+    }
+
+    /** Reads the shown page's covers that have no image yet; a batch publishes them one at a time. */
+    private suspend fun showPublished(token: UUID) {
+        for (key in pageBooks) {
+            if (key in coverImages || coverToken != token) continue
+            covers.read(key)?.let { if (key in pageBooks && coverToken == token) coverImages[key] = it }
         }
     }
 
@@ -710,7 +721,8 @@ class LibraryViewModel(
                     dependencies.taskQueue.events, dependencies.searchHistory,
                     QueueLibraryBatch(dependencies.copyService, dependencies.taskCoordinator, dependencies.maintenance),
                     dependencies.state::formatPriority,
-                    { token -> dependencies.taskQueue.latestLibrarySync(token)?.state?.takeUnless { it is TaskState.Finished } },
+                    keepAwake = CpuAwake(context.applicationContext, "library-page", counted = true)::during,
+                    syncState = { token -> dependencies.taskQueue.latestLibrarySync(token)?.state?.takeUnless { it is TaskState.Finished } },
                 ))!!
             }
         }

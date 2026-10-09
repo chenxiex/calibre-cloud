@@ -56,12 +56,14 @@ internal fun TaskScreen(model: TaskViewModel) {
  * page as fit: a short type title, a line of small status text (a pin-to-top arrow marks user requests,
  * the scheduling position while it only waits its turn, otherwise stage and percentage, waiting reasons or
  * result), and on the right only the control icons its state supports, or a check once completed.
+ * Automatic cover batches of the shown tab fold into one row by default (R18); tapping it shows them.
  */
 @Composable
 internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFailed: Boolean = false, onControl: (TaskRecord, TaskControl) -> Unit) {
     var page by rememberSaveable { mutableIntStateOf(0) }
     var tab by rememberSaveable { mutableStateOf(TaskTab.ACTIVE) }
     var source by rememberSaveable { mutableStateOf(TaskSourceFilter.ALL) }
+    var coversExpanded by rememberSaveable { mutableStateOf(false) }
     Column(Modifier.fillMaxSize().testTag("task_page")) {
         if (failed) Text(stringResource(R.string.task_local_error), Modifier.padding(horizontal = PAGE_MARGIN, vertical = TIGHT_GAP))
         if (operationFailed) Text(stringResource(R.string.task_control_error), Modifier.padding(horizontal = PAGE_MARGIN, vertical = TIGHT_GAP))
@@ -98,20 +100,66 @@ internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFaile
             EmptyMessage(stringResource(R.string.task_empty), Modifier.testTag("task_empty"))
             return@Column
         }
+        val lines = foldCoverBatches(shown, coversExpanded)
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
             val whole = listGeometry(maxWidth.value, maxHeight.value, TWO_LINE_ROW_HEIGHT.value).rows
-            val rows = if (shown.size <= whole) whole
+            val rows = if (lines.size <= whole) whole
                 else listGeometry(maxWidth.value, (maxHeight - PAGE_BAR_HEIGHT).value, TWO_LINE_ROW_HEIGHT.value).rows
-            val pages = pageCount(shown.size, rows)
+            val pages = pageCount(lines.size, rows)
             val current = page.coerceIn(0, pages - 1)
             PagedArea(current, pages, "tasks", { page = it }, Modifier.fillMaxSize()) {
                 Column(Modifier.fillMaxSize()) {
-                    shown.drop(current * rows).take(rows).forEach { record ->
-                        TaskRow(record, pending.indexOf(record).takeIf { it >= 0 }?.plus(1), onControl)
+                    lines.drop(current * rows).take(rows).forEach { line ->
+                        when (line) {
+                            is TaskLine.Single -> TaskRow(line.record, pending.indexOf(line.record).takeIf { it >= 0 }?.plus(1), onControl)
+                            is TaskLine.CoverGroup -> CoverGroupRow(line, coversExpanded,
+                                pending.indexOf(line.shown).takeIf { it >= 0 }?.plus(1)) { coversExpanded = !coversExpanded }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/** A row of the task list: one task, or the folded automatic cover batches of the tab. */
+internal sealed interface TaskLine {
+    data class Single(val record: TaskRecord) : TaskLine
+    /** [shown] is the batch whose state the row repeats: the running one, otherwise the first listed. */
+    data class CoverGroup(val batches: List<TaskRecord>, val shown: TaskRecord) : TaskLine
+}
+
+private fun TaskRecord.automaticCovers() = submission.request is TaskRequest.CoverLoad && effectiveOrigin.priority == TaskPriority.LOW
+
+/** Two or more automatic cover batches share one row where the first of them is; expanded, they follow it. */
+internal fun foldCoverBatches(records: List<TaskRecord>, expanded: Boolean): List<TaskLine> {
+    val batches = records.filter { it.automaticCovers() }
+    if (batches.size < 2) return records.map { TaskLine.Single(it) }
+    val group = TaskLine.CoverGroup(batches, batches.firstOrNull { it.state is TaskState.Running } ?: batches.first())
+    return buildList {
+        records.forEach { record ->
+            if (!record.automaticCovers()) add(TaskLine.Single(record))
+            else if (record == batches.first()) {
+                add(group)
+                if (expanded) batches.forEach { add(TaskLine.Single(it)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CoverGroupRow(group: TaskLine.CoverGroup, expanded: Boolean, position: Int?, onToggle: () -> Unit) {
+    ListItem(
+        stringResource(R.string.task_type_cover), Modifier.testTag("task_cover_group"), TWO_LINE_ROW_HEIGHT,
+        bold = true, divider = true, onClick = onToggle,
+        supporting = {
+            SupportingText(listOf(pluralStringResource(R.plurals.task_cover_batches, group.batches.size, group.batches.size),
+                taskStatusLine(group.shown, position)).joinToString(stringResource(R.string.task_status_separator)),
+                Modifier.testTag("task_status"))
+        },
+    ) {
+        IconSlot(if (expanded) R.drawable.ic_arrow_up else R.drawable.ic_arrow_down,
+            stringResource(if (expanded) R.string.task_collapse else R.string.task_expand), Modifier.testTag("task_cover_toggle"))
     }
 }
 
@@ -166,7 +214,9 @@ private fun taskStatusLine(record: TaskRecord, position: Int?): String = buildLi
         }
         is TaskState.Finished -> when (val result = state.result) {
             TaskResult.Completed -> add(stringResource(R.string.task_completed))
-            is TaskResult.CompletedWithBookFailures -> add(pluralStringResource(R.plurals.task_partial, result.failures.size, result.failures.size))
+            is TaskResult.CompletedWithBookFailures -> add(pluralStringResource(
+                if (record.submission.request is TaskRequest.CoverLoad) R.plurals.task_partial_cover else R.plurals.task_partial,
+                result.failures.size, result.failures.size))
             is TaskResult.Cancelled -> add(stringResource(if (result.commit == CommitState.NotCommitted)
                 R.string.task_cancelled else R.string.task_cancelled_committed))
             is TaskResult.Failed -> add(stringResource(R.string.task_failed, stringResource(stageResource(result.failure.stage)),

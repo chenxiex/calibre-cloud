@@ -3,10 +3,11 @@ package io.github.chenxiex.calibrecloud.storage.covers
 import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.system.Os
+import android.system.OsConstants
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
-import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -41,6 +42,11 @@ class CoverRepository(
     } }
 
     /** Cheap control-loop gate: never reparses the complete imported payload for each image block. */
+    /** Whether a complete image is recorded for [book]; a resumed batch skips it. */
+    internal suspend fun cached(book: BookKey): Boolean = withContext(io) {
+        database.readableDatabase.rawQuery("SELECT 1 FROM cover_cache WHERE $KEY", args(book)).use { it.moveToFirst() }
+    }
+
     internal suspend fun isCurrent(book: BookKey, importGeneration: UUID): Boolean = withContext(io) {
         val db = database.readableDatabase
         state.current(db)?.identity?.id == book.libraryId && db.rawQuery(
@@ -48,14 +54,35 @@ class CoverRepository(
             arrayOf(book.libraryId.value.toString())).use { it.moveToFirst() && it.getString(0) == importGeneration.toString() }
     }
 
-    /** The producer has decoded/scaled and fsynced an immutable generation before this atomic gate. */
-    suspend fun publish(book: BookKey, generation: UUID, importGeneration: UUID, taskId: UUID): Boolean = withContext(io) { access.withLock {
+    /**
+     * Publishes one cover of the running batch [taskId] from [staged], a decoded, scaled and fsynced PNG
+     * outside the cache. Moving it into the cache, syncing the directories and recording it happen under
+     * the repository lock, so quota collection by a cover published at the same time never sees an
+     * unrecorded generation. Returns false, leaving no file in the cache, when the gate refuses it. The
+     * batch's own result is recorded when it ends.
+     */
+    suspend fun publish(book: BookKey, staged: File, importGeneration: UUID, taskId: UUID): Boolean = withContext(io) { access.withLock {
+        require(staged.isFile && staged.length() in 1..MAX_ENCODED_BYTES)
+        val generation = UUID.randomUUID()
         val complete = file(book, generation)
-        require(complete.isFile && complete.length() in 1..MAX_ENCODED_BYTES)
+        require(complete.parentFile!!.mkdirs() || complete.parentFile!!.isDirectory)
+        if (complete.exists() || !staged.renameTo(complete)) throw java.io.IOException()
+        var recorded = false
+        try {
+            sync(complete.parentFile!!)
+            sync(complete.parentFile!!.parentFile!!)
+            sync(complete.parentFile!!.parentFile!!.parentFile!!)
+            sync(staged.parentFile!!)
+            recorded = record(book, generation, complete, importGeneration, taskId)
+        } finally { if (!recorded) complete.delete() }
+        recorded
+    } }
+
+    private fun record(book: BookKey, generation: UUID, complete: File, importGeneration: UUID, taskId: UUID): Boolean {
         val db = database.writableDatabase
         db.beginTransaction()
         val published = try {
-            if (state.current(db)?.identity?.id != book.libraryId) return@withLock false
+            if (state.current(db)?.identity?.id != book.libraryId) return false
             val currentImport = db.rawQuery("SELECT import_generation FROM metadata_imports WHERE library_id = ?",
                 arrayOf(book.libraryId.value.toString())).use { it.moveToFirst() && it.getString(0) == importGeneration.toString() }
             val identity = db.rawQuery("SELECT source_uuid FROM metadata_books WHERE library_id = ? AND source_id = ?",
@@ -63,14 +90,13 @@ class CoverRepository(
             val allowed = db.rawQuery("SELECT control FROM queued_tasks WHERE task_id = ? AND revoked = 0", arrayOf(taskId.toString())).use {
                 it.moveToFirst() && it.isNull(0)
             }
-            if (!currentImport || !identity || !allowed) return@withLock false
+            if (!currentImport || !identity || !allowed) return false
             val values = ContentValues().apply {
                 put("library_id", book.libraryId.value.toString()); put("source_id", book.sourceId)
                 put("source_uuid", book.sourceUuid.toString()); put("file_generation", generation.toString())
                 put("size_bytes", complete.length()); put("last_access", System.currentTimeMillis())
             }
             if (db.update("cover_cache", values, KEY, args(book)) == 0) db.insertOrThrow("cover_cache", null, values)
-            DurableTaskQueue.completePublication(db, taskId)
             db.setTransactionSuccessful()
             true
         } finally { db.endTransaction() }
@@ -80,8 +106,13 @@ class CoverRepository(
                 android.util.Log.w("CoverCache", "stage=quota_cleanup_failed")
             }
         }
-        published
-    } }
+        return published
+    }
+
+    private fun sync(directory: File) {
+        val descriptor = Os.open(directory.path, OsConstants.O_RDONLY, 0)
+        try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+    }
 
     /** Only cover generations are quota-managed; books and protected recovery data are outside this root. */
     private fun collect() {

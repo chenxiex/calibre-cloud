@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit
 @RunWith(AndroidJUnit4::class)
 class QueueWorkerPlatformTest {
     @Test
-    fun productionWakeupsRunTwoOneTimeWorkersWithoutCreatingSourceTasks() = runBlocking<Unit> {
+    fun productionWakeupsRunOneTimeWorkersWithoutCreatingSourceTasks() = runBlocking<Unit> {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         assertTrue(BuildConfig.DEBUG)
         assertTrue(context.packageName.endsWith(".debug"))
@@ -45,10 +45,15 @@ class QueueWorkerPlatformTest {
         val previous = tagged(manager).map { it.id }.toSet()
         val allPrevious = all(manager).map { it.id }.toSet()
         try {
+            // A wakeup that has not started yet covers a second request; only one the platform already
+            // started needs a successor. A wakeup after the chain finished runs exactly one more worker.
             dependencies.backgroundTasks.wake()
             dependencies.backgroundTasks.wake()
-            val finished = awaitTwoSucceeded(manager, previous)
-            assertEquals(2, finished.size)
+            val first = awaitSucceeded(manager, previous, 1).size
+            assertTrue(first in 1..2)
+            dependencies.backgroundTasks.wake()
+            val finished = awaitSucceeded(manager, previous, first + 1)
+            assertEquals(first + 1, finished.size)
             assertTrue(finished.all { it.state == WorkInfo.State.SUCCEEDED })
             // WorkerWrapper increments the persisted count when changing ENQUEUED to RUNNING;
             // WorkInfo therefore reports 1 after a successful first execution, not the worker's
@@ -75,9 +80,9 @@ class QueueWorkerPlatformTest {
         }
     }
 
-    private suspend fun awaitTwoSucceeded(manager: WorkManager, previous: Set<UUID>): List<WorkInfo> = withTimeout(30_000) {
+    private suspend fun awaitSucceeded(manager: WorkManager, previous: Set<UUID>, count: Int): List<WorkInfo> = withTimeout(30_000) {
         var workers = tagged(manager).filter { it.id !in previous }
-        while (workers.size < 2 || workers.any { !it.state.isFinished }) {
+        while (workers.size < count || workers.any { !it.state.isFinished }) {
             delay(100)
             workers = tagged(manager).filter { it.id !in previous }
         }

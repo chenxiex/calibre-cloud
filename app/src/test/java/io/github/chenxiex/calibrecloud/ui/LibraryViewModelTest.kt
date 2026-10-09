@@ -92,11 +92,11 @@ class LibraryViewModelTest {
     private class FakeCovers : LibraryCovers {
         val requested = mutableListOf<BookKey>()
         override suspend fun read(book: BookKey): Bitmap? = null
-        override suspend fun request(book: BookKey, selectionToken: UUID): TaskId? {
-            requested += book
+        override suspend fun request(books: List<BookKey>, selectionToken: UUID): TaskId? {
+            requested += books
             return TaskId(UUID.randomUUID())
         }
-        override suspend fun awaitFinished(task: TaskId) = awaitCancellation()
+        override fun changes(task: TaskId): kotlinx.coroutines.flow.Flow<TaskState> = kotlinx.coroutines.flow.flow { awaitCancellation() }
         override suspend fun wake() {}
     }
 

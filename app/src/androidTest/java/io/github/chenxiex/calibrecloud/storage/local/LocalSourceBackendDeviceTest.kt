@@ -49,6 +49,27 @@ class LocalSourceBackendDeviceTest {
         assertEquals(before, (backend.version(tree, path) as LocalSourceResult.Available).value)
     }
 
+    /** Requires the granted sample to be imported; reads only. */
+    @Test
+    fun realSafLocatesPathsDirectlyAndReportsMissingOnes() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
+        val tree = dependencies.state.current()?.location?.let { dependencies.state.accessKey(it) }
+        assertNotNull("Authorize and import the dedicated sample copy first", tree)
+        val book = requireNotNull(dependencies.metadata.currentImport()).metadata.books.first { it.hasCover }
+        val backend = dependencies.localBackend
+        val cover = RelativeSourcePath("${book.path.value}/cover.jpg")
+        val resolved = (backend.resolve(tree!!, cover) as LocalSourceResult.Available).value
+        assertTrue(resolved.locator.documentId.endsWith("/${cover.value}"))
+        val (bytes, version) = (backend.readSmall(tree, cover, 12 * 1024 * 1024) as LocalSourceResult.Available).value
+        assertTrue(bytes.isNotEmpty())
+        assertEquals(version, (backend.version(tree, cover) as LocalSourceResult.Available).value)
+        for (missing in listOf("${book.path.value}/missing.jpg", "missing-directory/cover.jpg", book.path.value)) {
+            val result = backend.resolve(tree, RelativeSourcePath(missing))
+            assertEquals(missing, StorageErrorKind.SOURCE_MISSING, (result as LocalSourceResult.Failed).error.kind)
+        }
+    }
+
     @Test
     fun realSafSnapshotSourceReadsCancellationAndRevocation() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

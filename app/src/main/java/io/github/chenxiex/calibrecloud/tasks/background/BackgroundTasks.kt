@@ -12,6 +12,8 @@ import io.github.chenxiex.calibrecloud.storage.api.LibrarySources
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
@@ -50,7 +52,37 @@ class BackgroundTasks(private val context: Context, private val dependencies: Ap
         }
     }
 
-    suspend fun wake(): Unit = enqueue(WAKE_NAME, false, 0)
+    private val wakeOrder = Mutex()
+    /** Held from a wakeup requested while the app is in the foreground until a worker starts or the app leaves it. */
+    private val wakePending = CpuAwake(context, "queue-wakeup", counted = false)
+    @Volatile private var foreground = false
+
+    /** The main screen started or stopped; a background wakeup never holds the CPU before its worker starts. */
+    fun setForeground(value: Boolean) {
+        foreground = value
+        if (!value) wakePending.release()
+    }
+
+    /** A queue worker holds the platform job's wake lock from here on. */
+    internal fun workerStarted() = wakePending.release()
+
+    /**
+     * A wakeup that has not started yet drains every request committed before it runs, so another
+     * successor is appended only when the chain is empty or its last worker is already running.
+     */
+    suspend fun wake(): Unit = wakeOrder.withLock {
+        if (foreground) wakePending.hold()
+        try {
+            val pending = withContext(Dispatchers.IO) {
+                WorkManager.getInstance(context).getWorkInfosForUniqueWork(WAKE_NAME).get()
+                    .any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.BLOCKED }
+            }
+            if (!pending) enqueue(WAKE_NAME, false, 0)
+        } catch (failure: Throwable) {
+            wakePending.release()
+            throw failure
+        }
+    }
 
     internal suspend fun scheduleWaiting(retryWake: Boolean): Boolean {
         val pending = dependencies.taskQueue.list().filter {

@@ -47,11 +47,14 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     /** Installed by the process container; called after durable submission/control, never inside a transaction. */
     var onWake: suspend () -> Unit = {}
     private val revision = MutableStateFlow(0L)
+    /** Raised by every accepted submission and control; a running task's safe boundary rereads the queue only after a raise. */
+    private val requests = java.util.concurrent.atomic.AtomicLong()
+    @Volatile private var noHighPendingAt = 0L
     private val eventBus = MutableSharedFlow<TaskEvent>(extraBufferCapacity = 64)
     override val events: Flow<TaskEvent> = eventBus.asSharedFlow()
     override fun observe(taskId: TaskId): Flow<TaskRecord> = revision.mapNotNull { get(taskId)?.record }.distinctUntilChanged()
 
-    suspend fun get(id: TaskId): QueueEntry? = withContext(io) { entries(database.readableDatabase).find { it.record.id == id } }
+    suspend fun get(id: TaskId): QueueEntry? = withContext(io) { entry(database.readableDatabase, id) }
     internal suspend fun isActive(record: TaskRecord): Boolean = withContext(io) { active(database.readableDatabase, record) }
 
     /** Library that was current when a candidate was submitted, or that its import activated. */
@@ -120,7 +123,10 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             SubmissionResult.Created(id)
         }
         changed.forEach { publish(it) }
-        if (result !is SubmissionResult.Rejected) onWake()
+        if (result !is SubmissionResult.Rejected) {
+            requests.incrementAndGet()
+            onWake()
+        }
         result
     }
 
@@ -199,7 +205,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     suspend fun control(id: TaskId, command: TaskControl): Boolean = withContext(io) {
         var changed: TaskRecord? = null
         val accepted = transaction {
-            val entry = entries(this).find { it.record.id == id } ?: return@transaction false
+            val entry = entry(this, id) ?: return@transaction false
             if (isRevoked(this, id)) return@transaction false
             val r = entry.record
             val allowed = when (command) {
@@ -229,14 +235,62 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             true
         }
         changed?.let { publish(it) }
-        if (accepted) onWake()
+        if (accepted) {
+            requests.incrementAndGet()
+            onWake()
+        }
         accepted
+    }
+
+    /**
+     * Whether the running task [id] should yield at a safe boundary (R17): it is still low priority and
+     * a high-priority request waits in line. Requests whose conditions are unmet show as waiting after
+     * the next selection, so a yield for them happens at most once.
+     */
+    internal suspend fun highPriorityWaiting(id: TaskId): Boolean {
+        val seen = requests.get()
+        if (seen == noHighPendingAt) return false
+        return withContext(io) {
+            val all = entries(database.readableDatabase)
+            val self = all.find { it.record.id == id }?.record
+            val waiting = self?.scheduling?.priority == TaskPriority.LOW && all.any {
+                it.record.id != id && it.record.scheduling.priority == TaskPriority.HIGH && it.record.state == TaskState.Queued
+            }
+            if (!waiting) noHighPendingAt = seen
+            waiting
+        }
+    }
+
+    /** A cover batch of the same library submitted after [id], which replaces it (R10). */
+    internal suspend fun newerCoverBatch(id: TaskId): Boolean = withContext(io) {
+        val all = entries(database.readableDatabase)
+        val self = all.find { it.record.id == id }?.record ?: return@withContext false
+        all.any { other -> other.record.submission.request is TaskRequest.CoverLoad && other.record.libraryId == self.libraryId &&
+            other.record.scheduling.sequence.value > self.scheduling.sequence.value && other.record.originalOrigin == TaskOrigin.VISIBLE_COVER }
+    }
+
+    /**
+     * Ends the unfinished automatic cover batches of [libraryId] other than [keep] that have not started;
+     * a running one ends itself after its current cover (R10).
+     */
+    internal suspend fun supersedeCoverBatches(libraryId: io.github.chenxiex.calibrecloud.model.LibraryId, keep: TaskId) = withContext(io) {
+        val changed = transaction {
+            entries(this).filter { entry ->
+                val record = entry.record
+                record.id != keep && record.submission.request is TaskRequest.CoverLoad && record.libraryId == libraryId &&
+                    record.effectiveOrigin == TaskOrigin.VISIBLE_COVER && record.state !is TaskState.Finished && record.state !is TaskState.Running
+            }.map { entry ->
+                entry.copy(record = entry.record.copy(state = TaskState.Finished(TaskResult.Cancelled(entry.record.commit)), controls = noControls),
+                    control = null, checkpoint = null).also { save(this, it) }.record
+            }
+        }
+        changed.forEach { publish(it) }
     }
 
     /** Internal handler boundary: persists before returning, preserving concurrent promotion/control. */
     internal suspend fun update(id: TaskId, cachePublished: Boolean = false, action: (QueueEntry) -> QueueEntry): QueueEntry = withContext(io) {
         val updated = transaction {
-            val old = requireNotNull(entries(this).find { it.record.id == id })
+            val old = requireNotNull(entry(this, id))
             action(old).also { next ->
                 require(next.record.id == old.record.id && next.record.submission == old.record.submission)
                 require(next.record.scheduling == old.record.scheduling && next.record.promotion == old.record.promotion)
@@ -255,7 +309,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
      */
     internal suspend fun throttle(id: TaskId, until: Long) = withContext(io) {
         transaction {
-            val record = entries(this).find { it.record.id == id }?.record ?: return@transaction
+            val record = entry(this, id)?.record ?: return@transaction
             val scope = throttleScope(this, record) ?: return@transaction
             execSQL("""INSERT INTO source_throttle(scope, until) VALUES(?, ?)
                 ON CONFLICT(scope) DO UPDATE SET until = max(until, excluded.until)""", arrayOf<Any>(scope, until))
@@ -317,7 +371,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
 
     private fun promote(db: SQLiteDatabase, id: TaskId, origin: TaskOrigin, changed: MutableList<TaskRecord>, visited: MutableSet<TaskId>) {
         if (!visited.add(id)) return
-        val entry = entries(db).first { it.record.id == id }
+        val entry = requireNotNull(entry(db, id))
         entry.record.submission.dependencies.forEach { promote(db, it.taskId, origin, changed, visited) }
         if (entry.record.state !is TaskState.Finished && entry.record.scheduling.priority == TaskPriority.LOW) {
             val promotion = PriorityPromotion(origin, sequence(db))
@@ -333,7 +387,8 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         return QueueSequence(next)
     }
 
-    private fun entries(db: SQLiteDatabase): List<QueueEntry> = db.rawQuery("SELECT record, stage, attempts, retry_at, checkpoint, checkpoint_backend, checkpoint_version, recovery_required, control, source_sync, missing_path FROM queued_tasks ORDER BY rowid", null).use { c ->
+    private fun entry(db: SQLiteDatabase, id: TaskId): QueueEntry? = entries(db, "WHERE task_id = ?", arrayOf(id.value.toString())).singleOrNull()
+    private fun entries(db: SQLiteDatabase, where: String = "", args: Array<String>? = null): List<QueueEntry> = db.rawQuery("SELECT record, stage, attempts, retry_at, checkpoint, checkpoint_backend, checkpoint_version, recovery_required, control, source_sync, missing_path FROM queued_tasks $where ORDER BY rowid", args).use { c ->
         buildList { while (c.moveToNext()) add(QueueEntry(TaskCodec.decode(c.getString(0)), TaskStage.entries.first { it.code == c.getString(1) },
             c.getInt(2), c.getLong(3), if (c.isNull(4)) null else RecoveryCheckpoint(UUID.fromString(c.getString(4)),
                 if (c.isNull(5)) null else FileVersion(BackendKind.entries.first { backendCode(it) == c.getString(5) }, c.getString(6))),
@@ -358,7 +413,17 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         try { return db.action().also { db.setTransactionSuccessful() } } finally { db.endTransaction() }
     }
     internal fun invalidateObservers() { revision.update { it + 1 } }
-    internal suspend fun revoked(id: TaskId): Boolean = withContext(io) { isRevoked(database.readableDatabase, id) }
+    /** Safe-boundary command for one running task, read by primary key without decoding the record. */
+    internal suspend fun boundaryControl(id: TaskId): TaskControl? = withContext(io) {
+        database.readableDatabase.rawQuery("SELECT revoked, control FROM queued_tasks WHERE task_id = ?", arrayOf(id.value.toString())).use {
+            when {
+                !it.moveToFirst() -> null
+                it.getInt(0) != 0 -> TaskControl.CANCEL
+                it.isNull(1) -> null
+                else -> TaskControl.entries.first { command -> command.code == it.getString(1) }
+            }
+        }
+    }
 
     private fun publish(record: TaskRecord) { revision.update { it + 1 }; eventBus.tryEmit(TaskEvent.Changed(record)) }
     private fun rejected() = SubmissionResult.Rejected(TaskError.Source(StorageError(StorageErrorKind.UNSUPPORTED_OPERATION)))

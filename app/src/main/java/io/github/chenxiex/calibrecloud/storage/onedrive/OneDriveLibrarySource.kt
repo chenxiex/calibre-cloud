@@ -21,6 +21,8 @@ class OneDriveLibrarySource(private val source: OneDriveSourceBackend) : Library
     override val backend = BackendKind.ONEDRIVE
     override val requiresNetwork = true
     override val resyncsMissingPath = true
+    /** Kept low so a burst does not invite throttling, which then holds the whole library (R08). */
+    override val parallelReads = 2
     override fun reauthorization(kind: StorageErrorKind) =
         if (kind == StorageErrorKind.LOGIN_REQUIRED) Reauthorization.SIGN_IN else null
     override fun checksCopy(recorded: CalibreStamp?, imported: CalibreStamp?) = recorded == null || recorded != imported

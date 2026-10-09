@@ -11,6 +11,8 @@ import android.system.OsConstants
 import android.net.Uri
 import androidx.core.net.toUri
 import android.provider.DocumentsContract
+import io.github.chenxiex.calibrecloud.model.LibraryLocation
+import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import java.io.File
 import java.io.InputStream
@@ -21,17 +23,34 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
     private val permissions = AndroidDirectoryPermissions(context)
 
     override fun root(treeUri: String): LocalDocument {
-        val location = permissions.localLocation(treeUri)
-            ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
-        if (!permissions.persistedGrant(treeUri).readable) throw SecurityException()
+        val location = requireGrant(treeUri)
         val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri.toUri(), location.treeDocumentId)
         return query(uri).singleOrNull() ?: throw LocalSourceException(StorageErrorKind.SOURCE_MISSING)
     }
 
     override fun children(treeUri: String, parentId: String): List<LocalDocument> {
-        root(treeUri)
+        requireGrant(treeUri)
         requireWithinRoot(treeUri, parentId)
         return query(DocumentsContract.buildChildDocumentsUriUsingTree(treeUri.toUri(), parentId))
+    }
+
+    /**
+     * The supported provider's document IDs are volume:relative/path, so the ID of a root-relative path
+     * is built directly and only that document is queried, without listing directories (as R08 requires of OneDrive).
+     */
+    override val locatesByPath = true
+
+    override fun locate(treeUri: String, path: RelativeSourcePath): LocalDocument? {
+        val rootId = requireGrant(treeUri).treeDocumentId
+        val id = if (rootId.endsWith(':')) rootId + path.value else "$rootId/${path.value}"
+        requireWithinRoot(treeUri, id)
+        val found = try {
+            queryOrNull(DocumentsContract.buildDocumentUriUsingTree(treeUri.toUri(), id))
+        } catch (_: IllegalArgumentException) {
+            // The provider rejects a document ID whose file does not exist when checking it against the tree.
+            null
+        } ?: return null
+        return found.singleOrNull()?.takeIf { it.id == id && it.name == path.value.substringAfterLast('/') }
     }
 
     override fun isWithinRoot(treeUri: String, documentId: String): Boolean {
@@ -43,7 +62,7 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
     }
 
     override fun openRead(treeUri: String, documentId: String): InputStream {
-        root(treeUri)
+        requireGrant(treeUri)
         requireWithinRoot(treeUri, documentId)
         return resolver.openInputStream(DocumentsContract.buildDocumentUriUsingTree(treeUri.toUri(), documentId))
             ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
@@ -51,7 +70,7 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
 
     override fun openRange(treeUri: String, documentId: String, offset: Long): InputStream? {
         require(offset > 0)
-        root(treeUri)
+        requireGrant(treeUri)
         requireWithinRoot(treeUri, documentId)
         val descriptor = resolver.openFileDescriptor(DocumentsContract.buildDocumentUriUsingTree(treeUri.toUri(), documentId), "r")
             ?: return null
@@ -72,11 +91,23 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
         }
     }
 
+    /** The selected provider and a readable persisted grant; checked on every access without querying the root document. */
+    private fun requireGrant(treeUri: String): LibraryLocation.Local {
+        val location = permissions.localLocation(treeUri)
+            ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
+        if (!permissions.persistedGrant(treeUri).readable) throw SecurityException()
+        return location
+    }
+
     private fun requireWithinRoot(treeUri: String, documentId: String) {
         if (!isWithinRoot(treeUri, documentId)) throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
     }
 
-    private fun query(uri: Uri): List<LocalDocument> {
+    private fun query(uri: Uri): List<LocalDocument> =
+        queryOrNull(uri) ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
+
+    /** null when the provider returns no cursor, which it does for a document that does not exist. */
+    private fun queryOrNull(uri: Uri): List<LocalDocument>? {
         val projection = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
@@ -84,8 +115,7 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
             DocumentsContract.Document.COLUMN_FLAGS,
             DocumentsContract.Document.COLUMN_SIZE,
         )
-        val cursor = resolver.query(uri, projection, null, null, null)
-            ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
+        val cursor = resolver.query(uri, projection, null, null, null) ?: return null
         return cursor.use {
             buildList {
                 while (it.moveToNext()) {

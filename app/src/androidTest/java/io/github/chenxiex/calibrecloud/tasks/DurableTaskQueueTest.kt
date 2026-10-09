@@ -459,14 +459,14 @@ class DurableTaskQueueTest {
     fun cacheEventsRequireFinalStageAndFollowDurableCompletion() = runBlocking<Unit> {
         val events = mutableListOf<TaskEvent>()
         val observed = launch(start = CoroutineStart.UNDISPATCHED) { queue.events.collect { events.add(it) } }
-        val incomplete = created(cover(1, TaskOrigin.USER_DOWNLOAD))
+        val incomplete = created(sync(TaskOrigin.MANUAL_SYNC))
         TaskCoordinator(queue, listOf(FixtureHandler { _, _ -> StageOutcome.Complete(cachePublished = true) })).drain()
         yield()
         assertTrue(queue.get(incomplete)!!.record.state is TaskState.Finished)
         assertTrue(events.none { it is TaskEvent.CacheChanged })
-        val complete = created(cover(2, TaskOrigin.USER_DOWNLOAD))
+        val complete = created(sync(TaskOrigin.MANUAL_SYNC))
         TaskCoordinator(queue, listOf(FixtureHandler { entry, _ ->
-            if (entry.stage == TaskStage.COVER_PUBLISH) StageOutcome.Complete(cachePublished = true) else next(entry)
+            if (entry.stage == TaskStage.METADATA_IMPORT) StageOutcome.Complete(cachePublished = true) else next(entry)
         })).drain()
         yield()
         observed.cancelAndJoin()
@@ -601,6 +601,28 @@ class DurableTaskQueueTest {
         assertEquals(selected, state.current())
         assertNull(queue.get(task)!!.record.libraryId)
         assertTrue(queue.submit(submission) is SubmissionResult.Created)
+    }
+
+    @Test
+    fun aLowTaskYieldsOnceToAQueuedUserRequestThatThenWaits() = runBlocking<Unit> {
+        val low = created(cover(1, TaskOrigin.VISIBLE_COVER))
+        var high: TaskId? = null
+        var runs = 0
+        val handler = FixtureHandler { entry, execution ->
+            if (entry.record.id == low) {
+                runs++
+                if (high == null) high = created(sync(TaskOrigin.MANUAL_SYNC))
+                repeat(3) { execution.checkControl() }
+            }
+            StageOutcome.Complete()
+        }
+        // The user request is queued but cannot run yet: the low task yields to it once, then finishes.
+        TaskCoordinator(queue, listOf(handler), conditions = { record ->
+            if (record.scheduling.priority == TaskPriority.HIGH) setOf(WaitingReason.NETWORK) else emptySet()
+        }).drain()
+        assertEquals(2, runs)
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(low)!!.record.state)
+        assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))), queue.get(high!!)!!.record.state)
     }
 
     private class FixtureHandler(val body: suspend (QueueEntry, TaskExecution) -> StageOutcome) : TaskHandler {

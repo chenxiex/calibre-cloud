@@ -118,7 +118,9 @@ internal object TaskCodec {
             "expected_version" to value.expectedVersion?.let(::version),
         )
         is TaskRequest.FormatCheck -> obj("tag" to "format_check", "book" to book(value.key.book), "format" to value.key.format.value)
-        is TaskRequest.CoverLoad -> obj("tag" to "cover_load", "book" to book(value.book))
+        // Display order is kept: the batch loads the covers of a page in the order they are shown.
+        is TaskRequest.CoverLoad -> obj("tag" to "cover_load", "library" to value.libraryId.value.toString(),
+            "books" to JSONArray(value.books.map(::book)))
         is TaskRequest.ReadStatusWrite -> obj(
             "tag" to "read_status_write", "library" to value.libraryId.value.toString(),
             "books" to sortedArray(value.books.map(::book)),
@@ -155,7 +157,9 @@ internal object TaskCodec {
             json.optionalObject("expected_version")?.let(::readVersion),
         )
         "format_check" -> TaskRequest.FormatCheck(io.github.chenxiex.calibrecloud.model.CopyKey(readBook(json.getJSONObject("book")), BookFormat.parse(json.getString("format"))))
-        "cover_load" -> TaskRequest.CoverLoad(readBook(json.getJSONObject("book")))
+        // A single "book" is a cover task persisted before covers were loaded per page.
+        "cover_load" -> if (json.has("book")) TaskRequest.CoverLoad(readBook(json.getJSONObject("book")))
+            else TaskRequest.CoverLoad(libraryId(json.getString("library")), FrozenSet(json.getJSONArray("books").objects().map(::readBook)))
         "read_status_write" -> TaskRequest.ReadStatusWrite(
             libraryId(json.getString("library")),
             FrozenSet(json.getJSONArray("books").objects().map(::readBook)),

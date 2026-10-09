@@ -154,8 +154,8 @@ class CacheMaintenanceTest {
 
     private object NoCovers : LibraryCovers {
         override suspend fun read(book: BookKey): android.graphics.Bitmap? = null
-        override suspend fun request(book: BookKey, selectionToken: UUID): TaskId? = null
-        override suspend fun awaitFinished(task: TaskId) {}
+        override suspend fun request(books: List<BookKey>, selectionToken: UUID): TaskId? = null
+        override fun changes(task: TaskId): kotlinx.coroutines.flow.Flow<io.github.chenxiex.calibrecloud.tasks.api.TaskState> = kotlinx.coroutines.flow.emptyFlow()
         override suspend fun wake() {}
     }
 

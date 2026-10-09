@@ -165,5 +165,19 @@ class LocalSourceBackendTest {
         assertEquals(0, documents.reads)
     }
 
+    @Test fun coverIsReadOnceAndVersionedByTheBytesItReturns() = runTest {
+        val documents = Documents()
+        val backend = LocalSourceBackend(documents, temporary.newFolder(), SnapshotValidator { true }, StandardTestDispatcher(testScheduler))
+        val location = io.github.chenxiex.calibrecloud.model.LibraryLocation.Local("authority", "root")
+        val source = LocalLibrarySource(backend) { "tree" }
+        val cover = source.openCover(location, RelativeSourcePath("Author/Book.epub"), 1, 1) {}
+        assertEquals(1, documents.reads)
+        assertEquals("database", cover.input.readBytes().decodeToString())
+        assertEquals((backend.version("tree", RelativeSourcePath("Author/Book.epub")) as LocalSourceResult.Available).value, cover.version)
+
+        val tooLarge = backend.readSmall("tree", RelativeSourcePath("Author/Book.epub"), 7)
+        assertEquals(StorageErrorKind.CORRUPT_CONTENT, failure(tooLarge))
+    }
+
     private fun failure(result: LocalSourceResult<*>) = (result as LocalSourceResult.Failed).error.kind
 }

@@ -27,6 +27,10 @@ data class LocalDocument(val id: String, val name: String, val directory: Boolea
 interface LocalDocumentAccess {
     fun root(treeUri: String): LocalDocument
     fun children(treeUri: String, parentId: String): List<LocalDocument>
+    /** Whether [locate] finds a root-relative path with one lookup instead of listing each directory. */
+    val locatesByPath: Boolean get() = false
+    /** The document at root-relative [path], or null when it does not exist; used only when [locatesByPath]. */
+    fun locate(treeUri: String, path: RelativeSourcePath): LocalDocument? = throw UnsupportedOperationException()
     fun isWithinRoot(treeUri: String, documentId: String): Boolean
     fun openRead(treeUri: String, documentId: String): InputStream
     /** Must seek directly, without reading/skipping the prefix. null for non-seekable providers. */
@@ -52,7 +56,8 @@ fun interface SnapshotValidator {
 
 /**
  * Explicit source access only; callers schedule operations through the shared task coordinator.
- * SAF names are resolved one component at a time and every returned ID is confined to the grant.
+ * A path is located directly when the provider supports it, otherwise resolved one component at a
+ * time; every returned ID is confined to the grant.
  * SHA-256 of all bytes supplies the version even when provider size/time metadata is absent.
  * Snapshot acquisition rejects any nonempty WAL, rollback journal or unknown-length log, checks
  * logs before/after both reads, and compares the copy hash with a second complete source read.
@@ -95,6 +100,29 @@ class LocalSourceBackend(
     suspend fun version(treeUri: String, path: RelativeSourcePath, checkControl: suspend () -> Unit = {}): LocalSourceResult<FileVersion> = operation {
         val document = resolveDocument(treeUri, path)
         fileVersion(hash(openSource(treeUri, document.id), checkControl))
+    }
+
+    /**
+     * Reads a small file once into memory; the version is the SHA-256 of exactly the returned bytes.
+     * Files larger than [maxBytes] fail as corrupt content without reading further.
+     */
+    suspend fun readSmall(treeUri: String, path: RelativeSourcePath, maxBytes: Int, checkControl: suspend () -> Unit = {}): LocalSourceResult<Pair<ByteArray, FileVersion>> = operation {
+        val document = resolveDocument(treeUri, path)
+        openSource(treeUri, document.id).use { input ->
+            val digest = MessageDigest.getInstance("SHA-256")
+            val output = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                checkControl()
+                val count = input.read(buffer)
+                if (count < 0) break
+                if (output.size() + count > maxBytes) throw LocalSourceException(StorageErrorKind.CORRUPT_CONTENT)
+                output.write(buffer, 0, count)
+                digest.update(buffer, 0, count)
+            }
+            output.toByteArray() to fileVersion(digest.digest())
+        }
     }
 
     suspend fun acquireSnapshot(
@@ -147,6 +175,12 @@ class LocalSourceBackend(
     }
 
     private fun resolveDocument(treeUri: String, path: RelativeSourcePath): LocalDocument {
+        if (documents.locatesByPath) {
+            val document = documents.locate(treeUri, path) ?: throw LocalSourceException(StorageErrorKind.SOURCE_MISSING)
+            if (!documents.isWithinRoot(treeUri, document.id)) throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
+            if (document.directory) throw LocalSourceException(StorageErrorKind.SOURCE_MISSING)
+            return document
+        }
         var document = documents.root(treeUri)
         if (!document.directory || !documents.isWithinRoot(treeUri, document.id)) {
             throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)

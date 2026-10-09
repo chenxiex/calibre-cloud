@@ -81,8 +81,10 @@ sealed interface TaskRequest {
         override val libraryId: LibraryId get() = key.book.libraryId
     }
 
-    data class CoverLoad(val book: BookKey) : TaskRequest {
-        override val libraryId: LibraryId get() = book.libraryId
+    /** The missing covers of one shown page in display order, fixed at submission (R10). */
+    data class CoverLoad(override val libraryId: LibraryId, val books: FrozenSet<BookKey>) : TaskRequest {
+        constructor(book: BookKey) : this(book.libraryId, FrozenSet(listOf(book)))
+        init { require(books.isNotEmpty() && books.all { it.libraryId == libraryId }) }
     }
 
     /** Retrying applies target again only after commit/recovery checks, never a source-state toggle. */

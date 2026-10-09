@@ -39,6 +39,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.nio.ByteBuffer
 import java.util.zip.CRC32
 
+private const val FIRST_PATH = "作者/书名 (1)/cover.jpg"
+private const val SECOND_PATH = "作者/第二本 (2)/cover.jpg"
+
 /** Real SQLite, decoding and files; independent source fixtures never touch an authorized library. */
 @RunWith(AndroidJUnit4::class)
 class CoverTaskHandlerTest {
@@ -74,9 +77,9 @@ class CoverTaskHandlerTest {
         val source = Source(image(1024, 1536, Color.RED))
         assertNull(covers.read(book))
         assertEquals(0, source.opens.get())
-        val service = CoverService(state, metadata, coordinator(source))
-        val first = service.submit(book, state.current()!!.token)
-        val again = service.submit(book, state.current()!!.token)
+        val service = CoverService(state, metadata, coordinator(source), queue)
+        val first = service.submit(listOf(book), state.current()!!.token)
+        val again = service.submit(listOf(book), state.current()!!.token)
         assertTrue(first is SubmissionResult.Created)
         assertTrue(again is SubmissionResult.Reused)
         assertEquals((first as SubmissionResult.Created).taskId, (again as SubmissionResult.Reused).taskId)
@@ -92,21 +95,134 @@ class CoverTaskHandlerTest {
     }
 
     @Test
-    fun corruptOversizedAndChangedSourceRetainThePreviousCompleteImage() = runBlocking<Unit> {
-        submit()
-        coordinator(Source(image(64, 96, Color.RED))).drain()
-        for (source in listOf(Source("invalid image".toByteArray()),
-            Source(ByteArray((CoverRepository.MAX_ENCODED_BYTES + 1).toInt())),
-            Source(oversizedDimensions()),
-            Source(image(64, 96, Color.BLUE)).apply { changeVersionOnOpen = true })) {
-            val task = submit()
+    fun aCorruptOrOversizedCoverKeepsItsPlaceholderWithoutStoppingTheBatch() = runBlocking<Unit> {
+        val second = second()
+        for (bytes in listOf("invalid image".toByteArray(), ByteArray((CoverRepository.MAX_ENCODED_BYTES + 1).toInt()), oversizedDimensions())) {
+            val source = Source(image(64, 96, Color.RED)).apply { overrides[SECOND_PATH] = bytes }
+            val task = submit(second, book)
             coordinator(source).drain()
-            val failure = (queue.get(task)!!.record.state as TaskState.Finished).result as TaskResult.Failed
-            val kind = (failure.failure.error as TaskError.Source).error.kind
-            assertTrue(kind in setOf(StorageErrorKind.CORRUPT_CONTENT, StorageErrorKind.VERSION_CONFLICT))
+            val result = (queue.get(task)!!.record.state as TaskState.Finished).result as TaskResult.CompletedWithBookFailures
+            assertEquals(setOf(BookFailure(second, TaskError.Source(StorageError(StorageErrorKind.CORRUPT_CONTENT)))), result.failures.toSet())
+            assertNull(covers.read(second))
             assertImage(book, Color.RED, 64, 96)
             assertFalse(File(root, "files/cover-staging/${task.value}").exists())
         }
+    }
+
+    @Test
+    fun aResumedBatchSkipsTheCoversItAlreadyPublished() = runBlocking<Unit> {
+        val second = second()
+        val source = Source(image(64, 96, Color.RED)).apply { failure = StorageErrorKind.NO_NETWORK; failAfterOpens = 1 }
+        val task = submit(book, second)
+        coordinator(source).drain()
+        assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))), queue.get(task)!!.record.state)
+        assertImage(book, Color.RED, 64, 96)
+        source.failure = null
+        database.writableDatabase.execSQL("UPDATE queued_tasks SET retry_at = 0 WHERE task_id = ?", arrayOf(task.value.toString()))
+        coordinator(source).drain()
+        assertCompleted(task)
+        assertImage(second, Color.RED, 64, 96)
+        assertEquals(listOf(FIRST_PATH, SECOND_PATH), source.paths)
+    }
+
+    @Test
+    fun aNewerPageBatchEndsTheRunningOneAfterItsCurrentCover() = runBlocking<Unit> {
+        val second = second()
+        val source = Source(image(64, 96, Color.RED)).apply { block = true }
+        val service = CoverService(state, metadata, coordinator(source), queue)
+        val older = (service.submit(listOf(book, second), state.current()!!.token) as SubmissionResult.Created).taskId
+        val driver = launch(Dispatchers.Default) { coordinator(source).drain() }
+        val newer: TaskId
+        try {
+            assertTrue(source.started.await(10, TimeUnit.SECONDS))
+            newer = (service.submit(listOf(second), state.current()!!.token) as SubmissionResult.Created).taskId
+        } finally { source.release.countDown() }
+        withTimeout(10_000) { driver.join() }
+        // The current cover is still published; the replaced batch does not read the next one.
+        assertImage(book, Color.RED, 64, 96)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(older)!!.record.state)
+        assertCompleted(newer)
+        assertImage(second, Color.RED, 64, 96)
+        assertEquals(listOf(FIRST_PATH, SECOND_PATH), source.paths)
+    }
+
+    @Test
+    fun coversOfABatchLoadAtOnceUpToTheBackendLimit() = runBlocking<Unit> {
+        val second = second()
+        val source = Source(image(64, 96, Color.RED)).apply { parallel = 2; block = true }
+        val task = submit(book, second)
+        val driver = launch(Dispatchers.Default) { coordinator(source).drain() }
+        try {
+            assertTrue(source.started.await(10, TimeUnit.SECONDS))
+            // Whichever cover opened first is still being read while the other one is published.
+            suspend fun published(key: BookKey) = covers.read(key)?.also { it.recycle() } != null
+            withTimeout(10_000) { while (!published(book) && !published(second)) kotlinx.coroutines.delay(20) }
+            assertNotEquals(published(book), published(second))
+        } finally { source.release.countDown() }
+        withTimeout(10_000) { driver.join() }
+        assertCompleted(task)
+        assertImage(book, Color.RED, 64, 96)
+        assertImage(second, Color.RED, 64, 96)
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
+        assertFalse(File(root, "files/cover-staging/${task.value}").exists())
+    }
+
+    @Test
+    fun aBatchFailureStopsTheCoversInFlightAndKeepsNoStaging() = runBlocking<Unit> {
+        val second = second()
+        val source = Source(image(64, 96, Color.RED)).apply {
+            parallel = 2; block = true; failure = StorageErrorKind.NO_NETWORK; failurePath = SECOND_PATH
+        }
+        val task = submit(book, second)
+        val driver = launch(Dispatchers.Default) { coordinator(source).drain() }
+        try {
+            assertTrue(source.started.await(10, TimeUnit.SECONDS))
+            // The second cover fails while the first is still being read.
+            withTimeout(10_000) { while (source.failed.get() == 0) kotlinx.coroutines.delay(20) }
+        } finally { source.release.countDown() }
+        withTimeout(10_000) { driver.join() }
+        assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))), queue.get(task)!!.record.state)
+        assertNull(covers.read(book))
+        assertNull(covers.read(second))
+        assertEquals(source.opens.get(), source.closes.get())
+        assertFalse(File(root, "files/cover-staging/${task.value}").exists())
+    }
+
+    @Test
+    fun coversPublishedAtOnceAreNeverCollectedBeforeTheyAreRecorded() = runBlocking<Unit> {
+        // Quota collection after one publication must not remove a cover another publication is moving in.
+        val second = second()
+        val task = submit(book, second)
+        repeat(10) { round ->
+            val staged = listOf(book, second).map { key ->
+                File(root, "staged-$round-${key.sourceId}.png").apply { writeBytes(image(64, 96, if (round % 2 == 0) Color.RED else Color.BLUE)) }
+            }
+            listOf(book, second).zip(staged).map { (key, file) ->
+                launch(Dispatchers.IO) { assertTrue(covers.publish(key, file, metadata.currentImport()!!.generation, task.value)) }
+            }.forEach { it.join() }
+            assertImage(book, if (round % 2 == 0) Color.RED else Color.BLUE, 64, 96)
+            assertImage(second, if (round % 2 == 0) Color.RED else Color.BLUE, 64, 96)
+        }
+    }
+
+    @Test
+    fun aQueuedPageBatchIsReplacedAtOnce() = runBlocking<Unit> {
+        val service = CoverService(state, metadata, coordinator(Source(image(64, 96, Color.RED))), queue)
+        val older = (service.submit(listOf(book), state.current()!!.token) as SubmissionResult.Created).taskId
+        val newer = (service.submit(listOf(second()), state.current()!!.token) as SubmissionResult.Created).taskId
+        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(older)!!.record.state)
+        assertEquals(TaskState.Queued, queue.get(newer)!!.record.state)
+    }
+
+    @Test
+    fun theSingleReadIsPublishedWithoutRereadingTheSource() = runBlocking<Unit> {
+        // The version names the bytes decoded; a later source change is not checked again before publication.
+        val source = Source(image(64, 96, Color.BLUE)).apply { changeVersionOnOpen = true }
+        val task = submit()
+        coordinator(source).drain()
+        assertCompleted(task)
+        assertImage(book, Color.BLUE, 64, 96)
+        assertEquals(1, source.opens.get())
     }
 
     @Test
@@ -194,13 +310,13 @@ class CoverTaskHandlerTest {
     }
 
     @Test
-    fun userDownloadRunsBetweenCoverTasksWithoutPreemptingTheCurrentCover() = runBlocking<Unit> {
+    fun aUserDownloadRunsAtTheNextSafeBoundaryAndTheBatchResumes() = runBlocking<Unit> {
         val events = mutableListOf<String>()
         val source = Source(image(64, 96, Color.RED)).apply {
             block = true
             onOpen = { events.add("cover") }
         }
-        val coverHandler = CoverTaskHandler(state, metadata, covers, source.sources, Dispatchers.IO)
+        val coverHandler = CoverTaskHandler(state, metadata, covers, source.sources, Dispatchers.IO, queue)
         val download = object : TaskHandler {
             override fun supports(request: TaskRequest) = request is TaskRequest.FormatCopy
             override fun controls(stage: TaskStage) = TaskControls(true, true, false, false)
@@ -213,32 +329,33 @@ class CoverTaskHandlerTest {
             }
         }
         val coordinator = TaskCoordinator(queue, listOf(coverHandler, download))
-        val first = submit()
-        val secondMetadata = metadata.currentImport()!!.metadata.books.single { it.sourceId == 2L }
-        val second = BookKey(book.libraryId, 2, secondMetadata.sourceUuid)
-        val secondTask = coordinator.submit(TaskSubmission(TaskRequest.CoverLoad(second), TaskOrigin.VISIBLE_COVER))
-        assertTrue(secondTask is SubmissionResult.Created)
+        val batch = submit(book, second())
         val driver = launch(Dispatchers.Default) { coordinator.drain() }
+        val high: SubmissionResult
         try {
             assertTrue(source.started.await(10, TimeUnit.SECONDS))
-            val high = coordinator.submit(TaskSubmission(TaskRequest.FormatCopy(FormatResource(book,
+            high = coordinator.submit(TaskSubmission(TaskRequest.FormatCopy(FormatResource(book,
                 BookFormat.parse("EPUB"), SourceFileLocator.Relative(BackendKind.LOCAL,
                     RelativeSourcePath("作者/书名 (1)/正文.epub")))), TaskOrigin.USER_DOWNLOAD))
             assertTrue(high is SubmissionResult.Created)
             assertEquals(listOf("cover"), events)
         } finally { source.release.countDown() }
         withTimeout(10_000) { driver.join() }
-        assertCompleted(first)
-        assertCompleted((secondTask as SubmissionResult.Created).taskId)
-        assertEquals(listOf("cover", "download", "cover"), events)
+        // The interrupted cover is read again after the download; the batch then goes on to the next one.
+        assertEquals(listOf("cover", "download", "cover", "cover"), events)
+        assertCompleted((high as SubmissionResult.Created).taskId)
+        assertCompleted(batch)
+        assertImage(book, Color.RED, 64, 96)
+        assertFalse(File(root, "files/cover-staging/${batch.value}").exists())
     }
 
     @Test
-    fun sourceNetworkAndAuthorizationFailuresKeepThePreviousImage() = runBlocking<Unit> {
+    fun sourceNetworkAndAuthorizationFailuresSuspendTheBatch() = runBlocking<Unit> {
         submit()
         coordinator(Source(image(64, 96, Color.RED))).drain()
+        val second = second()
         for (kind in listOf(StorageErrorKind.NO_NETWORK, StorageErrorKind.AUTHORIZATION_EXPIRED)) {
-            val task = submit()
+            val task = submit(second)
             val source = Source(image(64, 96, Color.BLUE)).apply { failure = kind }
             coordinator(source).drain()
             assertEquals(0, source.opens.get())
@@ -246,6 +363,7 @@ class CoverTaskHandlerTest {
             val reason = if (kind == StorageErrorKind.NO_NETWORK) WaitingReason.NETWORK else WaitingReason.DIRECTORY_AUTHORIZATION
             assertEquals(TaskState.Waiting(FrozenSet(listOf(reason))), queue.get(task)!!.record.state)
             assertImage(book, Color.RED, 64, 96)
+            assertNull(covers.read(second))
             if (queue.get(task)!!.record.state is TaskState.Waiting) {
                 assertTrue(queue.control(task, TaskControl.CANCEL))
                 coordinator(source).drain()
@@ -274,10 +392,14 @@ class CoverTaskHandlerTest {
     }
 
     private fun coordinator(source: Source) = TaskCoordinator(queue,
-        listOf(CoverTaskHandler(state, metadata, covers, source.sources, Dispatchers.IO)))
+        listOf(CoverTaskHandler(state, metadata, covers, source.sources, Dispatchers.IO, queue)))
 
-    private suspend fun submit() = (queue.submit(TaskSubmission(TaskRequest.CoverLoad(book),
-        TaskOrigin.VISIBLE_COVER)) as SubmissionResult.Created).taskId
+    /** The second book of the active fixture library. */
+    private suspend fun second(): BookKey =
+        BookKey(book.libraryId, 2, metadata.currentImport()!!.metadata.books.single { it.sourceId == 2L }.sourceUuid)
+
+    private suspend fun submit(vararg books: BookKey = arrayOf(book)) = (queue.submit(TaskSubmission(
+        TaskRequest.CoverLoad(book.libraryId, FrozenSet(books.toList())), TaskOrigin.VISIBLE_COVER)) as SubmissionResult.Created).taskId
 
     private suspend fun assertCompleted(task: TaskId) =
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
@@ -295,28 +417,44 @@ class CoverTaskHandlerTest {
     private class Source(private val bytes: ByteArray) {
         val sources = LibrarySources { backend ->
             object : LibrarySource by SourcePolicies.sources.of(backend) {
+                override val parallelReads get() = this@Source.parallel
                 override suspend fun openCover(location: LibraryLocation, path: RelativeSourcePath, targetWidth: Int,
                     targetHeight: Int, control: suspend () -> Unit): SourceStream {
                     control()
-                    val opened = this@Source.version(location)
+                    val opened = this@Source.version(location, path)
                     return SourceStream(this@Source.open(path), opened)
                 }
-                override suspend fun unchanged(location: LibraryLocation, path: RelativeSourcePath, version: FileVersion,
-                    control: suspend () -> Unit) = this@Source.version(location) == version
             }
         }
         val opens = AtomicInteger()
+        val failed = AtomicInteger()
         val closes = AtomicInteger()
-        val paths = mutableListOf<String>()
+        val paths: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
         val started = CountDownLatch(1)
         val release = CountDownLatch(1)
-        var block = false
+        private val blockNext = java.util.concurrent.atomic.AtomicBoolean()
+        /** The next opened cover blocks on its first read until [release]; covers read at once race for it. */
+        var block: Boolean
+            get() = blockNext.get()
+            set(value) = blockNext.set(value)
         var changeVersionOnOpen = false
+        /** Covers read at once; one keeps the order of the other tests deterministic. */
+        var parallel = 1
         var failure: StorageErrorKind? = null
+        /** Fails only the cover at this path; null fails every cover. */
+        var failurePath: String? = null
+        /** Opens that succeed before [failure] applies; null applies it from the start. */
+        var failAfterOpens: Int? = null
+        val overrides = mutableMapOf<String, ByteArray>()
         var onOpen: () -> Unit = {}
         private var version = "initial"
-        fun version(location: LibraryLocation): FileVersion {
-            failure?.let { throw SourceFailure(StorageError(it)) }
+        fun version(location: LibraryLocation, path: RelativeSourcePath? = null): FileVersion {
+            failure?.let { if (opens.get() >= (failAfterOpens ?: 0) && (failurePath == null || failurePath == path?.value)) {
+                // A failure of one path waits until another cover is being read, so it meets a cover in flight.
+                if (failurePath != null) check(started.await(10, TimeUnit.SECONDS))
+                failed.incrementAndGet()
+                throw SourceFailure(StorageError(it))
+            } }
             return FileVersion(location.backend, version)
         }
         fun open(path: RelativeSourcePath): InputStream {
@@ -324,8 +462,8 @@ class CoverTaskHandlerTest {
             onOpen()
             paths.add(path.value)
             if (changeVersionOnOpen) version = "changed"
-            val shouldBlock = block.also { block = false }
-            return object : ByteArrayInputStream(bytes) {
+            val shouldBlock = blockNext.getAndSet(false)
+            return object : ByteArrayInputStream(overrides[path.value] ?: bytes) {
                 private var first = true
                 override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
                     if (first && shouldBlock) {

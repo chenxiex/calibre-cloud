@@ -5,11 +5,12 @@ import io.github.chenxiex.calibrecloud.model.FileVersion
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.storage.api.*
+import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
 import java.util.UUID
 
 /**
  * [LibrarySource] over a granted SAF tree. The version is the SHA-256 of all bytes, so it is also the
- * content digest and is read again before publication. Every downloaded copy is checked after each
+ * content digest and is read again before publication. A cover is read once and hashed as it is read. Every downloaded copy is checked after each
  * import, a missing path is missing at once, nothing needs a network, and a lost grant waits for the
  * directory to be granted again. [treeUri] returns the grant the library at [LibraryLocation.Local] was
  * listed with, or null when it is not listed.
@@ -21,6 +22,8 @@ class LocalLibrarySource(
     override val backend = BackendKind.LOCAL
     override val requiresNetwork = false
     override val resyncsMissingPath = false
+    /** Provider calls overlap well with decoding; more than three gains little on the target device. */
+    override val parallelReads = 3
     override fun reauthorization(kind: StorageErrorKind) =
         if (kind == StorageErrorKind.AUTHORIZATION_EXPIRED) Reauthorization.DIRECTORY_GRANT else null
     override fun checksCopy(recorded: CalibreStamp?, imported: CalibreStamp?) = true
@@ -50,9 +53,9 @@ class LocalLibrarySource(
     override suspend fun openCover(location: LibraryLocation, path: RelativeSourcePath, targetWidth: Int, targetHeight: Int,
         control: suspend () -> Unit): SourceStream {
         val tree = tree(location)
-        val version = source.version(tree, path, control).value()
+        val (bytes, version) = source.readSmall(tree, path, CoverRepository.MAX_ENCODED_BYTES.toInt(), control).value()
         control()
-        return SourceStream(source.openRead(tree, path).value(), version)
+        return SourceStream(java.io.ByteArrayInputStream(bytes), version)
     }
 
     /** Always reads: the content hash that would prove an unchanged database needs the full read anyway. */

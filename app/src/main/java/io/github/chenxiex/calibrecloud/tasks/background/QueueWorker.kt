@@ -32,6 +32,7 @@ import kotlinx.coroutines.withContext
 class QueueWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val dependencies = (applicationContext as CalibreCloudApplication).dependencies
+        dependencies.backgroundTasks.workerStarted()
         try {
             dependencies.taskCoordinator.restorePending()
             val pending = dependencies.taskQueue.list().any {

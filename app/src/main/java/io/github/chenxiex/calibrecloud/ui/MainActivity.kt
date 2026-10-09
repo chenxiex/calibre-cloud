@@ -134,11 +134,15 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         openModel.setForeground(true)
+        (application as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies.backgroundTasks.setForeground(true)
     }
 
     /** Only leaving the foreground revokes a waiting open; a configuration change keeps it. */
     override fun onStop() {
-        if (!isChangingConfigurations) openModel.setForeground(false)
+        if (!isChangingConfigurations) {
+            openModel.setForeground(false)
+            (application as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies.backgroundTasks.setForeground(false)
+        }
         super.onStop()
     }
 

@@ -142,11 +142,14 @@ class LibraryScreenTest {
         }
         val covers = object : LibraryCovers {
             override suspend fun read(book: BookKey) = cover
-            override suspend fun request(book: BookKey, selectionToken: UUID): TaskId? {
-                requestedCovers += book
+            override suspend fun request(books: List<BookKey>, selectionToken: UUID): TaskId? {
+                requestedCovers += books
                 return TaskId(UUID.randomUUID())
             }
-            override suspend fun awaitFinished(task: TaskId) = finished.await()
+            override fun changes(task: TaskId) = kotlinx.coroutines.flow.flow {
+                finished.await()
+                emit(io.github.chenxiex.calibrecloud.tasks.api.TaskState.Finished(io.github.chenxiex.calibrecloud.tasks.api.TaskResult.Completed))
+            }
             override suspend fun wake() {}
         }
         return LibraryViewModel({ selection }, LibraryQueryService(imports, LibraryCopies { copies }, Dispatchers.Default), covers, emptyFlow(),

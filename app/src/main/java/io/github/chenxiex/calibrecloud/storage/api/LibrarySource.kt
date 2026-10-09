@@ -63,6 +63,12 @@ interface LibrarySource {
      */
     val resyncsMissingPath: Boolean
 
+    /**
+     * How many source files one task may read at once, such as the covers of a page batch (R10). The
+     * queue still runs one task at a time, so this bounds all reads of the backend.
+     */
+    val parallelReads: Int
+
     /** Whether work that failed with [kind] waits for the user action instead of failing (R18). */
     fun reauthorization(kind: StorageErrorKind): Reauthorization?
 

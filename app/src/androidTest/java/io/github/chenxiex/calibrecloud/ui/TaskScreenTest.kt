@@ -148,6 +148,31 @@ class TaskScreenTest {
         compose.onNodeWithText("无法读取或更新任务状态，请重试。").assertDoesNotExist()
     }
 
+    @Test
+    fun automaticCoverBatchesFoldIntoOneRowUntilExpanded() {
+        val library = LibraryId(UUID.randomUUID())
+        val batches = (1..3).map { n ->
+            TaskRecord(TaskId(UUID.randomUUID()), TaskSubmission(TaskRequest.CoverLoad(library,
+                FrozenSet(listOf(io.github.chenxiex.calibrecloud.model.BookKey(library, n.toLong(), UUID.randomUUID())))), TaskOrigin.VISIBLE_COVER),
+                SchedulingPosition(TaskPriority.LOW, QueueSequence(10L + n)),
+                state = TaskState.Finished(if (n == 3) TaskResult.Completed else TaskResult.Cancelled(CommitState.NotCommitted)),
+                controls = TaskControls(false, false, false, false))
+        }
+        val sync = record(1, TaskState.Finished(TaskResult.Completed))
+        show({ batches + sync })
+        compose.onNodeWithTag("task_tab_finished").performClick()
+        // The latest batch comes first in the finished tab, so the folded row repeats its result.
+        compose.onNodeWithTag("task_cover_group").assertIsDisplayed()
+        compose.onNodeWithText("3 个批次 · 已完成").assertIsDisplayed()
+        batches.forEach { compose.onNodeWithTag("task_${it.id.value}").assertDoesNotExist() }
+        compose.onNodeWithTag("task_${sync.id.value}").assertIsDisplayed()
+        compose.onNodeWithTag("task_cover_group").performClick()
+        batches.forEach { compose.onNodeWithTag("task_${it.id.value}").assertIsDisplayed() }
+        compose.onNodeWithContentDescription("收起").assertIsDisplayed()
+        compose.onNodeWithTag("task_cover_group").performClick()
+        batches.forEach { compose.onNodeWithTag("task_${it.id.value}").assertDoesNotExist() }
+    }
+
     private fun record(sequence: Int, state: TaskState): TaskRecord = TaskRecord(
         TaskId(UUID.randomUUID()),
         TaskSubmission(TaskRequest.MetadataSync(LibraryId(UUID.randomUUID())), TaskOrigin.MANUAL_SYNC),

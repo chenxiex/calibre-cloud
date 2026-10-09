@@ -79,12 +79,29 @@ interface TaskHandler {
 }
 
 private class BoundaryControl(val command: TaskControl) : RuntimeException()
+private class YieldBoundary : RuntimeException()
 
 class TaskExecution internal constructor(private val queue: DurableTaskQueue, val id: TaskId) {
+    /** Set by the coordinator while a pausable stage runs: its safe boundaries also yield to user requests. */
+    internal var yieldable = false
+
+    /**
+     * A safe boundary: applies a pending pause or cancel and, in a pausable stage, yields to a waiting
+     * high-priority request (R17). Either ends the stage by throwing; the handler only closes resources.
+     */
     suspend fun checkControl() {
-        if (queue.revoked(id)) throw BoundaryControl(TaskControl.CANCEL)
-        val command = queue.get(id)?.control
+        val command = queue.boundaryControl(id)
         if (command == TaskControl.PAUSE || command == TaskControl.CANCEL) throw BoundaryControl(command)
+        if (yieldable && queue.highPriorityWaiting(id)) throw YieldBoundary()
+    }
+
+    /** Ends this task as cancelled at the handler's own safe boundary, as a user cancel would. */
+    fun cancelHere(): Nothing = throw BoundaryControl(TaskControl.CANCEL)
+
+    /** Records progress of the running stage without changing its checkpoint. */
+    suspend fun progress(progress: TaskProgress) {
+        checkControl()
+        queue.update(id) { entry -> entry.copy(record = entry.record.copy(state = TaskState.Running(entry.stage, progress))) }
     }
 
     suspend fun checkpoint(value: RecoveryCheckpoint, progress: TaskProgress? = null) {
@@ -156,7 +173,10 @@ class TaskCoordinator(
         }
     }
 
-    /** Returns true only when the task now waits for its own stale-path sync. */
+    /**
+     * Returns true when the task may run again in this drain: it waits for its own stale-path sync, or it
+     * yielded to a user request and continues after it. Other outcomes are not claimed again until the next wakeup.
+     */
     private suspend fun execute(initial: QueueEntry): Boolean {
         val handler = handlers.single { it.supports(initial.record.submission.request) }
         val execution = TaskExecution(queue, initial.record.id)
@@ -189,7 +209,8 @@ class TaskCoordinator(
                             CommitState.Unknown(UUID.randomUUID()) else it.record.commit))
                 }
                 execution.checkControl()
-                val outcome = handler.execute(entry, execution)
+                execution.yieldable = controls.canPause
+                val outcome = try { handler.execute(entry, execution) } finally { execution.yieldable = false }
                 // Import publication and terminal state may already be committed atomically.
                 // Switching selections after that point does not cancel the completed old-library task.
                 if (outcome is StageOutcome.Complete && outcome.cachePublished &&
@@ -252,6 +273,13 @@ class TaskCoordinator(
                     }
                 }
             }
+        } catch (_: YieldBoundary) {
+            // Back in line at its own position, like a pause that resumes by itself; staging is kept and
+            // recovery checks it before the task continues where it stopped.
+            queue.update(initial.record.id) { entry ->
+                entry.copy(recoveryRequired = true, record = entry.record.copy(state = TaskState.Queued, controls = DurableTaskQueue.queuedControls))
+            }
+            return true
         } catch (control: BoundaryControl) {
             handler.stopped(requireNotNull(queue.get(initial.record.id)))
             queue.update(initial.record.id) { entry ->
@@ -296,7 +324,9 @@ class TaskCoordinator(
             if (entry.stage == TaskStage.WRITE_COMMIT) require(entry.record.commit == CommitState.Confirmed)
         }
     }
-    private fun isFinalStage(request: TaskRequest, stage: TaskStage) = stage == stages(request).last { it != TaskStage.RECOVERY_CHECK }
+    /** A cover batch publishes each cover within its transfer stage; COVER_PUBLISH remains for tasks persisted before batches. */
+    private fun isFinalStage(request: TaskRequest, stage: TaskStage) = stage == stages(request).last { it != TaskStage.RECOVERY_CHECK } ||
+        (request is TaskRequest.CoverLoad && stage == TaskStage.COVER_TRANSFER)
     private fun stages(request: TaskRequest): List<TaskStage> = when (request) {
         is TaskRequest.CandidateConfiguration -> listOf(TaskStage.CANDIDATE_ACCESS)
         is TaskRequest.MetadataSync -> listOf(TaskStage.METADATA_FETCH, TaskStage.METADATA_IMPORT)

@@ -121,7 +121,7 @@ class CoverReadOnlyAcceptanceTest {
                 putString("step07CoverSource", thumbnail?.let { "thumbnail ${it.first}x${it.second}" }
                     ?: if (location is LibraryLocation.OneDrive) "original fallback" else "SAF original")
             })
-            val submission = dependencies.coverService.submit(key, requireNotNull(dependencies.state.current()).token)
+            val submission = dependencies.coverService.submit(listOf(key), requireNotNull(dependencies.state.current()).token)
             assertTrue("Acceptance needs a fresh explicit cover task", submission is SubmissionResult.Created)
             val task = (submission as SubmissionResult.Created).taskId
             // The submit hook schedules the production WorkManager driver. Fast completion before

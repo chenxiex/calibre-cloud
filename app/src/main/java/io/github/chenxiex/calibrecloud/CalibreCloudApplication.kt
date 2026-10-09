@@ -96,7 +96,7 @@ class ApplicationDependencies(context: Context) {
     val copyService by lazy { io.github.chenxiex.calibrecloud.tasks.copies.CopyService(state, metadata, taskCoordinator, taskQueue) }
     val covers by lazy { io.github.chenxiex.calibrecloud.storage.covers.CoverRepository(database, state,
         applicationContext.filesDir, Dispatchers.IO) }
-    val coverService by lazy { io.github.chenxiex.calibrecloud.tasks.covers.CoverService(state, metadata, taskCoordinator) }
+    val coverService by lazy { io.github.chenxiex.calibrecloud.tasks.covers.CoverService(state, metadata, taskCoordinator, taskQueue) }
     val backgroundTasks by lazy { io.github.chenxiex.calibrecloud.tasks.background.BackgroundTasks(applicationContext, this) }
     private val queueConditions by lazy { io.github.chenxiex.calibrecloud.tasks.background.QueueConditions(applicationContext, database, librarySources) }
     val taskCoordinator: TaskCoordinator by lazy {

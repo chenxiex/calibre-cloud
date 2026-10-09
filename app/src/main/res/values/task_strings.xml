@@ -16,6 +16,14 @@
     <plurals name="task_partial">
         <item quantity="other">已完成，%d 项书籍操作失败</item>
     </plurals>
+    <plurals name="task_partial_cover">
+        <item quantity="other">已完成，%d 个封面未能加载</item>
+    </plurals>
+    <plurals name="task_cover_batches">
+        <item quantity="other">%d 个批次</item>
+    </plurals>
+    <string name="task_expand">展开</string>
+    <string name="task_collapse">收起</string>
     <string name="task_cancelled">已取消</string>
     <string name="task_cancelled_committed">已取消 · 源变更已提交</string>
     <string name="task_failed">失败：%1$s（%2$s）</string>
