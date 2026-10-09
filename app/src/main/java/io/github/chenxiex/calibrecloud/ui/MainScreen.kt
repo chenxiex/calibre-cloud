@@ -3,8 +3,6 @@ package io.github.chenxiex.calibrecloud.ui
 import android.graphics.Bitmap
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,19 +16,18 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -40,8 +37,6 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.state.LastOpened
 
@@ -105,7 +100,7 @@ internal fun MainScreen(
         }
     }
     Column(
-        Modifier.fillMaxSize().background(Color.White).windowInsetsPadding(WindowInsets.safeDrawing)
+        Modifier.fillMaxSize().background(PAPER).windowInsetsPadding(WindowInsets.safeDrawing)
             .semantics { testTagsAsResourceId = true },
     ) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -126,7 +121,7 @@ internal fun MainScreen(
 
 @Composable
 private fun BottomBar(selected: Int, lastOpened: LastOpened?, cover: Bitmap?, onLastOpened: () -> Unit, onSelect: (Int) -> Unit) {
-    Row(Modifier.fillMaxWidth().height(56.dp).testTag("bottom_bar")) {
+    Row(Modifier.fillMaxWidth().height(BOTTOM_BAR_HEIGHT).testTag("bottom_bar")) {
         BottomTab(stringResource(R.string.nav_library), R.drawable.ic_library_outline, R.drawable.ic_library_filled,
             selected == TAB_LIBRARY, "nav_library", Modifier.weight(1f)) { onSelect(TAB_LIBRARY) }
         BottomTab(stringResource(R.string.nav_more), R.drawable.ic_more_outline, R.drawable.ic_more_filled,
@@ -142,12 +137,12 @@ private fun BottomTab(
 ) {
     Column(
         modifier.fillMaxHeight().testTag(tag)
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
-            .semantics { this.selected = selected; role = Role.Tab },
+            .tap(role = Role.Tab, onClick = onClick)
+            .semantics { this.selected = selected },
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Icon(painterResource(if (selected) filled else outline), null, Modifier.size(26.dp), tint = Color.Black)
-        Text(label, fontSize = 12.sp, lineHeight = 14.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+        Icon(painterResource(if (selected) filled else outline), null, Modifier.size(ICON_SIZE), tint = INK)
+        Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
     }
 }

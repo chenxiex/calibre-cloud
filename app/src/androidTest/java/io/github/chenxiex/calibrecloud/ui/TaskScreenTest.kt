@@ -33,10 +33,10 @@ import java.util.UUID
 class TaskScreenTest {
     @get:Rule val compose = createComposeRule()
 
-    /** Room for the tab row, six 64dp rows, or five and the page bar. */
+    /** Room for the tab row, six 56dp rows, or five and the page bar. */
     private fun show(records: () -> List<TaskRecord>, failed: Boolean = false, operationFailed: Boolean = false,
                      onControl: (TaskRecord, TaskControl) -> Unit = { _, _ -> }) {
-        compose.setContent { Box(Modifier.height(460.dp)) { TaskList(records(), failed, operationFailed, onControl) } }
+        compose.setContent { Box(Modifier.height(410.dp)) { TaskList(records(), failed, operationFailed, onControl) } }
     }
 
     @Test

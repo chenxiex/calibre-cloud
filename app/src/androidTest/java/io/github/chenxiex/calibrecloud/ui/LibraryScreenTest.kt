@@ -896,7 +896,7 @@ class LibraryScreenTest {
         val menu = compose.onNodeWithTag("selection_menu").getUnclippedBoundsInRoot()
         assertEquals(240f, (menu.right - menu.left).value, 0.5f)
         assertEquals(356f, menu.right.value, 0.5f)
-        assertEquals(56f, menu.top.value, 0.5f)
+        assertEquals(BAR_HEIGHT.value, menu.top.value, 0.5f)
         compose.onNodeWithTag("folder_架").assertIsDisplayed()
         // A tap outside closes the menu without toggling what it lands on.
         compose.onNodeWithTag("folder_架").performClick()

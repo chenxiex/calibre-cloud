@@ -9,24 +9,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.lightColorScheme
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.launch
 
@@ -87,7 +72,7 @@ class MainActivity : ComponentActivity() {
         dependencies.applicationScope.launch { dependencies.backgroundTasks.onMainOpened() }
         enableEdgeToEdge()
         setContent {
-            MaterialTheme(colorScheme = lightColorScheme(background = Color.White, onBackground = Color.Black)) {
+            CalibreCloudTheme {
                 val models = MoreModels(librariesModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel,
                     cleanupModel, taskModel, openModel)
                 val actions = MoreActions(
@@ -171,17 +156,5 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("picker_open", pickerOpen)
         super.onSaveInstanceState(outState)
-    }
-}
-
-@Composable
-internal fun StaticButton(label: String, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    // A disabled button is grey with a thinner border so the state does not rely on colour alone.
-    val tint = if (enabled) Color.Black else Color(0xFF8A8A8A)
-    Box(modifier.border(if (enabled) 1.dp else 0.5.dp, tint).clickable(
-        interactionSource = remember { MutableInteractionSource() }, indication = null,
-        enabled = enabled, role = Role.Button, onClick = onClick,
-    ).padding(horizontal = 16.dp, vertical = 12.dp)) {
-        Text(label, color = tint, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }

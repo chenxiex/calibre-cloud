@@ -5,11 +5,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -19,17 +22,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.chenxiex.calibrecloud.BuildConfig
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.about.NoticeComponent
@@ -39,9 +39,6 @@ import kotlinx.coroutines.withContext
 
 /** Full texts of the licenses third-party components use, by SPDX identifier; shown untranslated. */
 internal val LICENSE_TEXTS: Map<String, Int> = mapOf("Apache-2.0" to R.raw.license_apache_2_0)
-
-private val TEXT_STYLE = TextStyle(fontSize = 15.sp, lineHeight = 21.sp, color = Color.Black)
-private val PARAGRAPH_GAP = 10.dp
 
 /** One paragraph of a paged text; a [heading] is bold and kept with the paragraph after it. */
 internal data class TextParagraph(val text: String, val heading: Boolean = false)
@@ -64,9 +61,9 @@ internal fun AboutPage(show: (MorePage) -> Unit) {
     Column(Modifier.fillMaxSize().testTag("about_page")) {
         PagedText(paragraphs, "about", Modifier.weight(1f))
         HorizontalRule()
-        Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StaticButton(stringResource(R.string.about_open_license), true, Modifier.testTag("about_project_license")) { show(MorePage.PROJECT_LICENSE) }
-            StaticButton(stringResource(R.string.about_open_notices), true, Modifier.testTag("about_notices")) { show(MorePage.NOTICES) }
+        ButtonRow {
+            ActionButton(stringResource(R.string.about_open_license), true, Modifier.testTag("about_project_license")) { show(MorePage.PROJECT_LICENSE) }
+            ActionButton(stringResource(R.string.about_open_notices), true, Modifier.testTag("about_notices")) { show(MorePage.NOTICES) }
         }
     }
 }
@@ -83,9 +80,9 @@ internal fun NoticesPage(openLicense: (String) -> Unit) {
     Column(Modifier.fillMaxSize().testTag("notices_page")) {
         PagedText(paragraphs, "notices", Modifier.weight(1f))
         HorizontalRule()
-        Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ButtonRow {
             notices.orEmpty().map { it.license }.distinct().filter { it in LICENSE_TEXTS }.forEach { license ->
-                StaticButton(stringResource(R.string.about_license_full, license), true, Modifier.testTag("notice_license_$license")) {
+                ActionButton(stringResource(R.string.about_license_full, license), true, Modifier.testTag("notice_license_$license")) {
                     openLicense(license)
                 }
             }
@@ -113,6 +110,12 @@ internal fun LicenseTextPage(@RawRes text: Int, tagPrefix: String) {
     PagedText(paragraphs, tagPrefix, Modifier.fillMaxSize().testTag("${tagPrefix}_page"))
 }
 
+/** Buttons below the paged text, at the page margins. */
+@Composable
+private fun ButtonRow(content: @Composable RowScope.() -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = PAGE_MARGIN), horizontalArrangement = Arrangement.spacedBy(SECTION_GAP), content = content)
+}
+
 /** A raw resource read off the main thread; null until read. */
 @Composable
 private fun rawText(@RawRes id: Int): String? {
@@ -136,33 +139,32 @@ internal fun PagedText(paragraphs: List<TextParagraph>?, tagPrefix: String, modi
     var page by rememberSaveable(tagPrefix) { mutableIntStateOf(0) }
     val measurer = rememberTextMeasurer()
     val density = LocalDensity.current
-    val bold = TEXT_STYLE.copy(fontWeight = FontWeight.Bold)
+    val style = MaterialTheme.typography.bodyMedium.copy(color = INK)
+    val bold = style.copy(fontWeight = FontWeight.Bold)
     BoxWithConstraints(modifier.fillMaxSize()) {
-        val inset = 16.dp
+        val inset = PAGE_MARGIN
         val width = with(density) { (maxWidth - inset * 2).roundToPx() }.coerceAtLeast(1)
-        val lines = remember(paragraphs, width) {
+        val lines = remember(paragraphs, width, style) {
             paragraphs.orEmpty().flatMap { paragraph ->
-                val style = if (paragraph.heading) bold else TEXT_STYLE
-                val layout = measurer.measure(paragraph.text, style, constraints = Constraints(maxWidth = width))
+                val layout = measurer.measure(paragraph.text, if (paragraph.heading) bold else style, constraints = Constraints(maxWidth = width))
                 (0 until layout.lineCount).map { line ->
                     TextLine(
                         paragraph.text.substring(layout.getLineStart(line), layout.getLineEnd(line, visibleEnd = true)),
                         with(density) { (layout.getLineBottom(line) - layout.getLineTop(line)).toDp().value },
                         paragraph.heading, gap = false,
                     )
-                } + TextLine("", PARAGRAPH_GAP.value, bold = false, gap = true)
+                } + TextLine("", SECTION_GAP.value, bold = false, gap = true)
             }
         }
         val blocks = lines.map { PageBlock(it.height, keepWithNext = it.bold, separator = it.gap) }
-        val bar = 48.dp
-        val pages = paginate(blocks, maxHeight.value).takeIf { it.size <= 1 } ?: paginate(blocks, (maxHeight - bar).value)
+        val pages = paginate(blocks, maxHeight.value).takeIf { it.size <= 1 } ?: paginate(blocks, (maxHeight - PAGE_BAR_HEIGHT).value)
         val current = page.coerceIn(0, pages.size - 1)
-        PagedArea(current, pages.size, tagPrefix, bar, { page = it }, Modifier.fillMaxSize()) {
+        PagedArea(current, pages.size, tagPrefix, { page = it }, Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().padding(horizontal = inset).testTag("${tagPrefix}_text")) {
                 pages[current].forEach { index ->
                     val line = lines[index]
                     if (line.gap) Spacer(Modifier.height(line.height.dp))
-                    else Text(line.text, Modifier.height(line.height.dp), style = if (line.bold) bold else TEXT_STYLE, maxLines = 1, softWrap = false)
+                    else Text(line.text, Modifier.height(line.height.dp), style = if (line.bold) bold else style, maxLines = 1, softWrap = false)
                 }
             }
         }

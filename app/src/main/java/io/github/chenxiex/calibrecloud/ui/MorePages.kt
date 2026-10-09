@@ -1,23 +1,18 @@
 package io.github.chenxiex.calibrecloud.ui
 
 import android.text.format.Formatter
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -29,28 +24,21 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.chenxiex.calibrecloud.R
-import io.github.chenxiex.calibrecloud.auth.LoginIssue
 import io.github.chenxiex.calibrecloud.auth.LoginStatus
-import io.github.chenxiex.calibrecloud.auth.OneDriveOAuthConfiguration
 import io.github.chenxiex.calibrecloud.metadata.ReadColumnStatus
-import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.storage.api.SourceAvailability
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.storage.cache.CleanupKind
-import io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus
-import io.github.chenxiex.calibrecloud.storage.local.DirectorySelectionIssue
 import io.github.chenxiex.calibrecloud.tasks.api.TaskError
 import io.github.chenxiex.calibrecloud.tasks.api.TaskRequest
 import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
@@ -58,15 +46,8 @@ import io.github.chenxiex.calibrecloud.tasks.api.TaskState
 import io.github.chenxiex.calibrecloud.tasks.api.WaitingReason
 import io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler
 
-private val PAGE_ROW_HEIGHT = 48.dp
-private val DIRECTORY_ROW_HEIGHT = 52.dp
-private val DOWNLOAD_ROW_HEIGHT = 124.dp
-
-/** A short sub-page: text and buttons from the top, never scrolled. */
-@Composable
-private fun PageColumn(tag: String, content: @Composable () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(16.dp).testTag(tag), verticalArrangement = Arrangement.spacedBy(12.dp)) { content() }
-}
+/** Title, format line, an optional problem line and the buttons. */
+private val DOWNLOAD_ROW_HEIGHT = 120.dp
 
 /**
  * The OneDrive directory chooser of the add-library wizard (R08): one explicit task lists the entered
@@ -89,22 +70,24 @@ internal fun DirectoryPage(model: OneDriveLibraryViewModel, oneDrive: OneDriveAu
         if (page == null) {
             // Before the first listing arrives (restoring or opening the root), only the loading icon shows.
             if (status == null || status == R.string.onedrive_task_pending) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { LoadingIcon() }
+                Centered { LoadingIcon() }
                 return@Column
             }
-            Text(stringResource(status), Modifier.padding(16.dp).testTag("directory_status"))
-            if (model.rejected || model.record?.state is TaskState.Finished) {
-                StaticButton(stringResource(R.string.onedrive_browse), idle, Modifier.padding(horizontal = 16.dp).testTag("onedrive_browse")) {
-                    model.browse()
+            FormColumn("directory_failure") {
+                Text(stringResource(status), Modifier.testTag("directory_status"))
+                if (model.rejected || model.record?.state is TaskState.Finished) {
+                    ActionButton(stringResource(R.string.onedrive_browse), idle, Modifier.testTag("onedrive_browse"), ButtonKind.PRIMARY) {
+                        model.browse()
+                    }
                 }
             }
             return@Column
         }
         // One row: the directory, then reloading it, going up and choosing it, as in a system folder picker.
-        Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(start = PAGE_MARGIN), verticalAlignment = Alignment.CenterVertically) {
             Text(stringResource(R.string.onedrive_current_directory, page.directoryName.ifEmpty { stringResource(R.string.onedrive_root_name) }),
                 Modifier.weight(1f).testTag("directory_current"), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (model.loading) LoadingIcon(Modifier.padding(horizontal = 12.dp))
+            if (model.loading) IconSlot(R.drawable.ic_hourglass, stringResource(R.string.onedrive_loading), Modifier.testTag("directory_loading"))
             IconAction(R.drawable.ic_refresh, stringResource(R.string.onedrive_directory_reload), idle,
                 Modifier.testTag("onedrive_directory_reload")) { model.reload() }
             IconAction(R.drawable.ic_arrow_up, stringResource(R.string.onedrive_directory_up), idle && model.canGoUp,
@@ -113,25 +96,19 @@ internal fun DirectoryPage(model: OneDriveLibraryViewModel, oneDrive: OneDriveAu
                 Modifier.testTag("onedrive_directory_choose")) { model.choose(page.parentItemId, onChosen) }
         }
         status?.let {
-            Text(stringResource(it), Modifier.padding(horizontal = 16.dp).testTag("directory_status"), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(stringResource(it), Modifier.padding(horizontal = PAGE_MARGIN).padding(bottom = TIGHT_GAP).testTag("directory_status"),
+                style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
         HorizontalRule()
-        PagedArea(page.page, model.pageCount, "directory", PAGE_ROW_HEIGHT, model::paginate, Modifier.weight(1f).fillMaxWidth(), showBar = true) {
+        PagedArea(page.page, model.pageCount, "directory", model::paginate, Modifier.weight(1f).fillMaxWidth(), showBar = true) {
             BoxWithConstraints(Modifier.fillMaxSize()) {
-                val rows = listGeometry(maxWidth.value, maxHeight.value, DIRECTORY_ROW_HEIGHT.value).rows
+                val rows = listGeometry(maxWidth.value, maxHeight.value, ROW_HEIGHT.value).rows
                 LaunchedEffect(rows) { model.onMeasured(rows) }
+                if (page.items.isEmpty()) EmptyMessage(stringResource(R.string.onedrive_directory_empty))
                 Column(Modifier.fillMaxSize()) {
-                    if (page.items.isEmpty()) Text(stringResource(R.string.onedrive_directory_empty), Modifier.padding(16.dp))
                     page.items.take(rows).forEach { item ->
-                        Row(
-                            Modifier.fillMaxWidth().height(DIRECTORY_ROW_HEIGHT).testTag("directory_${item.id}")
-                                .clickable(remember { MutableInteractionSource() }, null, enabled = idle, role = Role.Button) { model.enter(item.id) }
-                                .padding(horizontal = 16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(item.name, Modifier.weight(1f), color = if (idle) Color.Black else DISABLED_TINT, fontSize = 16.sp,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Icon(painterResource(R.drawable.ic_next_page), null, Modifier.size(20.dp), tint = if (idle) Color.Black else DISABLED_TINT)
+                        ListItem(item.name, Modifier.testTag("directory_${item.id}"), enabled = idle, onClick = { model.enter(item.id) }) {
+                            IconSlot(R.drawable.ic_next_page, null, enabled = idle)
                         }
                     }
                 }
@@ -142,8 +119,9 @@ internal fun DirectoryPage(model: OneDriveLibraryViewModel, oneDrive: OneDriveAu
 
 /** A still hourglass: e-ink pages show waiting without animation. */
 @Composable
-private fun LoadingIcon(modifier: Modifier = Modifier) {
-    Icon(painterResource(R.drawable.ic_hourglass), stringResource(R.string.onedrive_loading), modifier.size(24.dp).testTag("directory_loading"))
+private fun LoadingIcon() {
+    Icon(painterResource(R.drawable.ic_hourglass), stringResource(R.string.onedrive_loading), Modifier.size(ICON_SIZE).testTag("directory_loading"),
+        tint = INK)
 }
 
 /** Shared text mapping keeps browser errors visible beside the control that submitted them. */
@@ -197,20 +175,20 @@ internal fun DownloadsPage(model: DownloadViewModel, onOpen: (CopyKey, String) -
         Column(Modifier.fillMaxSize()) {
             model.removalResult?.let {
                 Text(stringResource(if (it) R.string.download_remove_done else R.string.download_remove_failed),
-                    Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("download_result"))
+                    Modifier.padding(horizontal = PAGE_MARGIN, vertical = SECTION_GAP).testTag("download_result"))
             }
             when {
-                model.readFailed -> Text(stringResource(R.string.download_local_error), Modifier.padding(16.dp))
-                model.selection?.identity == null -> Text(stringResource(R.string.download_no_library), Modifier.padding(16.dp))
+                model.readFailed -> EmptyMessage(stringResource(R.string.download_local_error))
+                model.selection?.identity == null -> EmptyMessage(stringResource(R.string.download_no_library))
                 else -> {
                     val capacity = model.capacity.coerceAtLeast(1)
-                    PagedArea(model.offset / capacity, pageCount(model.total, capacity), "downloads", PAGE_ROW_HEIGHT, model::showPage,
+                    PagedArea(model.offset / capacity, pageCount(model.total, capacity), "downloads", model::showPage,
                         Modifier.weight(1f).fillMaxWidth(), showBar = true) {
                         BoxWithConstraints(Modifier.fillMaxSize()) {
                             val geometry = listGeometry(maxWidth.value, maxHeight.value, DOWNLOAD_ROW_HEIGHT.value)
                             LaunchedEffect(geometry.rows) { model.onMeasured(geometry.rows) }
+                            if (model.total == 0) EmptyMessage(stringResource(R.string.download_list_empty), Modifier.testTag("download_empty"))
                             Column(Modifier.fillMaxSize()) {
-                                if (model.total == 0) Text(stringResource(R.string.download_list_empty), Modifier.padding(16.dp).testTag("download_empty"))
                                 model.entries.take(geometry.rows).forEach { entry ->
                                     DownloadRow(entry, geometry.cellHeight.dp, !model.submitting, onOpen, model::previewRemoval)
                                 }
@@ -221,14 +199,13 @@ internal fun DownloadsPage(model: DownloadViewModel, onOpen: (CopyKey, String) -
             }
         }
         model.removal?.let { plan ->
-            ConfirmPanel("download_remove_dialog", listOf(
-                if (plan.formats == null) stringResource(R.string.download_remove_all_scope)
-                else stringResource(R.string.removal_formats, plan.formats.map { it.value }.sorted().joinToString(stringResource(R.string.removal_format_separator))),
-                if (plan.copies.isEmpty()) stringResource(R.string.removal_no_copies)
-                else androidx.compose.ui.res.pluralStringResource(R.plurals.removal_copies, plan.copies.size, plan.copies.size,
-                    Formatter.formatShortFileSize(context, plan.bytes)),
-                stringResource(R.string.removal_scope_note),
-            ), !model.submitting, model::cancelRemoval, model::confirmRemoval)
+            ConfirmPanel("download_remove_dialog", !model.submitting, model::cancelRemoval, model::confirmRemoval) {
+                Text(if (plan.formats == null) stringResource(R.string.download_remove_all_scope)
+                    else stringResource(R.string.removal_formats, plan.formats.map { it.value }.sorted().joinToString(stringResource(R.string.removal_format_separator))))
+                Text(if (plan.copies.isEmpty()) stringResource(R.string.removal_no_copies)
+                    else pluralStringResource(R.plurals.removal_copies, plan.copies.size, plan.copies.size, Formatter.formatShortFileSize(context, plan.bytes)))
+                Text(stringResource(R.string.removal_scope_note), style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
@@ -241,51 +218,28 @@ private fun DownloadRow(
     val copy = entry.copy
     val tag = "${copy.key.book.sourceId}_${copy.key.format.value}"
     val context = LocalContext.current
-    Column(Modifier.fillMaxWidth().height(height).padding(horizontal = 16.dp, vertical = 6.dp).testTag("download_$tag"),
-        verticalArrangement = Arrangement.SpaceBetween) {
-        Text(copy.title, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        val size = copy.sizeBytes?.let { Formatter.formatShortFileSize(context, it) }
-        Text(
-            listOfNotNull(copy.key.format.value, size, stringResource(when (copy.sourceAvailability) {
-                SourceAvailability.UNCONFIRMED -> R.string.download_source_unconfirmed
-                SourceAvailability.AVAILABLE -> R.string.download_source_available
-                SourceAvailability.CONFIRMED_MISSING -> R.string.download_source_missing
-            })).joinToString(stringResource(R.string.list_separator)),
-            fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-        )
-        if (entry.status != DownloadCopyStatus.AVAILABLE) {
-            Text(stringResource(if (entry.status == DownloadCopyStatus.MISSING) R.string.download_copy_missing else R.string.download_copy_failed),
-                fontSize = 13.sp, maxLines = 1)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            StaticButton(stringResource(R.string.download_open), enabled && entry.status == DownloadCopyStatus.AVAILABLE,
-                Modifier.testTag("download_open_$tag")) { onOpen(copy.key, copy.title) }
-            StaticButton(stringResource(R.string.download_remove), enabled, Modifier.testTag("download_remove_$tag")) { onRemove(entry, false) }
-            StaticButton(stringResource(R.string.download_remove_all), enabled, Modifier.testTag("download_remove_all_$tag")) { onRemove(entry, true) }
-        }
-    }
-}
-
-/** A confirmation over the page: [lines] describe the exact range; nothing happens until confirmed. */
-@Composable
-internal fun ConfirmPanel(tag: String, lines: List<String>, enabled: Boolean, onCancel: () -> Unit, onConfirm: () -> Unit) {
-    Box(
-        Modifier.fillMaxSize().clickable(remember { MutableInteractionSource() }, null, onClick = onCancel),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            Modifier.fillMaxWidth(0.86f).background(Color.White).border(2.dp, Color.Black)
-                .clickable(remember { MutableInteractionSource() }, null) {}
-                .padding(16.dp).testTag(tag),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            lines.forEach { Text(it) }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                StaticButton(stringResource(R.string.removal_cancel), enabled, Modifier.testTag("${tag}_cancel"), onCancel)
-                Spacer(Modifier.width(12.dp))
-                StaticButton(stringResource(R.string.removal_confirm), enabled, Modifier.testTag("${tag}_confirm"), onConfirm)
+    Column(Modifier.fillMaxWidth().height(height).testTag("download_$tag")) {
+        Column(Modifier.fillMaxWidth().weight(1f).padding(horizontal = PAGE_MARGIN, vertical = TIGHT_GAP), verticalArrangement = Arrangement.SpaceBetween) {
+            Text(copy.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val size = copy.sizeBytes?.let { Formatter.formatShortFileSize(context, it) }
+            SupportingText(
+                listOfNotNull(copy.key.format.value, size, stringResource(when (copy.sourceAvailability) {
+                    SourceAvailability.UNCONFIRMED -> R.string.download_source_unconfirmed
+                    SourceAvailability.AVAILABLE -> R.string.download_source_available
+                    SourceAvailability.CONFIRMED_MISSING -> R.string.download_source_missing
+                })).joinToString(stringResource(R.string.list_separator)),
+            )
+            if (entry.status != DownloadCopyStatus.AVAILABLE) {
+                SupportingText(stringResource(if (entry.status == DownloadCopyStatus.MISSING) R.string.download_copy_missing else R.string.download_copy_failed))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(SECTION_GAP)) {
+                ActionButton(stringResource(R.string.download_open), enabled && entry.status == DownloadCopyStatus.AVAILABLE,
+                    Modifier.testTag("download_open_$tag")) { onOpen(copy.key, copy.title) }
+                ActionButton(stringResource(R.string.download_remove), enabled, Modifier.testTag("download_remove_$tag")) { onRemove(entry, false) }
+                ActionButton(stringResource(R.string.download_remove_all), enabled, Modifier.testTag("download_remove_all_$tag")) { onRemove(entry, true) }
             }
         }
+        InsetRule()
     }
 }
 
@@ -294,7 +248,7 @@ internal fun ConfirmPanel(tag: String, lines: List<String>, enabled: Boolean, on
  * exact local range without touching a source; only the confirmation executes that same plan.
  */
 @Composable
-internal fun CleanupPage(model: CleanupViewModel, kind: CleanupKind) = PageColumn("cleanup_page") {
+internal fun CleanupPage(model: CleanupViewModel, kind: CleanupKind) = FormColumn("cleanup_page") {
     val context = LocalContext.current
     LaunchedEffect(kind) { model.preview(kind) }
     Text(stringResource(if (kind == CleanupKind.METADATA) R.string.cleanup_metadata_scope else R.string.cleanup_other_libraries_scope))
@@ -302,13 +256,12 @@ internal fun CleanupPage(model: CleanupViewModel, kind: CleanupKind) = PageColum
     if (plan != null) {
         Text(stringResource(R.string.cleanup_range, plan.libraries.size, plan.copies.size, Formatter.formatShortFileSize(context, plan.bytes)),
             Modifier.testTag("cleanup_range"))
-        Row {
-            StaticButton(stringResource(R.string.cleanup_cancel), !model.busy, Modifier.testTag("cleanup_cancel")) { model.cancel() }
-            Spacer(Modifier.width(12.dp))
-            StaticButton(stringResource(R.string.cleanup_confirm), !model.busy, Modifier.testTag("cleanup_confirm")) { model.confirm() }
+        Row(horizontalArrangement = Arrangement.spacedBy(SECTION_GAP)) {
+            ActionButton(stringResource(R.string.cleanup_cancel), !model.busy, Modifier.testTag("cleanup_cancel"), ButtonKind.TEXT) { model.cancel() }
+            ActionButton(stringResource(R.string.cleanup_confirm), !model.busy, Modifier.testTag("cleanup_confirm"), ButtonKind.PRIMARY) { model.confirm() }
         }
     } else if (!model.busy) {
-        StaticButton(stringResource(R.string.cleanup_review), true, Modifier.testTag("cleanup_review")) { model.preview(kind) }
+        ActionButton(stringResource(R.string.cleanup_review), true, Modifier.testTag("cleanup_review")) { model.preview(kind) }
     }
     if (model.busy) Text(stringResource(R.string.cleanup_busy))
     model.result?.let { result ->
@@ -348,7 +301,6 @@ internal fun FormatPriorityPage(model: MetadataViewModel) {
 internal fun ReadColumnPage(model: MetadataViewModel) {
     var page by rememberSaveable { mutableIntStateOf(0) }
     val imported = model.imported
-    val chosen = stringResource(R.string.library_menu_chosen)
     val entries = buildList {
         add(MenuEntry.Note("read_column_state", when {
             model.readFailed -> stringResource(R.string.metadata_local_error)
@@ -364,12 +316,12 @@ internal fun ReadColumnPage(model: MetadataViewModel) {
             columns.forEach { column ->
                 add(MenuEntry.Choice("read_column_${column.id.sourceId}",
                     stringResource(R.string.metadata_column_option, column.name, column.id.lookupName),
-                    mark = if (column.id == imported.selectedReadColumn) R.drawable.ic_check else null, markDescription = chosen,
+                    selected = column.id == imported.selectedReadColumn,
                     enabled = !model.busy) { model.selectColumn(column.id) })
             }
             add(MenuEntry.Rule)
             add(MenuEntry.Choice("read_column_none", stringResource(R.string.metadata_columns_clear),
-                mark = if (imported.selectedReadColumn == null) R.drawable.ic_check else null, markDescription = chosen,
+                selected = imported.selectedReadColumn == null,
                 enabled = !model.busy) { model.selectColumn(null) })
         }
     }

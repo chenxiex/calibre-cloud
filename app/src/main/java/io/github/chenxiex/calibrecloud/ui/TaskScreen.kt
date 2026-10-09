@@ -2,22 +2,16 @@ package io.github.chenxiex.calibrecloud.ui
 
 import android.os.Build
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -25,30 +19,20 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
-
-private val TASK_ROW_HEIGHT = 64.dp
 
 /** Which side of the queue the page shows: unfinished work or finished results (including failures and cancels). */
 internal enum class TaskTab { ACTIVE, FINISHED }
@@ -78,23 +62,25 @@ internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFaile
     var tab by rememberSaveable { mutableStateOf(TaskTab.ACTIVE) }
     var source by rememberSaveable { mutableStateOf(TaskSourceFilter.ALL) }
     Column(Modifier.fillMaxSize().testTag("task_page")) {
-        if (failed) Text(stringResource(R.string.task_local_error), Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
-        if (operationFailed) Text(stringResource(R.string.task_control_error), Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (failed) Text(stringResource(R.string.task_local_error), Modifier.padding(horizontal = PAGE_MARGIN, vertical = TIGHT_GAP))
+        if (operationFailed) Text(stringResource(R.string.task_control_error), Modifier.padding(horizontal = PAGE_MARGIN, vertical = TIGHT_GAP))
+        // The tabs, then the source filter at the end; the chosen chip of each is filled (Q65).
+        Row(Modifier.fillMaxWidth().padding(horizontal = PAGE_MARGIN), horizontalArrangement = Arrangement.spacedBy(TIGHT_GAP),
+            verticalAlignment = Alignment.CenterVertically) {
             TaskTab.entries.forEach { entry ->
-                Choice(stringResource(if (entry == TaskTab.ACTIVE) R.string.task_tab_active else R.string.task_tab_finished),
-                    entry == tab, 16.sp, "task_tab_${entry.name.lowercase()}") { tab = entry; page = 0 }
+                ChoiceChip(stringResource(if (entry == TaskTab.ACTIVE) R.string.task_tab_active else R.string.task_tab_finished),
+                    entry == tab, Modifier.testTag("task_tab_${entry.name.lowercase()}"), Role.Tab) { tab = entry; page = 0 }
             }
             Spacer(Modifier.weight(1f))
             TaskSourceFilter.entries.forEach { entry ->
-                Choice(stringResource(when (entry) {
+                ChoiceChip(stringResource(when (entry) {
                     TaskSourceFilter.ALL -> R.string.task_filter_all
                     TaskSourceFilter.USER -> R.string.task_filter_user
                     TaskSourceFilter.AUTOMATIC -> R.string.task_filter_automatic
-                }), entry == source, 13.sp, "task_filter_${entry.name.lowercase()}") { source = entry; page = 0 }
+                }), entry == source, Modifier.testTag("task_filter_${entry.name.lowercase()}"), Role.Tab) { source = entry; page = 0 }
             }
         }
-        HorizontalDivider(color = Color.Black)
+        HorizontalRule()
         // Only tasks that wait their turn have a scheduling position, counted over the whole queue.
         val pending = records.filter { it.state == TaskState.Queued }
         val shown = records.filter { record ->
@@ -108,15 +94,16 @@ internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFaile
             if (tab == TaskTab.FINISHED) filtered.sortedByDescending { it.scheduling.sequence.value } else filtered
         }
         if (shown.isEmpty()) {
-            Text(stringResource(R.string.task_empty), Modifier.padding(16.dp).testTag("task_empty"))
+            EmptyMessage(stringResource(R.string.task_empty), Modifier.testTag("task_empty"))
             return@Column
         }
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-            val whole = listGeometry(maxWidth.value, maxHeight.value, TASK_ROW_HEIGHT.value).rows
-            val rows = if (shown.size <= whole) whole else listGeometry(maxWidth.value, maxHeight.value - 48f, TASK_ROW_HEIGHT.value).rows
+            val whole = listGeometry(maxWidth.value, maxHeight.value, TWO_LINE_ROW_HEIGHT.value).rows
+            val rows = if (shown.size <= whole) whole
+                else listGeometry(maxWidth.value, (maxHeight - PAGE_BAR_HEIGHT).value, TWO_LINE_ROW_HEIGHT.value).rows
             val pages = pageCount(shown.size, rows)
             val current = page.coerceIn(0, pages - 1)
-            PagedArea(current, pages, "tasks", 48.dp, { page = it }, Modifier.fillMaxSize()) {
+            PagedArea(current, pages, "tasks", { page = it }, Modifier.fillMaxSize()) {
                 Column(Modifier.fillMaxSize()) {
                     shown.drop(current * rows).take(rows).forEach { record ->
                         TaskRow(record, pending.indexOf(record).takeIf { it >= 0 }?.plus(1), onControl)
@@ -127,51 +114,35 @@ internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFaile
     }
 }
 
-/** A tab or filter option; the selected one is bold and underlined, so it reads without color. */
 @Composable
-private fun Choice(label: String, selected: Boolean, size: TextUnit, tag: String, onClick: () -> Unit) {
-    Column(
-        Modifier.height(44.dp).clickable(remember { MutableInteractionSource() }, null, role = Role.Tab, onClick = onClick)
-            .semantics { this.selected = selected }.padding(horizontal = 8.dp).testTag(tag),
-        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+private fun TaskRow(record: TaskRecord, position: Int?, onControl: (TaskRecord, TaskControl) -> Unit) {
+    ListItem(
+        stringResource(taskTypeResource(record.submission.request)), Modifier.testTag("task_${record.id.value}"), TWO_LINE_ROW_HEIGHT,
+        bold = true, divider = true,
+        supporting = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (record.effectiveOrigin.priority == TaskPriority.HIGH) {
+                    Icon(painterResource(R.drawable.ic_pin_top), stringResource(R.string.task_filter_user),
+                        Modifier.padding(end = TIGHT_GAP).size(USER_MARK_SIZE).testTag("task_user_mark"), tint = INK)
+                }
+                SupportingText(taskStatusLine(record, position), Modifier.testTag("task_status"))
+            }
+        },
     ) {
-        Text(label, fontSize = size, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal, maxLines = 1)
-        Box(Modifier.padding(top = 2.dp).width(24.dp).height(2.dp).then(if (selected) Modifier.background(Color.Black) else Modifier))
+        val controls = record.controls
+        val result = (record.state as? TaskState.Finished)?.result
+        if (controls.canPause) IconAction(R.drawable.ic_pause, stringResource(R.string.task_pause), true, Modifier.testTag("task_pause")) { onControl(record, TaskControl.PAUSE) }
+        if (controls.canResume) IconAction(R.drawable.ic_play, stringResource(R.string.task_resume), true, Modifier.testTag("task_resume")) { onControl(record, TaskControl.RESUME) }
+        if (controls.canRetry) IconAction(R.drawable.ic_refresh, stringResource(R.string.task_retry), true, Modifier.testTag("task_retry")) { onControl(record, TaskControl.RETRY) }
+        if (controls.canCancel) IconAction(R.drawable.ic_close, stringResource(R.string.task_cancel), true, Modifier.testTag("task_cancel")) { onControl(record, TaskControl.CANCEL) }
+        if (!controls.canRetry && (result == TaskResult.Completed || result is TaskResult.CompletedWithBookFailures)) {
+            IconSlot(R.drawable.ic_check, stringResource(R.string.task_completed), Modifier.testTag("task_done"))
+        }
     }
 }
 
-@Composable
-private fun TaskRow(record: TaskRecord, position: Int?, onControl: (TaskRecord, TaskControl) -> Unit) {
-    // The divider stays inside the row height, so a page of rows fits the measured space.
-    Column(Modifier.fillMaxWidth().height(TASK_ROW_HEIGHT).testTag("task_${record.id.value}")) {
-        Row(Modifier.fillMaxWidth().weight(1f).padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(stringResource(taskTypeResource(record.submission.request)),
-                    fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (record.effectiveOrigin.priority == TaskPriority.HIGH) {
-                        Icon(painterResource(R.drawable.ic_pin_top), stringResource(R.string.task_filter_user),
-                            Modifier.padding(end = 4.dp).size(14.dp).testTag("task_user_mark"), tint = Color.Black)
-                    }
-                    Text(taskStatusLine(record, position), Modifier.testTag("task_status"),
-                        fontSize = 13.sp, lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-            }
-            val controls = record.controls
-            val result = (record.state as? TaskState.Finished)?.result
-            if (controls.canPause) IconAction(R.drawable.ic_pause, stringResource(R.string.task_pause), true, Modifier.testTag("task_pause")) { onControl(record, TaskControl.PAUSE) }
-            if (controls.canResume) IconAction(R.drawable.ic_play, stringResource(R.string.task_resume), true, Modifier.testTag("task_resume")) { onControl(record, TaskControl.RESUME) }
-            if (controls.canRetry) IconAction(R.drawable.ic_refresh, stringResource(R.string.task_retry), true, Modifier.testTag("task_retry")) { onControl(record, TaskControl.RETRY) }
-            if (controls.canCancel) IconAction(R.drawable.ic_close, stringResource(R.string.task_cancel), true, Modifier.testTag("task_cancel")) { onControl(record, TaskControl.CANCEL) }
-            if (!controls.canRetry && (result == TaskResult.Completed || result is TaskResult.CompletedWithBookFailures)) {
-                Box(Modifier.size(ICON_TOUCH_SIZE), contentAlignment = Alignment.Center) {
-                    Icon(painterResource(R.drawable.ic_check), stringResource(R.string.task_completed), Modifier.size(24.dp).testTag("task_done"), tint = Color.Black)
-                }
-            }
-        }
-        HorizontalDivider(color = DISABLED_TINT)
-    }
-}
+/** The pin-to-top arrow of user requests fits the supporting line. */
+private val USER_MARK_SIZE = 14.dp
 
 /** A task that only waits its turn shows "排队" and its position (R18); other states a short stage, percentage or reason. */
 @Composable
@@ -208,19 +179,17 @@ private fun taskStatusLine(record: TaskRecord, position: Int?): String = buildLi
 
 /** Notification permission and the platform's background limits, which can delay queued work. */
 @Composable
-internal fun BackgroundSettings(model: TaskViewModel, onRequestNotifications: () -> Unit) = Column(
-    Modifier.fillMaxSize().padding(16.dp).testTag("background_page"), verticalArrangement = Arrangement.spacedBy(12.dp),
-) {
+internal fun BackgroundSettings(model: TaskViewModel, onRequestNotifications: () -> Unit) = FormColumn("background_page") {
     LaunchedEffect(model) { model.refreshCapabilities() }
     Text(stringResource(if (model.notificationsEnabled) R.string.task_notifications_on else R.string.task_notifications_off))
     if (!model.notificationsEnabled && Build.VERSION.SDK_INT >= 33) {
-        StaticButton(stringResource(R.string.task_notifications_request), true) { onRequestNotifications() }
+        ActionButton(stringResource(R.string.task_notifications_request), true, kind = ButtonKind.PRIMARY) { onRequestNotifications() }
     }
     if (model.backgroundRestricted) Text(stringResource(R.string.task_background_restricted))
     Text(stringResource(if (model.batteryOptimized) R.string.task_battery_optimized else R.string.task_battery_exempt))
     if (model.platformBlocked) {
         Text(stringResource(R.string.task_platform_waiting))
-        StaticButton(stringResource(R.string.task_background_retry), true) { model.retryBackground() }
+        ActionButton(stringResource(R.string.task_background_retry), true) { model.retryBackground() }
     }
     if (model.failed) Text(stringResource(R.string.task_local_error))
 }

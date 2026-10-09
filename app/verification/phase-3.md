@@ -320,7 +320,7 @@ adb shell am instrument -w -e class <BookFileProviderTest,EncryptedAuthStateStor
 ### 共同验收结论
 
 - 2026-10-08 用户确认通过：外部打开（汉王阅读器、KOReader）、Q50 显示名、Q51 下载中图标、感叹号与精简后的通知文案、OneDrive 目录选择页布局。
-- 仍未在真机执行，留步骤 08 联验：无阅读器时报错且不更新上次打开（PA6 上的格式都有处理应用）、拒绝通知权限后只显示感叹号、点击通知进入登录／授权／同步页（需真实失效）、PDF 阅读器、源已不可用的副本与更新失败后旧副本的打开。OneDrive 下载请求偏多导致的等待（见“OneDrive 打开实测”的耗时分解）由新增的步骤 05 按 Q52 处理，原步骤 05–07 顺延为 06–08。
+- 仍未在真机执行，留联验步骤（当时为步骤 08，插入统一 UI 风格后为步骤 09）：无阅读器时报错且不更新上次打开（PA6 上的格式都有处理应用）、拒绝通知权限后只显示感叹号、点击通知进入登录／授权／同步页（需真实失效）、PDF 阅读器、源已不可用的副本与更新失败后旧副本的打开。OneDrive 下载请求偏多导致的等待（见“OneDrive 打开实测”的耗时分解）由新增的步骤 05 按 Q52 处理，原步骤 05–07 顺延为 06–08。
 - 清理：删除 KOReader 目录中本步骤测试导入的 `A Brief Orchard*.epub`、`Quick Start Guide-1.epub`、`山纪事.epub` 及对应 `.sdr`（KOReader 历史中的这些条目会显示为文件缺失），删除 `/sdcard/Download/tmp-step04-probe` 与 `.ko-marker`；`adb uninstall` 测试包与 debug 包均返回 `Success`，限定包名查询确认均已不存在。测试书库副本 `/sdcard/Download/calibre-step04-test-library` 保留。
 
 ## 步骤 05：OneDrive 请求开销（2026-10-08）
@@ -577,3 +577,36 @@ Q53／Q54 真实服务验证（2026-10-08）：用户先在应用下载《哈姆
 
 - OneDrive 书库已在核对中删除；如需继续使用，可在向导中重新添加。
 - 用户确认更多页、关于页与墨水屏体验的整体结论后提交，并卸载 debug 包。
+
+## 步骤 08：统一 UI 风格与共享组件（2026-10-09）
+
+对应 R20 的统一视觉风格（Q64–Q68）。只改显示效果：控件顺序、导航、文案资源键、test tag 与分页规则不变。
+
+### 改动
+
+- 新增 `Theme.kt`（黑／白／灰配色、紧凑字体、4dp 圆角与胶囊形、间距与行高常量、不绘制的按压指示和 `Modifier.tap`）、`Components.kt`（顶栏、图标与文字按钮、`ChoiceChip`、`SelectionMark`、`TagLabel`、`ListItem`、`Heading`、`FormColumn`、`EmptyMessage`、`OverlayPanel`／`ConfirmPanel`、`SearchField`、分割线）与 `Menu.kt`（由 `LibraryScreen.kt` 移出的 `MenuEntry`／`MenuRow`／`PagedEntries`）。`StaticButton`、三处顶栏、两处搜索框、三种确认面板、两种页面列、任务页的下划线标签都改用共享实现；`PagedArea`／`PageBar` 去掉各处不同的翻页行高度参数，统一 48dp。
+- 菜单与设置的选项改为行首单选圈／多选框加粗体（Q65），排序方向箭头仍在行尾（R21）；搜索字段、任务标签与来源筛选为反色胶囊徽标；书库页当前书库为选中的单选圈加粗名称。按钮分实心／细边框／文字三级（Q67）：空状态与确认页的主操作为实心，取消为文字按钮。
+- 空结果（任务、已下载文件、书库、目录、搜索历史与菜单搜索）统一居中显示原因。紧凑化（Q66）：顶栏 56→48dp、底栏 56→52dp、菜单行 44→48dp、菜单翻页行 40→48dp、任务行 64→56dp、书库行 72→56dp、目录行 52→48dp；R27 的网格单元与 72dp 书籍列表行不变。
+- 测试调整：`TaskScreenTest` 的容器高度 460→410dp，保持“满页 6 行、分页时 5 行”的原断言；`LibraryScreenTest` 选择模式弹出菜单的上沿改为按 `BAR_HEIGHT` 断言。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.package=io.github.chenxiex.calibrecloud.ui
+```
+
+- `BUILD SUCCESSFUL`：JVM **154 tests、0 failures**；PA6（Android 14）`ui` 包 **48 tests、0 failures**；debug lint 0 errors，5 项均为既有的 Gradle／依赖新版本提示（中途一次出现的两条 `ModifierParameter` 已改正）；`git diff --check` 通过。本步未改 Manifest、构建脚本与依赖锁，未执行 release 构建。
+- 首轮 PA6 运行 1 项失败：`aChosenFolderCountsItsFilteredBooksOnceAndTheMarkFollowsTheirReadState` 断言弹出菜单上沿为旧顶栏高度 56dp，实际 48dp；改为按 `BAR_HEIGHT` 断言后通过。
+- 静态核对：`rg` 检查 `ui/` 中除 `Theme.kt`／`Components.kt` 外不再出现 `RoundedCornerShape`、`CircleShape`、`Color(`／`Color.`、`HorizontalDivider`、`Card(`、`fontSize`、`clickable(` 与 `MutableInteractionSource`；剩余的 dp／sp 均为页面具名常量（R27 网格与列表下限、R28 状态图标、已读斜幅、滑动阈值、选择菜单宽度、下载行高、置顶箭头）。
+
+### 真机核对（PA6，扩展库副本）
+
+`aapt2` 核对 debug 包 `io.github.chenxiex.calibrecloud.debug` 后 `adb install -r`；agent 用 helper 在向导中选择本地类型，系统选择器路径为 `PA6 › Download › calibre-step04-test-library`，确认框写明 debug 应用与该目录后允许，完成向导并同步（286 本扩展库）。截图在被忽略的 `app/build/verification/phase3-step08-style/`：未配置空状态、向导第 1 步选项块、网格、列表、视图菜单、筛选面板、搜索页、选择模式（列表与网格）、选择“更多”弹出菜单、移除确认页（取消，未移除）、更多菜单两页、任务队列“已完成”、书库页。
+
+- 发现并修正：弹出菜单中三行说明紧贴边框（设备字体缩放 1.05 下三行 13sp 超过 56dp），说明行改为 64dp 并加 4dp 上下内边距，重新截图确认。
+- helper 拒绝点击覆盖层中的“移除下载”（`target_point_obstructed`）：其规则把面板下任何可点击节点都视为遮挡。该弹出菜单的结构与修改前相同，本轮用 helper 的设备配置坐标步骤打开和取消确认页；弹出菜单打开时顶栏不在无障碍树中，以系统返回关闭。
+- 最后一轮 `connectedDebugAndroidTest` 会卸载 debug 包，之后重新安装同一构建并按同样路径授权、同步，供用户体验。
+
+### 验收
+
+- 用户于 2026-10-09 在 PA6 上验收通过（整体风格、紧凑程度、灰度辨识、残影与无动画）。覆盖层点击被拒的问题按用户要求另行修改 helper，单独提交；debug 包在 helper 真机复验后卸载。

@@ -8,31 +8,25 @@ import android.content.Intent
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import io.github.chenxiex.calibrecloud.R
@@ -115,17 +109,17 @@ internal fun LastOpenedTab(value: LastOpened, cover: Bitmap?, modifier: Modifier
     val description = stringResource(R.string.last_opened_description, value.title)
     Box(
         modifier.fillMaxHeight().testTag("nav_last_opened")
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick)
-            .semantics(mergeDescendants = true) { contentDescription = description; role = Role.Button }
-            .padding(vertical = 4.dp),
+            .tap(onClick = onClick)
+            .semantics(mergeDescendants = true) { contentDescription = description }
+            .padding(vertical = TIGHT_GAP),
         contentAlignment = Alignment.Center,
     ) {
         if (cover != null) {
             val image = remember(cover) { cover.asImageBitmap() }
-            Image(image, null, Modifier.fillMaxHeight().aspectRatio(1f / COVER_ASPECT).border(1.dp, Color.Black), contentScale = ContentScale.Fit)
+            Image(image, null, Modifier.fillMaxHeight().aspectRatio(1f / COVER_ASPECT).border(BORDER, INK), contentScale = ContentScale.Fit)
         } else {
-            Box(Modifier.fillMaxHeight().fillMaxWidth(0.9f).border(1.dp, Color.Black).padding(horizontal = 4.dp), contentAlignment = Alignment.Center) {
-                Text(value.title, fontSize = 11.sp, lineHeight = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+            Box(Modifier.fillMaxHeight().fillMaxWidth(0.9f).border(BORDER, INK).padding(horizontal = TIGHT_GAP), contentAlignment = Alignment.Center) {
+                Text(value.title, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
             }
         }
     }

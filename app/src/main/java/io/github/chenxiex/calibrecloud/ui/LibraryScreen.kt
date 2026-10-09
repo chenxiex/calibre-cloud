@@ -3,19 +3,16 @@ package io.github.chenxiex.calibrecloud.ui
 import android.graphics.Bitmap
 import android.text.format.Formatter
 import androidx.activity.compose.BackHandler
-import androidx.annotation.DrawableRes
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -27,9 +24,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.requiredSize
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -46,12 +40,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -74,29 +66,22 @@ import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.library.BookRow
 import io.github.chenxiex.calibrecloud.library.BookSortKey
 import io.github.chenxiex.calibrecloud.library.Categorization
-import io.github.chenxiex.calibrecloud.library.FolderRow
 import io.github.chenxiex.calibrecloud.library.DownloadFilter
+import io.github.chenxiex.calibrecloud.library.FolderRow
 import io.github.chenxiex.calibrecloud.library.LibraryFilters
 import io.github.chenxiex.calibrecloud.library.LibraryProblem
 import io.github.chenxiex.calibrecloud.library.ReadFilter
 import io.github.chenxiex.calibrecloud.library.ReadMarkAction
 import io.github.chenxiex.calibrecloud.library.ReadMarkBlock
 import io.github.chenxiex.calibrecloud.model.BookKey
+import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
-import io.github.chenxiex.calibrecloud.model.CopyKey
 
 // Count first (R27): the most cells of at least these sizes, then stretched to fill the content box.
 private val MIN_CELL_WIDTH = 96.dp
 private val CELL_INSET = 4.dp
 private val MIN_LIST_ROW_HEIGHT = 72.dp
-private val PAGE_BAR_HEIGHT = 48.dp
-private val MENU_PAGE_BAR_HEIGHT = 40.dp
-private val MENU_CHOICE_HEIGHT = 44.dp
-private val MENU_HEADING_HEIGHT = 40.dp
-private val MENU_RULE_HEIGHT = 9.dp
-private val MENU_NOTE_HEIGHT = 56.dp
-internal val BAR_HEIGHT = 56.dp
 
 /**
  * Top bar and the paged content of the library, or of the search page while one is open. Nothing
@@ -203,29 +188,25 @@ private fun LibraryTopBar(
     model: LibraryViewModel, menuOpen: Boolean, filterOpen: Boolean, onSearch: () -> Unit, onFilter: () -> Unit, onMenu: () -> Unit,
 ) {
     val folder = model.folder
-    Row(
-        Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(horizontal = 4.dp).testTag("library_top_bar"),
-        verticalAlignment = Alignment.CenterVertically,
+    TopBar(
+        Modifier.testTag("library_top_bar"),
+        navigation = folder?.let { { BackAction(stringResource(R.string.library_back), Modifier.testTag("library_back")) { model.closeFolder() } } },
+        actions = {
+            // Searching and filtering need a complete import.
+            val ready = model.overview != null
+            IconAction(R.drawable.ic_search, stringResource(R.string.library_search), ready, Modifier.testTag("library_search_button"),
+                iconSize = SEARCH_ICON_SIZE, onClick = onSearch)
+            FilterButton(model, ready, filterOpen, onFilter)
+            ViewButton(model, menuOpen, onMenu)
+        },
     ) {
-        if (folder != null) {
-            IconAction(R.drawable.ic_back, stringResource(R.string.library_back), true, Modifier.testTag("library_back")) { model.closeFolder() }
-        } else {
-            Spacer(Modifier.width(8.dp))
-        }
-        Text(
+        TopBarTitle(
             when {
                 folder != null -> folder.name ?: stringResource(R.string.library_unnamed_folder)
                 else -> categoryTitle(model)
             },
-            Modifier.weight(1f).testTag("library_title"),
-            style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            Modifier.testTag("library_title"),
         )
-        // Searching and filtering need a complete import.
-        val ready = model.overview != null
-        IconAction(R.drawable.ic_search, stringResource(R.string.library_search), ready, Modifier.testTag("library_search_button"),
-            iconSize = 20.dp, onClick = onSearch)
-        FilterButton(model, ready, filterOpen, onFilter)
-        ViewButton(model, menuOpen, onMenu)
     }
 }
 
@@ -237,6 +218,8 @@ internal fun ViewButton(model: LibraryViewModel, menuOpen: Boolean, onMenu: () -
     )
 }
 
+private val FILTER_DOT = 8.dp
+
 /** Applied filters add a dot to the icon and to its description, so the state reads without colour. */
 @Composable
 internal fun FilterButton(model: LibraryViewModel, enabled: Boolean, open: Boolean, onFilter: () -> Unit) {
@@ -245,8 +228,8 @@ internal fun FilterButton(model: LibraryViewModel, enabled: Boolean, open: Boole
         IconAction(R.drawable.ic_filter, stringResource(if (applied) R.string.library_filter_active else R.string.library_filter), enabled,
             Modifier.testTag("library_filter_button"), active = open, onClick = onFilter)
         if (applied) {
-            Box(Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp).size(8.dp)
-                .background(if (open) Color.White else Color.Black, RoundedCornerShape(4.dp)).border(1.dp, Color.Black, RoundedCornerShape(4.dp)))
+            Box(Modifier.align(Alignment.TopEnd).padding(top = SECTION_GAP, end = SECTION_GAP).size(FILTER_DOT)
+                .background(if (open) PAPER else INK, MARK_SHAPE).border(BORDER, INK, MARK_SHAPE))
         }
     }
 }
@@ -273,10 +256,10 @@ private fun LibraryBody(
     PagedArea(
         page = shown?.let { it.first / capacity } ?: 0,
         pages = shown?.let { pageCount(it.second, capacity) } ?: 1,
-        tagPrefix = "library", barHeight = PAGE_BAR_HEIGHT, onPage = model::showPage,
+        tagPrefix = "library", onPage = model::showPage,
         modifier = Modifier.fillMaxSize(), showBar = shown != null,
     ) {
-        BoxWithConstraints(Modifier.fillMaxSize().padding(start = 4.dp, end = 4.dp, top = 4.dp).testTag("library_content")) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(start = TIGHT_GAP, end = TIGHT_GAP, top = TIGHT_GAP).testTag("library_content")) {
             val geometry = when (model.viewMode) {
                 LibraryViewMode.GRID -> gridGeometry(maxWidth.value, maxHeight.value, MIN_CELL_WIDTH.value, CELL_INSET.value)
                 LibraryViewMode.LIST -> listGeometry(maxWidth.value, maxHeight.value, MIN_LIST_ROW_HEIGHT.value)
@@ -285,7 +268,7 @@ private fun LibraryBody(
             when (content) {
                 LibraryContent.Loading -> Message(stringResource(R.string.library_loading))
                 LibraryContent.Unconfigured -> Message(stringResource(R.string.library_unconfigured)) {
-                    StaticButton(stringResource(R.string.library_open_settings), true, Modifier.testTag("library_open_settings")) {
+                    ActionButton(stringResource(R.string.library_open_settings), true, Modifier.testTag("library_open_settings"), ButtonKind.PRIMARY) {
                         openMore(MoreTarget.LOCATION)
                     }
                 }
@@ -296,16 +279,15 @@ private fun LibraryBody(
                     else -> R.string.library_sync_waiting
                 })) {
                     if (model.syncing == null) {
-                        StaticButton(stringResource(R.string.library_sync), true, Modifier.testTag("library_sync")) {
+                        ActionButton(stringResource(R.string.library_sync), true, Modifier.testTag("library_sync"), ButtonKind.PRIMARY) {
                             openMore(MoreTarget.SYNC)
                         }
                     } else {
-                        StaticButton(stringResource(R.string.library_sync_progress), true, Modifier.testTag("library_sync_progress")) {
+                        ActionButton(stringResource(R.string.library_sync_progress), true, Modifier.testTag("library_sync_progress"), ButtonKind.PRIMARY) {
                             openMore(MoreTarget.SYNC)
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
-                    StaticButton(stringResource(R.string.library_downloaded_files), true, Modifier.testTag("library_downloaded_files")) {
+                    ActionButton(stringResource(R.string.library_downloaded_files), true, Modifier.testTag("library_downloaded_files")) {
                         openMore(MoreTarget.DOWNLOAD_LIST)
                     }
                 }
@@ -371,13 +353,8 @@ private fun LibraryViewModel.isSelected(item: LibraryItem): Boolean {
 }
 
 @Composable
-private fun Message(text: String, actions: @Composable () -> Unit = {}) {
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(text, Modifier.testTag("library_message"), textAlign = TextAlign.Center)
-        Spacer(Modifier.height(16.dp))
-        actions()
-    }
-}
+private fun Message(text: String, actions: @Composable ColumnScope.() -> Unit = {}) =
+    EmptyMessage(text, Modifier.testTag("library_message"), actions)
 
 /** Cells keep the page geometry's size; the slack beside them is spread evenly, so a short last page stays aligned. */
 @Composable
@@ -421,7 +398,7 @@ private class Activation(val longPress: (LibraryItem) -> Unit, val tap: (Library
 private fun Modifier.activation(item: LibraryItem, activation: Activation, selected: Boolean?): Modifier {
     val description = selected?.let { stringResource(if (it) R.string.selection_chosen else R.string.selection_not_chosen) }
     return combinedClickable(
-        interactionSource = remember { MutableInteractionSource() }, indication = null,
+        interactionSource = null, indication = null,
         onLongClick = { activation.longPress(item) },
     ) { activation.tap(item) }.semantics {
         if (selected != null) {
@@ -449,7 +426,7 @@ private fun GridCell(model: LibraryViewModel, item: LibraryItem, marks: BookMark
     Box(Modifier.fillMaxSize().testTag(tagOf(item)).activation(item, open, selected)) {
         // A chosen item is framed thickly as well as ticked, so the state survives greyscale.
         CoverBox(cover, if (item is LibraryItem.Book) row.title else "",
-            Modifier.fillMaxSize().then(if (selected == true) Modifier.border(SELECTED_FRAME, Color.Black) else Modifier))
+            Modifier.fillMaxSize().then(if (selected == true) Modifier.border(FRAME, INK) else Modifier))
         when (item) {
             is LibraryItem.Book -> {
                 if (item.row.read == true) ReadRibbon(Modifier.align(Alignment.TopEnd))
@@ -460,14 +437,14 @@ private fun GridCell(model: LibraryViewModel, item: LibraryItem, marks: BookMark
                     item.row.downloaded -> DownloadMark(Modifier.align(Alignment.BottomEnd).padding(MARK_INSET))
                 }
                 if (item.row.defaultFormat?.sourceMissing == true) {
-                    SourceMissing(Modifier.align(Alignment.BottomStart).padding(4.dp))
+                    SourceMissing(Modifier.align(Alignment.BottomStart).padding(MARK_INSET))
                 }
             }
             // Without a cover the name and count fill the placeholder; with one they form the bottom label.
             is LibraryItem.Folder -> FolderLabel(item.row, cover == null, Modifier.align(if (cover == null) Alignment.Center else Alignment.BottomStart))
         }
         // Top left stays free: the read ribbon is top right and the download mark bottom right.
-        if (selected != null) SelectionBox(selected, Modifier.align(Alignment.TopStart).padding(MARK_INSET))
+        if (selected != null) SelectionBox(selected, Modifier.align(Alignment.TopStart).padding(MARK_INSET), onImage = true)
     }
 }
 
@@ -476,14 +453,14 @@ private fun FolderLabel(folder: FolderRow, placeholder: Boolean, modifier: Modif
     val name = folder.key.name ?: stringResource(R.string.library_unnamed_folder)
     val count = pluralStringResource(R.plurals.library_folder_books, folder.bookCount, folder.bookCount)
     val description = stringResource(R.string.library_folder_description, name, folder.bookCount)
-    val frame = if (placeholder) modifier.fillMaxWidth() else modifier.fillMaxWidth().background(Color.White).border(1.dp, Color.Black)
+    val frame = if (placeholder) modifier.fillMaxWidth() else modifier.fillMaxWidth().background(PAPER).border(BORDER, INK)
     Column(
-        frame.padding(horizontal = 6.dp, vertical = 4.dp).semantics { contentDescription = description },
+        frame.padding(horizontal = TIGHT_GAP, vertical = TIGHT_GAP).semantics { contentDescription = description },
         horizontalAlignment = if (placeholder) Alignment.CenterHorizontally else Alignment.Start,
     ) {
-        Text(name, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = if (placeholder) 4 else 1, overflow = TextOverflow.Ellipsis,
-            textAlign = if (placeholder) TextAlign.Center else TextAlign.Start)
-        Text(count, fontSize = 12.sp, maxLines = 1)
+        Text(name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold, maxLines = if (placeholder) 4 else 1,
+            overflow = TextOverflow.Ellipsis, textAlign = if (placeholder) TextAlign.Center else TextAlign.Start)
+        Text(count, style = MaterialTheme.typography.labelSmall, maxLines = 1)
     }
 }
 
@@ -492,36 +469,37 @@ private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, mark
     val row = representative(item)
     val selected = model.selected?.let { model.isSelected(item) }
     Row(
-        Modifier.fillMaxWidth().height(height).padding(horizontal = 8.dp, vertical = 4.dp).testTag(tagOf(item))
+        Modifier.fillMaxWidth().height(height).padding(horizontal = SECTION_GAP, vertical = TIGHT_GAP).testTag(tagOf(item))
             .activation(item, open, selected),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (selected != null) {
             SelectionBox(selected, Modifier)
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(LEADING_GAP))
         }
         CoverBox(model.coverImages[row.key], if (item is LibraryItem.Book) row.title else "",
             Modifier.fillMaxHeight().aspectRatio(1f / COVER_ASPECT))
-        Spacer(Modifier.width(12.dp))
+        Spacer(Modifier.width(LEADING_GAP))
         // A short row gives the title fewer lines; the author and size lines always stay.
         Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.Center) {
             when (item) {
                 is LibraryItem.Book -> {
-                    Text(row.title, Modifier.weight(1f, fill = false), maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
+                    Text(row.title, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleSmall, maxLines = 2,
+                        overflow = TextOverflow.Ellipsis)
                     // Unknown authors and sizes leave no placeholder text at all.
-                    if (row.authors.isNotEmpty()) Text(row.authors.joinToString("、"), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (row.authors.isNotEmpty()) SupportingText(row.authors.joinToString("、"))
                     ListMeta(row)
                 }
                 is LibraryItem.Folder -> {
                     Text(item.row.key.name ?: stringResource(R.string.library_unnamed_folder), Modifier.weight(1f, fill = false),
-                        maxLines = 2, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Bold)
-                    Text(pluralStringResource(R.plurals.library_folder_books, item.row.bookCount, item.row.bookCount), fontSize = 13.sp)
+                        style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    SupportingText(pluralStringResource(R.plurals.library_folder_books, item.row.bookCount, item.row.bookCount))
                 }
             }
         }
         val open = (item as? LibraryItem.Book)?.let { marks.of(it.row) }
         if (item is LibraryItem.Book && (open != null || item.row.downloaded)) {
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(TIGHT_GAP))
             if (open != null) OpenMarkIcon(item.row, open, marks.cancelOf(item.row), Modifier)
             else DownloadMark(Modifier.padding(MARK_INSET))
         }
@@ -535,23 +513,23 @@ private fun ListMeta(row: BookRow) {
     if (row.read != true && size == null && !missing) return
     Row(verticalAlignment = Alignment.CenterVertically) {
         if (row.read == true) {
-            Text(stringResource(R.string.library_read_label), Modifier.border(1.dp, Color.Black).padding(horizontal = 4.dp),
-                fontSize = 12.sp, maxLines = 1)
-            Spacer(Modifier.width(8.dp))
+            TagLabel(stringResource(R.string.library_read_label))
+            Spacer(Modifier.width(SECTION_GAP))
         }
         if (missing) {
             SourceMissing(Modifier)
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(SECTION_GAP))
         }
-        if (size != null) Text(size, fontSize = 13.sp, maxLines = 1)
+        if (size != null) SupportingText(size)
     }
 }
 
 @Composable
 private fun CoverBox(bitmap: Bitmap?, title: String, modifier: Modifier) {
-    Box(modifier.border(1.dp, Color.Black).background(Color.White), contentAlignment = Alignment.Center) {
+    Box(modifier.border(BORDER, INK).background(PAPER), contentAlignment = Alignment.Center) {
         if (bitmap == null) {
-            Text(title, Modifier.padding(4.dp), fontSize = 12.sp, maxLines = 6, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+            Text(title, Modifier.padding(TIGHT_GAP), style = MaterialTheme.typography.labelSmall, maxLines = 6, overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center)
         } else {
             val image = remember(bitmap) { bitmap.asImageBitmap() }
             Image(image, title, Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
@@ -561,6 +539,7 @@ private fun CoverBox(bitmap: Bitmap?, title: String, modifier: Modifier) {
 
 private val RIBBON_OUTER = 50.dp
 private val RIBBON_INNER = 28.dp
+private val RIBBON_TEXT = 11.sp
 
 /**
  * Trapezoid band across the top-right corner: its legs lie on the cover's top and right edges, its
@@ -580,12 +559,12 @@ private fun ReadRibbon(modifier: Modifier) {
                 lineTo(outer, inner)
                 lineTo(outer, outer)
                 close()
-            }, Color.Black)
+            }, INK)
         }
         Text(
             stringResource(R.string.library_read_label),
             Modifier.align(Alignment.Center).offset(x = shift, y = -shift).graphicsLayer { rotationZ = 45f },
-            color = Color.White, fontSize = 11.sp, lineHeight = 12.sp, textAlign = TextAlign.Center, maxLines = 1,
+            color = PAPER, fontSize = RIBBON_TEXT, lineHeight = RIBBON_TEXT, textAlign = TextAlign.Center, maxLines = 1,
         )
     }
 }
@@ -601,9 +580,9 @@ private val CROSS_ICON = 12.dp
 @Composable
 private fun DownloadMark(modifier: Modifier) {
     val description = stringResource(R.string.library_downloaded_description)
-    Box(modifier.size(MARK_SIZE).background(Color.Black, CircleShape).border(1.dp, Color.White, CircleShape)
+    Box(modifier.size(MARK_SIZE).background(INK, MARK_SHAPE).border(BORDER, PAPER, MARK_SHAPE)
         .semantics { contentDescription = description }.testTag("download_mark"), contentAlignment = Alignment.Center) {
-        Icon(painterResource(R.drawable.ic_check), null, Modifier.size(MARK_ICON), tint = Color.White)
+        Icon(painterResource(R.drawable.ic_check), null, Modifier.size(MARK_ICON), tint = PAPER)
     }
 }
 
@@ -629,8 +608,7 @@ private fun OpenMarkIcon(row: BookRow, mark: OpenMark, onCancel: (() -> Unit)?, 
     Box(
         if (!mark.cancellable) area.testTag("open_warning_${row.key.sourceId}").semantics { contentDescription = description }
         else area.testTag("download_progress_${row.key.sourceId}")
-            .then(if (onCancel == null) Modifier else
-                Modifier.clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onCancel))
+            .then(if (onCancel == null) Modifier else Modifier.tap(role = null, onClick = onCancel))
             .semantics {
                 contentDescription = description
                 if (onCancel != null) role = Role.Button
@@ -639,61 +617,27 @@ private fun OpenMarkIcon(row: BookRow, mark: OpenMark, onCancel: (() -> Unit)?, 
         contentAlignment = Alignment.Center,
     ) {
         if (!mark.cancellable) {
-            Box(Modifier.size(MARK_SIZE).background(Color.Black, CircleShape).border(1.dp, Color.White, CircleShape), contentAlignment = Alignment.Center) {
-                Icon(painterResource(icon), null, Modifier.size(MARK_ICON), tint = Color.White)
+            Box(Modifier.size(MARK_SIZE).background(INK, MARK_SHAPE).border(BORDER, PAPER, MARK_SHAPE), contentAlignment = Alignment.Center) {
+                Icon(painterResource(icon), null, Modifier.size(MARK_ICON), tint = PAPER)
             }
         } else {
             val fraction = mark.fraction
             Canvas(Modifier.size(MARK_SIZE)) {
                 val stroke = RING_WIDTH.toPx()
                 // White behind the arc keeps it visible on a dark cover, as the check's rim does.
-                drawCircle(Color.White)
-                drawCircle(Color.Black, radius = size.minDimension / 2 - stroke)
-                if (fraction != null) drawArc(Color.Black, -90f, 360f * fraction, false, Offset(stroke / 2, stroke / 2),
+                drawCircle(PAPER)
+                drawCircle(INK, radius = size.minDimension / 2 - stroke)
+                if (fraction != null) drawArc(INK, -90f, 360f * fraction, false, Offset(stroke / 2, stroke / 2),
                     Size(size.width - stroke, size.height - stroke), style = Stroke(stroke))
             }
-            Icon(painterResource(icon), null, Modifier.size(CROSS_ICON), tint = Color.White)
+            Icon(painterResource(icon), null, Modifier.size(CROSS_ICON), tint = PAPER)
         }
     }
 }
 
 @Composable
 private fun SourceMissing(modifier: Modifier) {
-    Text(stringResource(R.string.library_source_missing), modifier.background(Color.White).border(1.dp, Color.Black).padding(horizontal = 3.dp),
-        fontSize = 11.sp, maxLines = 1)
-}
-
-internal sealed interface MenuEntry {
-    val height: Dp
-
-    data object Rule : MenuEntry {
-        override val height get() = MENU_RULE_HEIGHT
-    }
-
-    class Heading(val label: String) : MenuEntry {
-        override val height get() = MENU_HEADING_HEIGHT
-    }
-
-    /** Explains why the choices that follow are unavailable. */
-    class Note(val tag: String, val text: String) : MenuEntry {
-        override val height get() = MENU_NOTE_HEIGHT
-    }
-
-    /** A place in an order, moved by the up and down buttons at the row end (tagged `<tag>_up` and `<tag>_down`). */
-    class Ordered(
-        val tag: String, val label: String, val upDescription: String, val downDescription: String,
-        val canUp: Boolean, val canDown: Boolean, val onUp: () -> Unit, val onDown: () -> Unit,
-    ) : MenuEntry {
-        override val height get() = ICON_TOUCH_SIZE
-    }
-
-    /** [mark] is drawn at the row end: a check for a chosen option, an arrow for the chosen sort direction. */
-    class Choice(
-        val tag: String, val label: String, @DrawableRes val icon: Int? = null, @DrawableRes val mark: Int? = null,
-        val markDescription: String? = null, val enabled: Boolean = true, val action: () -> Unit,
-    ) : MenuEntry {
-        override val height get() = MENU_CHOICE_HEIGHT
-    }
+    TagLabel(stringResource(R.string.library_source_missing), modifier)
 }
 
 /**
@@ -702,28 +646,26 @@ internal sealed interface MenuEntry {
  */
 @Composable
 private fun ViewMenu(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit, openColumns: () -> Unit) {
-    val chosen = stringResource(R.string.library_menu_chosen)
-    val check = { selected: Boolean -> if (selected) R.drawable.ic_check else null }
     val entries = buildList {
         add(MenuEntry.Choice("menu_view_grid", stringResource(R.string.library_view_grid), R.drawable.ic_view_grid,
-            check(model.viewMode == LibraryViewMode.GRID), chosen) { model.showAs(LibraryViewMode.GRID) })
+            model.viewMode == LibraryViewMode.GRID) { model.showAs(LibraryViewMode.GRID) })
         add(MenuEntry.Choice("menu_view_list", stringResource(R.string.library_view_list), R.drawable.ic_view_list,
-            check(model.viewMode == LibraryViewMode.LIST), chosen) { model.showAs(LibraryViewMode.LIST) })
+            model.viewMode == LibraryViewMode.LIST) { model.showAs(LibraryViewMode.LIST) })
         if (model.search == null && model.folder == null) {
             add(MenuEntry.Rule)
             add(MenuEntry.Heading(stringResource(R.string.library_menu_category)))
             add(MenuEntry.Choice("menu_category_none", stringResource(R.string.library_category_none),
-                mark = check(model.categorization == Categorization.None), markDescription = chosen) { model.categorize(Categorization.None) })
+                selected = model.categorization == Categorization.None) { model.categorize(Categorization.None) })
             add(MenuEntry.Choice("menu_category_series", stringResource(R.string.library_category_series),
-                mark = check(model.categorization == Categorization.Series), markDescription = chosen) { model.categorize(Categorization.Series) })
+                selected = model.categorization == Categorization.Series) { model.categorize(Categorization.Series) })
             add(MenuEntry.Choice("menu_category_tags", stringResource(R.string.library_category_tags),
-                mark = check(model.categorization == Categorization.Tags), markDescription = chosen) { model.categorize(Categorization.Tags) })
+                selected = model.categorization == Categorization.Tags) { model.categorize(Categorization.Tags) })
             val column = model.categorization as? Categorization.Column
             val name = column?.let { columnName(model, it) }
             add(MenuEntry.Choice(
                 "menu_category_more",
                 if (name != null) stringResource(R.string.library_category_more_chosen, name) else stringResource(R.string.library_category_more),
-                mark = check(column != null), markDescription = chosen,
+                selected = column != null,
                 enabled = model.overview?.categoryColumns.orEmpty().isNotEmpty(), action = openColumns,
             ))
         }
@@ -734,8 +676,9 @@ private fun ViewMenu(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit, 
         val arrow = { up: Boolean -> if (up) R.drawable.ic_arrow_up else R.drawable.ic_arrow_down }
         if (model.showsFolders) {
             // Folders only sort by name, so the one key is always chosen and only its direction changes.
-            add(MenuEntry.Choice("menu_sort_folders", stringResource(R.string.library_sort_name), mark = arrow(model.foldersAscending),
-                markDescription = if (model.foldersAscending) ascending else descending) { model.reverseFolders() })
+            add(MenuEntry.Choice("menu_sort_folders", stringResource(R.string.library_sort_name), selected = true,
+                trailing = arrow(model.foldersAscending), trailingDescription = if (model.foldersAscending) ascending else descending,
+            ) { model.reverseFolders() })
         } else {
             val seriesFolder = model.search == null && model.categorization == Categorization.Series && model.folder?.name != null
             val keys = listOfNotNull(BookSortKey.SERIES_INDEX.takeIf { seriesFolder }, BookSortKey.TITLE, BookSortKey.ADDED, BookSortKey.RATING)
@@ -743,8 +686,8 @@ private fun ViewMenu(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit, 
                 val sort = model.sort.takeIf { it.key == key }
                 add(MenuEntry.Choice(
                     "menu_sort_${key.name.lowercase()}", stringResource(sortLabel(key)),
-                    mark = sort?.let { arrow(it.ascending) },
-                    markDescription = sort?.let { if (it.ascending) ascending else descending },
+                    selected = sort != null, trailing = sort?.let { arrow(it.ascending) },
+                    trailingDescription = sort?.let { if (it.ascending) ascending else descending },
                 ) { model.sortBy(key) })
             }
         }
@@ -760,9 +703,7 @@ private fun ViewMenu(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit, 
  */
 @Composable
 private fun FilterPanel(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit) {
-    val chosen = stringResource(R.string.library_menu_chosen)
     val filters = model.filters
-    val check = { selected: Boolean -> if (selected) R.drawable.ic_check else null }
     val overview = model.overview
     val readable = overview?.readFilterAvailable == true
     val entries = buildList {
@@ -770,7 +711,7 @@ private fun FilterPanel(model: LibraryViewModel, page: Int, onPage: (Int) -> Uni
         listOf(DownloadFilter.DOWNLOADED to R.string.filter_downloaded, DownloadFilter.NOT_DOWNLOADED to R.string.filter_not_downloaded)
             .forEach { (value, label) ->
                 add(MenuEntry.Choice("filter_download_${value.name.lowercase()}", stringResource(label),
-                    mark = check(value == filters.download), markDescription = chosen) {
+                    selected = value == filters.download) {
                     model.updateFilters { it.copy(download = if (it.download == value) null else value) }
                 })
             }
@@ -779,7 +720,7 @@ private fun FilterPanel(model: LibraryViewModel, page: Int, onPage: (Int) -> Uni
         if (!readable) add(MenuEntry.Note("filter_read_unavailable", stringResource(R.string.filter_read_unavailable)))
         listOf(ReadFilter.READ to R.string.filter_read, ReadFilter.UNREAD to R.string.filter_unread).forEach { (value, label) ->
             add(MenuEntry.Choice("filter_read_${value.name.lowercase()}", stringResource(label),
-                mark = check(value == filters.read), markDescription = chosen, enabled = readable || value == filters.read) {
+                selected = value == filters.read, enabled = readable || value == filters.read) {
                 model.updateFilters { it.copy(read = if (it.read == value) null else value) }
             })
         }
@@ -789,7 +730,8 @@ private fun FilterPanel(model: LibraryViewModel, page: Int, onPage: (Int) -> Uni
             add(MenuEntry.Rule)
             add(MenuEntry.Heading(stringResource(R.string.filter_formats)))
             formats.forEach { format ->
-                add(MenuEntry.Choice("filter_format_${format.value}", format.value, mark = check(format in filters.formats), markDescription = chosen) {
+                add(MenuEntry.Choice("filter_format_${format.value}", format.value, selected = format in filters.formats,
+                    multiple = true) {
                     model.updateFilters { it.copy(formats = it.formats.toggle(format)) }
                 })
             }
@@ -801,107 +743,27 @@ private fun FilterPanel(model: LibraryViewModel, page: Int, onPage: (Int) -> Uni
 private fun <T> Set<T>.toggle(value: T): Set<T> = if (value in this) this - value else this + value
 
 /**
- * Lays out grouped rows by height; the page row only appears when the entries need more than one page.
- * When [focus] changes, the page that holds that entry index is shown.
- */
-@Composable
-internal fun PagedEntries(entries: List<MenuEntry>, page: Int, onPage: (Int) -> Unit, modifier: Modifier, tagPrefix: String, focus: Int? = null) {
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        val blocks = entries.map { PageBlock(it.height.value, keepWithNext = it is MenuEntry.Heading, separator = it is MenuEntry.Rule) }
-        val pages = paginate(blocks, maxHeight.value).takeIf { it.size <= 1 }
-            ?: paginate(blocks, maxHeight.value - MENU_PAGE_BAR_HEIGHT.value)
-        val current = page.coerceIn(0, pages.size - 1)
-        LaunchedEffect(current, page) { if (current != page) onPage(current) }
-        LaunchedEffect(focus) {
-            val target = focus?.let { index -> pages.indexOfFirst { index in it } } ?: -1
-            if (target >= 0 && target != current) onPage(target)
-        }
-        PagedArea(current, pages.size, tagPrefix, MENU_PAGE_BAR_HEIGHT, onPage, Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize()) {
-                pages[current].forEach { MenuRow(entries[it]) }
-            }
-        }
-    }
-}
-
-@Composable
-internal fun MenuRow(entry: MenuEntry) {
-    when (entry) {
-        MenuEntry.Rule -> Box(Modifier.fillMaxWidth().height(entry.height), contentAlignment = Alignment.Center) {
-            HorizontalRule(Modifier.padding(horizontal = 8.dp))
-        }
-        is MenuEntry.Note -> Box(Modifier.fillMaxWidth().height(entry.height).padding(horizontal = 16.dp).testTag(entry.tag),
-            contentAlignment = Alignment.CenterStart) {
-            Text(entry.text, fontSize = 13.sp, lineHeight = 16.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-        }
-        is MenuEntry.Heading -> Box(Modifier.fillMaxWidth().height(entry.height).padding(horizontal = 16.dp), contentAlignment = Alignment.BottomStart) {
-            Text(entry.label, Modifier.padding(bottom = 4.dp), fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1)
-        }
-        is MenuEntry.Ordered -> Row(
-            Modifier.fillMaxWidth().height(entry.height).testTag(entry.tag).padding(start = 16.dp, end = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(entry.label, Modifier.weight(1f), fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            IconAction(R.drawable.ic_arrow_up, entry.upDescription, entry.canUp, Modifier.testTag("${entry.tag}_up"), onClick = entry.onUp)
-            IconAction(R.drawable.ic_arrow_down, entry.downDescription, entry.canDown, Modifier.testTag("${entry.tag}_down"), onClick = entry.onDown)
-        }
-        is MenuEntry.Choice -> {
-            val tint = if (entry.enabled) Color.Black else DISABLED_TINT
-            Row(
-                Modifier.fillMaxWidth().height(entry.height).testTag(entry.tag)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null,
-                        enabled = entry.enabled, role = Role.Button, onClick = entry.action)
-                    .semantics {
-                        selected = entry.mark != null
-                        entry.markDescription?.takeIf { entry.mark != null }?.let { stateDescription = it }
-                    }
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (entry.icon != null) {
-                    Icon(painterResource(entry.icon), null, Modifier.size(22.dp), tint = tint)
-                    Spacer(Modifier.width(12.dp))
-                }
-                Text(entry.label, Modifier.weight(1f), color = tint, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    fontWeight = if (entry.mark != null) FontWeight.Bold else FontWeight.Normal)
-                if (entry.mark != null) Icon(painterResource(entry.mark), null, Modifier.size(22.dp), tint = tint)
-            }
-        }
-    }
-}
-
-/**
  * The supported custom columns, shown over the menu without animation. Choosing one categorizes by it
  * and returns to the still open view menu; a tap outside the panel or system back also returns.
  */
 @Composable
 private fun ColumnPicker(model: LibraryViewModel, page: Int, onPage: (Int) -> Unit, close: () -> Unit) {
-    val chosen = stringResource(R.string.library_menu_chosen)
     val entries = model.overview?.categoryColumns.orEmpty().map { column ->
         val value = Categorization.Column(column.id)
-        MenuEntry.Choice("menu_category_column_${column.id.sourceId}", column.name,
-            mark = if (model.categorization == value) R.drawable.ic_check else null, markDescription = chosen) {
+        MenuEntry.Choice("menu_category_column_${column.id.sourceId}", column.name, selected = model.categorization == value) {
             model.categorize(value)
             close()
         }
     }
-    BoxWithConstraints(
-        Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = close),
-        contentAlignment = Alignment.Center,
-    ) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
         // The panel fits its rows and pages only when they exceed most of the screen.
-        val natural = BAR_HEIGHT + 1.dp + MENU_CHOICE_HEIGHT * entries.size.coerceAtLeast(1) + 4.dp
-        Column(
-            Modifier.fillMaxWidth(0.86f).height(minOf(natural, maxHeight * 0.8f)).background(Color.White).border(2.dp, Color.Black)
-                // Taps inside the panel must not fall through to the dismissing background.
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
-                .testTag("category_columns"),
-        ) {
-            Row(Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.library_category_columns_title), Modifier.weight(1f),
-                    fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        val natural = BAR_HEIGHT + BORDER + ROW_HEIGHT * entries.size.coerceAtLeast(1) + FRAME * 2
+        OverlayPanel(close, Modifier.fillMaxWidth(0.86f).height(minOf(natural, maxHeight * 0.8f)).testTag("category_columns")) {
+            TopBar(actions = {
                 IconAction(R.drawable.ic_close, stringResource(R.string.library_category_columns_close), true,
                     Modifier.testTag("category_columns_close"), onClick = close)
+            }) {
+                TopBarTitle(stringResource(R.string.library_category_columns_title))
             }
             HorizontalRule()
             Box(Modifier.weight(1f).fillMaxWidth()) { PagedEntries(entries, page, onPage, Modifier, "category_columns") }
@@ -916,19 +778,10 @@ private fun sortLabel(key: BookSortKey): Int = when (key) {
     BookSortKey.SERIES_INDEX -> R.string.library_sort_series
 }
 
-private val SELECTED_FRAME = 3.dp
-
-/** A square tick box: white with a frame when not chosen, black with a white tick when chosen. */
+/** Each item's check box in selection mode; tagged so tests and device checks can read the state. */
 @Composable
-private fun SelectionBox(selected: Boolean, modifier: Modifier) {
-    Box(
-        modifier.size(MARK_SIZE).background(if (selected) Color.Black else Color.White, RoundedCornerShape(3.dp))
-            .border(2.dp, if (selected) Color.White else Color.Black, RoundedCornerShape(3.dp))
-            .testTag(if (selected) "selection_box_checked" else "selection_box"),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (selected) Icon(painterResource(R.drawable.ic_check), null, Modifier.size(MARK_ICON), tint = Color.White)
-    }
+private fun SelectionBox(selected: Boolean, modifier: Modifier, onImage: Boolean = false) {
+    SelectionMark(selected, multiple = true, modifier.testTag(if (selected) "selection_box_checked" else "selection_box"), onImage = onImage)
 }
 
 /**
@@ -938,28 +791,26 @@ private fun SelectionBox(selected: Boolean, modifier: Modifier) {
  */
 @Composable
 private fun SelectionTopBar(model: LibraryViewModel, moreOpen: Boolean, onMore: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(horizontal = 4.dp).testTag("selection_top_bar"),
-        verticalAlignment = Alignment.CenterVertically,
+    val count = model.selectedBooks
+    val idle = !model.batchBusy
+    TopBar(
+        Modifier.testTag("selection_top_bar"),
+        navigation = {
+            ActionButton(stringResource(R.string.selection_done), true, Modifier.testTag("selection_done"), ButtonKind.TEXT) {
+                model.finishSelection()
+            }
+        },
+        actions = {
+            IconAction(R.drawable.ic_download, stringResource(R.string.selection_download), idle && count != 0,
+                Modifier.testTag("selection_download")) { model.downloadSelection() }
+            IconAction(R.drawable.ic_more_vert, stringResource(R.string.selection_more), idle,
+                Modifier.testTag("selection_more"), active = moreOpen, onClick = onMore)
+        },
     ) {
-        Box(
-            Modifier.height(ICON_TOUCH_SIZE).clickable(
-                interactionSource = remember { MutableInteractionSource() }, indication = null, role = Role.Button,
-            ) { model.finishSelection() }.padding(horizontal = 12.dp).testTag("selection_done"),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(stringResource(R.string.selection_done), fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        }
-        val count = model.selectedBooks
         Text(
             if (count == null) stringResource(R.string.selection_counting) else pluralStringResource(R.plurals.selection_books, count, count),
-            Modifier.weight(1f).testTag("selection_count"), fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            Modifier.weight(1f).testTag("selection_count"), maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
-        val idle = !model.batchBusy
-        IconAction(R.drawable.ic_download, stringResource(R.string.selection_download), idle && count != 0,
-            Modifier.testTag("selection_download")) { model.downloadSelection() }
-        IconAction(R.drawable.ic_more_vert, stringResource(R.string.selection_more), idle,
-            Modifier.testTag("selection_more"), active = moreOpen, onClick = onMore)
     }
 }
 
@@ -991,18 +842,8 @@ private fun BatchMenu(model: LibraryViewModel, close: () -> Unit) {
             model.prepareRemoval()
         })
     }
-    // The dismissing layer is a sibling, not a parent: a clickable parent would merge the rows' semantics.
-    Box(Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = close))
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopEnd) {
-        Column(
-            Modifier.padding(top = BAR_HEIGHT, end = 4.dp).width(BATCH_MENU_WIDTH).background(Color.White).border(2.dp, Color.Black)
-                // Taps between rows must not fall through to the dismissing layer; a clickable here would
-                // merge the rows into one node as well, so the taps are consumed without semantics.
-                .pointerInput(Unit) { detectTapGestures {} }
-                .testTag("selection_menu"),
-        ) {
-            entries.forEach { MenuRow(it) }
-        }
+    OverlayPanel(close, Modifier.padding(top = BAR_HEIGHT, end = TIGHT_GAP).width(BATCH_MENU_WIDTH).testTag("selection_menu"), Alignment.TopEnd) {
+        entries.forEach { MenuRow(it) }
     }
 }
 
@@ -1012,37 +853,21 @@ private val BATCH_MENU_WIDTH = 240.dp
 @Composable
 private fun RemovalDialog(model: LibraryViewModel, removal: RemovalConfirmation) {
     val context = LocalContext.current
-    Box(
-        Modifier.fillMaxSize().clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { model.cancelRemoval() },
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            Modifier.fillMaxWidth(0.86f).background(Color.White).border(2.dp, Color.Black)
-                // Taps inside the panel must not fall through to the dismissing background.
-                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
-                .padding(16.dp).testTag("removal_dialog"),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(stringResource(R.string.removal_title), fontWeight = FontWeight.Bold, fontSize = 18.sp)
-            Text(pluralStringResource(R.plurals.removal_books, removal.books, removal.books), Modifier.testTag("removal_books"))
-            val formats = removal.formats
-            Text(
-                if (formats == null) stringResource(R.string.removal_all_formats)
-                else stringResource(R.string.removal_formats, formats.map { it.value }.sorted().joinToString(stringResource(R.string.removal_format_separator))),
-                Modifier.testTag("removal_formats"),
-            )
-            val copies = removal.plan.copies.size
-            Text(
-                if (copies == 0) stringResource(R.string.removal_no_copies)
-                else pluralStringResource(R.plurals.removal_copies, copies, copies, Formatter.formatShortFileSize(context, removal.plan.bytes)),
-                Modifier.testTag("removal_copies"),
-            )
-            Text(stringResource(R.string.removal_scope_note), fontSize = 13.sp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                StaticButton(stringResource(R.string.removal_cancel), !model.batchBusy, Modifier.testTag("removal_cancel")) { model.cancelRemoval() }
-                Spacer(Modifier.width(12.dp))
-                StaticButton(stringResource(R.string.removal_confirm), !model.batchBusy, Modifier.testTag("removal_confirm")) { model.confirmRemoval() }
-            }
-        }
+    ConfirmPanel("removal_dialog", !model.batchBusy, model::cancelRemoval, model::confirmRemoval, stringResource(R.string.removal_title),
+        cancelTag = "removal_cancel", confirmTag = "removal_confirm") {
+        Text(pluralStringResource(R.plurals.removal_books, removal.books, removal.books), Modifier.testTag("removal_books"))
+        val formats = removal.formats
+        Text(
+            if (formats == null) stringResource(R.string.removal_all_formats)
+            else stringResource(R.string.removal_formats, formats.map { it.value }.sorted().joinToString(stringResource(R.string.removal_format_separator))),
+            Modifier.testTag("removal_formats"),
+        )
+        val copies = removal.plan.copies.size
+        Text(
+            if (copies == 0) stringResource(R.string.removal_no_copies)
+            else pluralStringResource(R.plurals.removal_copies, copies, copies, Formatter.formatShortFileSize(context, removal.plan.bytes)),
+            Modifier.testTag("removal_copies"),
+        )
+        Text(stringResource(R.string.removal_scope_note), style = MaterialTheme.typography.bodySmall)
     }
 }

@@ -1,22 +1,13 @@
 package io.github.chenxiex.calibrecloud.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -26,20 +17,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.storage.cache.CleanupKind
 import io.github.chenxiex.calibrecloud.tasks.api.TaskRecord
@@ -169,7 +150,7 @@ internal fun MoreScreen(
             searching -> MoreSearchBar(query, { query = it }) { searching = false }
             page == MorePage.MENU -> MoreTopBar(stringResource(page.title), null) {
                 IconAction(R.drawable.ic_search, stringResource(R.string.more_search), true, Modifier.testTag("more_search_button"),
-                    iconSize = 20.dp) {
+                    iconSize = SEARCH_ICON_SIZE) {
                     query = ""
                     searching = true
                 }
@@ -209,51 +190,29 @@ internal fun MoreScreen(
 @Composable
 internal fun MoreTopBar(
     title: String, onBack: (() -> Unit)?, backDescription: String = stringResource(R.string.more_back),
-    actions: @Composable () -> Unit = {},
+    actions: @Composable RowScope.() -> Unit = {},
 ) {
-    Row(
-        Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(horizontal = 4.dp).testTag("more_top_bar"),
-        verticalAlignment = Alignment.CenterVertically,
+    TopBar(
+        Modifier.testTag("more_top_bar"),
+        navigation = onBack?.let { { BackAction(backDescription, Modifier.testTag("more_back"), it) } },
+        actions = actions,
     ) {
-        if (onBack != null) {
-            IconAction(R.drawable.ic_back, backDescription, true, Modifier.testTag("more_back"), onClick = onBack)
-        } else {
-            Spacer(Modifier.width(8.dp))
-        }
-        Text(title, Modifier.weight(1f).testTag("more_title"), style = MaterialTheme.typography.titleMedium,
-            maxLines = 1, overflow = TextOverflow.Ellipsis)
-        actions()
+        TopBarTitle(title, Modifier.testTag("more_title"))
     }
 }
 
-/** Back and a rounded input; the menu filters while typing, as it only searches menu names. */
+/** Back and the search input; the menu filters while typing, as it only searches menu names. */
 @Composable
 private fun MoreSearchBar(query: String, onQuery: (String) -> Unit, onBack: () -> Unit) {
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
-    Row(
-        Modifier.fillMaxWidth().height(BAR_HEIGHT).padding(horizontal = 4.dp).testTag("more_search_bar"),
-        verticalAlignment = Alignment.CenterVertically,
+    TopBar(
+        Modifier.testTag("more_search_bar"),
+        navigation = { BackAction(stringResource(R.string.more_back), Modifier.testTag("more_search_back"), onBack) },
+        actions = { Spacer(Modifier.width(PAGE_MARGIN)) },
     ) {
-        IconAction(R.drawable.ic_back, stringResource(R.string.more_back), true, Modifier.testTag("more_search_back"), onClick = onBack)
-        Row(
-            Modifier.weight(1f).height(40.dp).border(1.dp, Color.Black, RoundedCornerShape(20.dp)).padding(start = 12.dp, end = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(painterResource(R.drawable.ic_search), null, Modifier.size(18.dp), tint = Color.Black)
-            Spacer(Modifier.width(8.dp))
-            val description = stringResource(R.string.more_search_input)
-            Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                if (query.isEmpty()) Text(description, color = DISABLED_TINT, fontSize = 16.sp, maxLines = 1)
-                BasicTextField(query, onQuery,
-                    Modifier.fillMaxWidth().focusRequester(focus).testTag("more_search_input").semantics { contentDescription = description },
-                    textStyle = TextStyle(fontSize = 16.sp, color = Color.Black), singleLine = true)
-            }
-            if (query.isNotEmpty()) {
-                IconAction(R.drawable.ic_close, stringResource(R.string.more_search_clear), true, Modifier.testTag("more_search_clear"),
-                    size = 36.dp, iconSize = 18.dp) { onQuery("") }
-            }
-        }
+        SearchField(query, onQuery, stringResource(R.string.more_search_input), focus, "more_search_input",
+            stringResource(R.string.more_search_clear), "more_search_clear", onClear = { onQuery("") })
     }
 }
 
@@ -276,7 +235,7 @@ internal fun MenuSearchResults(entries: List<MenuEntry>, query: String) {
         }
     }
     if (words.isNotEmpty() && results.isEmpty()) {
-        Text(stringResource(R.string.more_search_empty), Modifier.padding(16.dp).testTag("more_search_empty"))
+        EmptyMessage(stringResource(R.string.more_search_empty), Modifier.testTag("more_search_empty"))
     } else {
         PagedEntries(results, page, { page = it }, Modifier.testTag("more_search_results"), "more_search")
     }
@@ -293,7 +252,6 @@ private fun menuEntries(models: MoreModels, show: (MorePage) -> Unit, includeCon
     val selection = metadata.selection
     val configured = selection?.location != null
     val imported = metadata.imported
-    val chosen = stringResource(R.string.library_menu_chosen)
     val syncState = syncStatus(metadata.syncRecord, metadata.syncRejected)
     return buildList {
         add(MenuEntry.Heading(stringResource(R.string.more_group_metadata)))
@@ -331,7 +289,7 @@ private fun menuEntries(models: MoreModels, show: (MorePage) -> Unit, includeCon
         }
         val tasks = models.tasks
         add(MenuEntry.Choice("more_startup_sync", stringResource(R.string.more_startup_sync),
-            mark = if (tasks.automaticSync) R.drawable.ic_check else null, markDescription = chosen,
+            selected = tasks.automaticSync, multiple = true,
             enabled = tasks.settingsLoaded) { tasks.toggleStartup() })
         add(MenuEntry.Choice("more_formats", stringResource(R.string.more_formats)) { show(MorePage.FORMATS) })
         add(MenuEntry.Choice("more_read_column", stringResource(R.string.more_read_column)) { show(MorePage.READ_COLUMN) })
