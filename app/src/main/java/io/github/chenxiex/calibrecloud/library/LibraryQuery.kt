@@ -87,6 +87,22 @@ data class LibraryRequest(
     }
 }
 
+/**
+ * The R24 format order as settings show and save it: the [stored] order first, then the [available]
+ * formats it does not name, by name. A query treats unnamed formats the same way, so saving this whole
+ * list after a move changes nothing but the moved format.
+ */
+fun formatOrder(stored: List<BookFormat>, available: Collection<BookFormat>): List<BookFormat> =
+    stored + available.filterNot { it in stored }.distinct().sortedBy { it.value }
+
+/** This order with [format] swapped with its higher ([up]) or lower neighbour; unchanged at either end. */
+fun List<BookFormat>.moved(format: BookFormat, up: Boolean): List<BookFormat> {
+    val index = indexOf(format)
+    val target = if (up) index - 1 else index + 1
+    if (index < 0 || target !in indices) return this
+    return toMutableList().apply { this[index] = this[target]; this[target] = format }
+}
+
 data class CategoryColumn(val id: CustomColumnId, val name: String)
 
 /**

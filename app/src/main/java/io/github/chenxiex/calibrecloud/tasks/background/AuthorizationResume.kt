@@ -15,9 +15,10 @@ import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
  * Continues work that waited for login or directory authorization; the caller wakes the queue afterwards.
  * Library tasks simply run again on wakeup. Candidate tasks are bound to one selection token and
  * authorization, so their work continues as an equivalent new request and the superseded request is
- * cancelled. A candidate continues only while it still belongs to the current selection, or when the
- * same imported library was selected again, as re-authorizing a directory grant does; this never switches
- * the current library. Candidates that can no longer run are cancelled. Cancelling a candidate of the
+ * cancelled. A sync continues only while it still belongs to the current selection, or when the
+ * same imported library was selected again, as re-authorizing a directory grant does; a directory listing
+ * continues only for the library still being added. This never switches the current library.
+ * Candidates that can no longer run are cancelled. Cancelling a candidate of the
  * current token would revoke that token, so only superseded tokens are cancelled. Nothing is resubmitted
  * for a backend whose [io.github.chenxiex.calibrecloud.tasks.api.LibraryAuthorization.ready] is false.
  */
@@ -26,7 +27,7 @@ class AuthorizationResume(
     private val state: ApplicationStateRepository,
     private val authorizations: LibraryAuthorizations,
     private val requestSync: suspend (TaskOrigin) -> TaskId?,
-    /** Continues a waiting root-selection request, such as a directory listing, for the current selection. */
+    /** Continues a waiting directory listing for the library being added. */
     private val continueConfiguration: suspend (TaskRequest.CandidateConfiguration) -> TaskId?,
 ) {
     suspend fun resume() {
@@ -38,8 +39,14 @@ class AuthorizationResume(
                 (WaitingReason.LOGIN in reasons || WaitingReason.DIRECTORY_AUTHORIZATION in reasons)
         }
         val current = state.current()
+        val addition = state.addition()
         for (record in waiting) {
             val request = record.submission.request as TaskRequest.CandidateConfiguration
+            if (request.operation != TaskRequest.CandidateConfiguration.LIBRARY_SYNC) {
+                val replacement = if (request.context.selectionToken == addition?.token) continueConfiguration(request) else null
+                if (replacement != record.id) queue.control(record.id, TaskControl.CANCEL)
+                continue
+            }
             val active = queue.isActive(record)
             val sameLibrary = current?.backend == request.context.backend && current.identity != null &&
                 queue.scopeLibrary(record.id) == current.identity.id
@@ -47,8 +54,7 @@ class AuthorizationResume(
                 if (request.context.selectionToken != current?.token) queue.control(record.id, TaskControl.CANCEL)
                 continue
             }
-            val replacement = if (request.operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC) requestSync(record.effectiveOrigin)
-                else continueConfiguration(request)
+            val replacement = requestSync(record.effectiveOrigin)
             if (replacement != null && replacement != record.id &&
                 request.context.selectionToken != state.current()?.token) queue.control(record.id, TaskControl.CANCEL)
         }

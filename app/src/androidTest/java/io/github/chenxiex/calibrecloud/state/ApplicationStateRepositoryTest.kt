@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
+import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.BookFormat
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.model.CopyKey
@@ -17,9 +18,6 @@ import io.github.chenxiex.calibrecloud.storage.api.DownloadedCopy
 import io.github.chenxiex.calibrecloud.storage.api.SourceAvailability
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.storage.cache.PrivateCopyReader
-import io.github.chenxiex.calibrecloud.storage.local.DirectoryGrant
-import io.github.chenxiex.calibrecloud.storage.local.DirectoryPermissionAccess
-import io.github.chenxiex.calibrecloud.storage.local.LocalDirectoryConfiguration
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
@@ -27,6 +25,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -209,48 +208,84 @@ class ApplicationStateRepositoryTest {
     }
 
     @Test
-    fun localConfigurationImportsLegacyOnceAndCommitsGrantReferenceWithCandidate() = runBlocking<Unit> {
-        val oldLocation = localIdentity().location as LibraryLocation.Local
-        val newLocation = localIdentity().location as LibraryLocation.Local
-        val oldUri = "content://test.documents/tree/old-test-library"
-        val newUri = "content://test.documents/tree/new-test-library"
-        val locations = mapOf(oldUri to oldLocation, newUri to newLocation)
-        var legacyLoads = 0
-        val permissions = object : DirectoryPermissionAccess {
-            override fun localLocation(treeUri: String) = locations[treeUri]
-            override fun persist(treeUri: String, resultFlags: Int) = error("Configuration must not acquire a grant")
-            override fun persistedGrant(treeUri: String): DirectoryGrant = error("Configuration must not inspect grants")
-            override fun release(treeUri: String) = error("Configuration must not release a grant")
-        }
-        val legacy = object : LocalDirectoryConfiguration {
-            override fun load(): String {
-                legacyLoads++
-                return oldUri
-            }
-            override fun save(treeUri: String): Boolean = error("Migration must not rewrite legacy preferences")
-        }
-        val configuration = DatabaseLocalDirectoryConfiguration(repository, permissions, legacy)
-
-        assertEquals(oldUri, configuration.load())
-        assertEquals(oldLocation, repository.current()!!.location)
-        assertNull(repository.current()!!.identity)
-        val remote = repository.select(LibraryLocation.OneDrive("account", "drive", "root"))
-        assertEquals(oldUri, configuration.load())
-        assertEquals(remote, repository.current())
-        assertEquals(1, legacyLoads)
-        assertTrue(configuration.save(newUri))
-        val candidate = repository.current()!!
-        assertEquals(newLocation, candidate.location)
-        assertNull(candidate.identity)
-        assertFalse(configuration.save("content://unsupported/tree/invalid"))
-        assertEquals(candidate, repository.current())
+    fun libraryListKeepsOrderAndAccessKeysAndSwitchesOnlyToListedLibraries() = runBlocking<Unit> {
+        val first = localIdentity().location
+        val second = LibraryLocation.OneDrive("account", "drive", "root")
+        val firstSelection = repository.addLibrary(first, "content://test.documents/tree/first", "第一")
+        repository.addLibrary(second, name = "第二")
+        assertEquals(listOf(ConfiguredLibrary(first, "第一", "content://test.documents/tree/first"),
+            ConfiguredLibrary(second, "第二", null)), repository.libraries())
+        assertEquals(second, repository.current()!!.location)
+        val switched = requireNotNull(repository.switchTo(first))
+        assertEquals(first, switched.location)
+        assertNotEquals(firstSelection.token, switched.token)
+        assertNull(repository.switchTo(localIdentity().location))
+        assertEquals(switched, repository.current())
+        // Adding a listed location again refreshes its entry instead of listing it twice.
+        val again = repository.beginAddition(first.backend, null).first
+        repository.chooseAddition(again.token, first, "改名", "content://test.documents/tree/first-again").getOrThrow()
+        val (selection, released) = requireNotNull(repository.completeAddition(again.token))
+        assertEquals(first, selection.location)
+        assertEquals("content://test.documents/tree/first", released)
+        assertEquals(listOf(first, second), repository.libraries().map { it.location })
+        assertEquals("content://test.documents/tree/first-again", repository.accessKey(first))
+        assertEquals("改名", repository.libraries().first().displayName)
+        assertEquals("content://test.documents/tree/first-again",
+            repository.replaceAccessKey(first, "content://test.documents/tree/first").getOrNull())
+        assertTrue(repository.accessKeyInUse("content://test.documents/tree/first"))
+        assertFalse(repository.accessKeyInUse("content://test.documents/tree/first-again"))
         database.close()
         openDatabase()
+        assertEquals(listOf(first, second), repository.libraries().map { it.location })
+        assertEquals(first, repository.current()!!.location)
+    }
 
-        val reopened = DatabaseLocalDirectoryConfiguration(repository, permissions, legacy)
-        assertEquals(newUri, reopened.load())
-        assertEquals(candidate, repository.current())
-        assertEquals(1, legacyLoads)
+    @Test
+    fun anAdditionChangesNothingCurrentUntilCompletedAndCanBeAbandoned() = runBlocking<Unit> {
+        val listed = repository.addLibrary(localIdentity().location, "content://test.documents/tree/listed")
+        val location = localIdentity().location
+        val addition = repository.beginAddition(location.backend, null).first
+        assertTrue(repository.chooseAddition(addition.token, location, "新书库", "content://test.documents/tree/new").isSuccess)
+        assertEquals(listed, repository.current())
+        assertTrue(repository.accessKeyInUse("content://test.documents/tree/new"))
+        assertEquals(location, repository.clearAdditionRoot(addition.token)!!.location)
+        assertNull(repository.addition()!!.location)
+        assertNull(repository.completeAddition(addition.token))
+        // A new addition replaces the old one; the old token can no longer choose or complete.
+        val (replacement, replaced) = repository.beginAddition(BackendKind.ONEDRIVE, UUID.randomUUID())
+        assertEquals(addition.token, replaced!!.token)
+        assertTrue(repository.chooseAddition(addition.token, location, null, null).isFailure)
+        assertEquals(replacement, repository.cancelAddition())
+        assertNull(repository.addition())
+        assertEquals(listed, repository.current())
+        assertEquals(1, repository.libraries().size)
+    }
+
+    @Test
+    fun versionElevenLocalGrantMovesToTheListedCurrentLibrary() = runBlocking<Unit> {
+        val location = localIdentity().location
+        repository.addLibrary(location, "content://test.documents/tree/upgraded")
+        StateSchemaHistory.downgrade(database.writableDatabase, 11)
+        database.writableDatabase.rawQuery("SELECT tree_uri FROM local_authorization", null).use {
+            assertTrue(it.moveToFirst()); assertEquals("content://test.documents/tree/upgraded", it.getString(0))
+        }
+        database.close()
+        openDatabase()
+        assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
+        assertEquals(listOf(ConfiguredLibrary(location, null, "content://test.documents/tree/upgraded")), repository.libraries())
+        assertEquals(location, repository.current()!!.location)
+        assertNull(repository.addition())
+    }
+
+    @Test
+    fun versionElevenSelectionWithoutLocationLeavesNoCurrentLibrary() = runBlocking<Unit> {
+        repository.select(localIdentity().location)
+        StateSchemaHistory.downgrade(database.writableDatabase, 11)
+        database.writableDatabase.execSQL("UPDATE current_selection SET location_key = NULL")
+        database.close()
+        openDatabase()
+        assertNull(repository.current())
+        assertTrue(repository.libraries().isEmpty())
     }
 
     @Test
@@ -329,6 +364,26 @@ class ApplicationStateRepositoryTest {
         result.handle.use { assertEquals(CONTENT, it.input.reader().readText()) }
         assertEquals(copy.savedVersion, result.version)
         assertEquals(copy, repository.find(copy.key))
+    }
+
+    @Test
+    fun formatPriorityStartsWithEpubPersistsAndSurvivesVersionTenMigration() = runBlocking<Unit> {
+        val epub = BookFormat.parse("EPUB")
+        val pdf = BookFormat.parse("PDF")
+        assertEquals(listOf(epub), repository.formatPriority())
+        repository.setStartupEnabled(true)
+        repository.setFormatPriority(listOf(pdf, epub))
+        database.close()
+        openDatabase()
+        assertEquals(listOf(pdf, epub), repository.formatPriority())
+        StateSchemaHistory.downgrade(database.writableDatabase, 10)
+        database.close()
+        openDatabase()
+        assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
+        // An upgraded installation keeps its startup choice and starts from the default order.
+        assertTrue(repository.startupEnabled())
+        assertEquals(listOf(epub), repository.formatPriority())
+        expectIllegalArgument { repository.setFormatPriority(listOf(pdf, pdf)) }
     }
 
     private fun openDatabase() {

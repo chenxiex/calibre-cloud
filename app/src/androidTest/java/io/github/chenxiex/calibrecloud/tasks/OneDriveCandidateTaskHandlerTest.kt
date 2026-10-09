@@ -83,6 +83,8 @@ class OneDriveCandidateTaskHandlerTest {
         graph = GraphFixture(CalibreFixture.create(File(directory, "fixture.db")).readBytes())
         login()
         reopen()
+        // Directory listings belong to the library being added.
+        state.beginAddition(BackendKind.ONEDRIVE, authorization.sessionId())
     }
 
     @After
@@ -97,7 +99,7 @@ class OneDriveCandidateTaskHandlerTest {
     fun explicitDirectoryPagesSurviveReopenAndChooseStableLocation() = runBlocking<Unit> {
         val first = service.browse()!!
         assertEquals(0, graph.requests.get())
-        assertNull(state.current()!!.location)
+        assertNull(state.current())
         coordinator.drain()
         assertCompleted(first)
         val page = service.currentPage()!!
@@ -106,12 +108,11 @@ class OneDriveCandidateTaskHandlerTest {
         assertEquals(listOf("library-1", "library-2", "library-3"), page.pageAt(0)!!.items.map { it.id })
         assertTrue(page.pageAt(0)!!.hasNext)
         assertEquals(LibraryLocation.OneDrive("account", "drive", "root"), page.location)
-        assertNull(state.current()!!.identity)
         val requestsBeforeReopen = graph.requests.get()
-        val selectionBeforeReopen = state.current()
+        val additionBeforeReopen = state.addition()
         database.close()
         reopen()
-        assertEquals(selectionBeforeReopen, state.current())
+        assertEquals(additionBeforeReopen, state.addition())
         assertEquals(requestsBeforeReopen, graph.requests.get())
         val restored = service.currentPage()!!
         assertEquals("Display root", restored.directoryName)
@@ -123,12 +124,13 @@ class OneDriveCandidateTaskHandlerTest {
         assertFalse(service.choose("unlisted-item"))
         assertTrue(service.choose("library-4"))
         val selected = LibraryLocation.OneDrive("account", "drive", "library-4")
-        assertEquals(selected, service.currentLocation())
-        assertNull(state.current()!!.identity)
+        assertEquals(selected, state.addition()!!.location)
+        assertEquals("Display library-4", state.addition()!!.displayName)
+        assertNull(state.current())
         database.close()
         reopen()
-        assertEquals(selected, service.currentLocation())
-        assertNull(state.current()!!.identity)
+        assertEquals(selected, state.addition()!!.location)
+        assertNull(state.current())
         val persisted = File(directory, "browse/${first.value}.json").readText()
         assertFalse(persisted.contains("fixture-access-token"))
         assertFalse(persisted.contains("nextLink"))
@@ -140,6 +142,7 @@ class OneDriveCandidateTaskHandlerTest {
         service.browse()!!
         coordinator.drain()
         assertTrue(service.choose("library-1"))
+        assertNotNull(state.completeAddition(state.addition()!!.token))
         val events = mutableListOf<TaskEvent>()
         val observer = launch(start = CoroutineStart.UNDISPATCHED) { queue.events.collect { events.add(it) } }
         val task = sync.request(TaskOrigin.MANUAL_SYNC)!!
@@ -162,7 +165,7 @@ class OneDriveCandidateTaskHandlerTest {
         database.close()
         reopen()
         assertCompleted(task)
-        assertEquals(LibraryLocation.OneDrive("account", "drive", "library-1"), service.currentLocation())
+        assertEquals(LibraryLocation.OneDrive("account", "drive", "library-1"), state.current()!!.location)
     }
 
     @Test
@@ -170,6 +173,7 @@ class OneDriveCandidateTaskHandlerTest {
         service.browse()!!
         coordinator.drain()
         assertTrue(service.choose("library-1"))
+        assertNotNull(state.completeAddition(state.addition()!!.token))
         assertCompleted(sync.request(TaskOrigin.MANUAL_SYNC)!!.also { coordinator.drain() })
         val revision = metadata.currentRevision()!!
         val importedAt = metadata.currentImport()!!.importedAt
@@ -206,7 +210,8 @@ class OneDriveCandidateTaskHandlerTest {
         assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.LOGIN))), queue.get(task)!!.record.state)
         assertNull(service.currentPage())
         assertFalse(service.choose("root"))
-        assertNull(state.current()!!.location)
+        assertNull(state.addition()!!.location)
+        assertNull(state.current())
     }
 
     @Test
@@ -219,20 +224,21 @@ class OneDriveCandidateTaskHandlerTest {
         coordinator.drain()
         assertCompleted(task)
         assertEquals(14, service.currentPage()!!.items.size)
-        assertNull(state.current()!!.identity)
+        assertNull(state.current())
     }
 
     @Test
-    fun staleDirectoryAndReauthorizationCannotReplaceNewSelection() = runBlocking<Unit> {
+    fun staleDirectoryCannotBecomeTheRootOfARestartedAdditionOrChangeTheCurrentLibrary() = runBlocking<Unit> {
         val task = service.browse()!!
         coordinator.drain()
         val request = queue.get(task)!!.record.submission.request as TaskRequest.CandidateConfiguration
-        val oldToken = state.current()!!.token
-        val replacement = state.select(LibraryLocation.Local("test.documents", "replacement"))
-        assertNull(state.chooseCandidate(request.context, LibraryLocation.OneDrive("account", "drive", "library-1")))
-        assertNull(state.reauthorizeCandidate(oldToken, UUID.randomUUID()))
+        val current = state.select(LibraryLocation.Local("test.documents", "current"))
+        state.beginAddition(BackendKind.ONEDRIVE, authorization.sessionId())
+        assertTrue(state.chooseAddition(request.context.selectionToken, LibraryLocation.OneDrive("account", "drive", "library-1"),
+            null, null).isFailure)
         assertFalse(service.choose("library-1"))
-        assertEquals(replacement, state.current())
+        assertNull(state.addition()!!.location)
+        assertEquals(current, state.current())
     }
 
     @Test
@@ -242,7 +248,7 @@ class OneDriveCandidateTaskHandlerTest {
         val requestCount = graph.requests.get()
         val queueCount = queue.list().size
         val models = ViewModelStore()
-        val model = withContext(Dispatchers.Main) { OneDriveLibraryViewModel(service, sync).also { models.put("browser", it) } }
+        val model = withContext(Dispatchers.Main) { OneDriveLibraryViewModel(service).also { models.put("browser", it) } }
         try {
             model.restore()
             withTimeout(5_000) { while (model.page == null) delay(10) }
@@ -254,9 +260,47 @@ class OneDriveCandidateTaskHandlerTest {
                 assertFalse(model.page!!.hasNext)
                 model.paginate(1)
                 assertEquals(listOf("library-4", "library-5", "library-6"), model.page!!.items.map { it.id })
+                // A taller page holds more directories and still shows the first one shown before.
+                model.onMeasured(5)
+                assertEquals((1..5).map { "library-$it" }, model.page!!.items.map { it.id })
+                assertEquals(3, model.pageCount)
+                model.paginate(2)
+                assertEquals(listOf("library-11", "library-12", "library-13", "library-14"), model.page!!.items.map { it.id })
             }
             assertEquals(requestCount, graph.requests.get())
             assertEquals(queueCount, queue.list().size)
+        } finally { withContext(Dispatchers.Main) { models.clear() } }
+    }
+
+    @Test
+    fun viewModelOpensTheRootOnceWhenTheDirectoryStepHasNoListing() = runBlocking<Unit> {
+        val models = ViewModelStore()
+        val model = withContext(Dispatchers.Main) { OneDriveLibraryViewModel(service).also { models.put("browser", it) } }
+        try {
+            withContext(Dispatchers.Main) { model.browseIfEmpty() }
+            withTimeout(5_000) { while (queue.list().isEmpty()) delay(10) }
+            // A browse under way is not submitted again.
+            withContext(Dispatchers.Main) { model.browseIfEmpty() }
+            delay(200)
+            assertEquals(1, queue.list().size)
+            coordinator.drain()
+            withTimeout(5_000) { while (model.page == null) delay(10) }
+            withContext(Dispatchers.Main) { model.browseIfEmpty() }
+            delay(200)
+            assertEquals(1, queue.list().size)
+            assertFalse(model.loading)
+            // Reloading lists the shown directory again; the result replaces the earlier one.
+            val shown = model.page!!.parentItemId
+            val first = model.record!!.id
+            withContext(Dispatchers.Main) { model.reload() }
+            withTimeout(5_000) { while (model.record?.id == first) delay(10) }
+            val reload = model.record!!.id
+            assertEquals(OneDriveCandidateTaskHandler.BROWSE, (queue.get(reload)!!.record.submission.request as TaskRequest.CandidateConfiguration).operation)
+            coordinator.drain()
+            assertCompleted(reload)
+            withTimeout(5_000) { while (model.loading) delay(10) }
+            assertEquals(shown, model.page!!.parentItemId)
+            assertFalse(model.canGoUp)
         } finally { withContext(Dispatchers.Main) { models.clear() } }
     }
 

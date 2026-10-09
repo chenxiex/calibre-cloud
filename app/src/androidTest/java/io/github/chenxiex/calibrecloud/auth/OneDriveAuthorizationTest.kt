@@ -42,6 +42,18 @@ class OneDriveAuthorizationTest {
         assertEquals(0, restoredPlatform.exchanges)
     }
 
+    /** Q61: signing in with another account asks the login page for its account picker; an ordinary login does not. */
+    @Test
+    fun choosingAnotherAccountAsksForTheAccountPicker() = runBlocking {
+        val platform = FakePlatform()
+        val authorization = coordinator(MemoryStore(), platform)
+        authorization.begin()
+        assertNull(platform.request!!.prompt)
+        authorization.cancel()
+        authorization.begin(chooseAccount = true)
+        assertEquals("select_account", platform.request!!.prompt)
+    }
+
     @Test
     fun staleSourceSessionCannotConsumeNewAccountSubject() = runBlocking {
         val platform = FakePlatform().apply { accountSubject = "test-account-a" }

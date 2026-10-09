@@ -11,5 +11,6 @@
     ./gradlew :app:resolveLockedDependencies :app:assembleDebug :app:assembleRelease :app:assembleDebugAndroidTest :app:lintDebug :app:lintRelease --write-locks
     ```
 
+- release 运行时依赖（锁中的 `releaseRuntimeClasspath`）变化时，按其 POM 声明的许可证和随包 NOTICE 更新 [第三方声明](../app/src/main/res/raw/third_party_notices.txt)，新许可证还需加入其全文资源与 `LICENSE_TEXTS`；`ThirdPartyNoticesTest` 在模块缺少或多出声明、许可证不在 GPL-3.0 兼容清单时失败。不得为通过检查自行填写未声明的许可证。
 - 审阅版本与锁文件后，使用同一组任务、不带 `--write-locks` 复验。版本调整须有兼容依据和实际验证，结果保存在对应验证记录中。
 - Wrapper 固定分发 URL 和 SHA-256，一起维护脚本、JAR 和 properties；保留 `gradlew` 可执行位，以及 `.gitattributes` 的 LF／CRLF 约定。日常构建使用项目 Wrapper，容器自带 Gradle 仅用于初始化 Wrapper。

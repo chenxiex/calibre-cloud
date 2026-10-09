@@ -59,10 +59,9 @@ class TaskSchemaMigrationTest {
                 assertEquals("fixture-version", copies.single().savedVersion.token)
                 assertEquals(23L, copies.single().sizeBytes)
                 assertTrue(database.readableDatabase.version > 1)
-                database.readableDatabase.rawQuery("SELECT tree_uri FROM local_authorization", null).use {
-                    assertTrue(it.moveToFirst())
-                    assertEquals("content://test.documents/tree/fixture-root", it.getString(0))
-                }
+                // The single version 1 grant becomes that of the listed current library.
+                assertEquals(listOf(io.github.chenxiex.calibrecloud.state.ConfiguredLibrary(expected.location, null,
+                    "content://test.documents/tree/fixture-root")), state.libraries())
                 database.readableDatabase.rawQuery("PRAGMA foreign_key_check", null).use { assertEquals(0, it.count) }
             }
         } finally {

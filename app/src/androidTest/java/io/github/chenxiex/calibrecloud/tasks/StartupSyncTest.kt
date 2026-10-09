@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks
 
+import io.github.chenxiex.calibrecloud.state.selectSignedIn
 import io.github.chenxiex.calibrecloud.state.StateSchemaHistory
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -99,8 +100,7 @@ class StartupSyncTest {
     fun oneDriveUsesPersistedSessionAndSameManualRequest() = runBlocking<Unit> {
         val session = UUID.randomUUID()
         val location = LibraryLocation.OneDrive("test-account", "test-drive", "test-root")
-        val candidate = state.beginCandidate(location.backend, session)
-        assertTrue(state.resolveCandidate(candidate, location))
+        val candidate = state.selectSignedIn(location, session)
         startup.setStartupEnabled(true)
         val id = startup.onMainOpened()
         assertNotNull(id)

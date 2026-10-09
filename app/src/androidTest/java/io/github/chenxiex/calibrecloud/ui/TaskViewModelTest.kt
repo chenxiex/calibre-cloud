@@ -57,7 +57,7 @@ class TaskViewModelTest {
         compose.setContent {}
         compose.runOnIdle {
             model = TaskViewModel(queue, { false }, {}, { if (wakeFails) throw IOException() },
-                { true }, application, { false })
+                application, { false })
             store.put("tasks", model)
         }
     }

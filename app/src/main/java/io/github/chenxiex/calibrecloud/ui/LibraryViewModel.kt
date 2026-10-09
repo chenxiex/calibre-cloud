@@ -28,6 +28,7 @@ import io.github.chenxiex.calibrecloud.library.SelectionExpansion
 import io.github.chenxiex.calibrecloud.library.SelectionResult
 import io.github.chenxiex.calibrecloud.library.SearchScope
 import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.BookFormat
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.state.LibrarySelection
@@ -36,6 +37,7 @@ import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
 import io.github.chenxiex.calibrecloud.tasks.api.SubmissionResult
 import io.github.chenxiex.calibrecloud.tasks.api.TaskEvent
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
+import io.github.chenxiex.calibrecloud.tasks.api.TaskRecord
 import io.github.chenxiex.calibrecloud.tasks.api.TaskRequest
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
 import io.github.chenxiex.calibrecloud.tasks.covers.CoverService
@@ -130,8 +132,14 @@ class LibraryViewModel(
     private val events: Flow<TaskEvent>,
     private val historyStore: SearchHistoryStore,
     private val batch: LibraryBatch,
+    private val formatPriority: suspend () -> List<BookFormat> = { LibraryRequest.DEFAULT_FORMAT_PRIORITY },
+    /** State of the unfinished library sync of the selection with this token, or null when none is under way. */
+    private val syncState: suspend (UUID) -> TaskState? = { null },
 ) : ViewModel() {
     var content by mutableStateOf<LibraryContent>(LibraryContent.Loading)
+        private set
+    /** While the library has no metadata: the sync under way (such as the first one after adding it), or null. */
+    var syncing by mutableStateOf<TaskState?>(null)
         private set
     var overview by mutableStateOf<LibraryOverview?>(null)
         private set
@@ -192,6 +200,8 @@ class LibraryViewModel(
         private set
     private var selectionOwner: UUID? = null
     private var expanding: Job? = null
+    /** The saved format order, reread on every load so a change in settings applies on return. */
+    private var priority = LibraryRequest.DEFAULT_FORMAT_PRIORITY
 
     private var visible = false
     private var loadGeneration = 0L
@@ -218,6 +228,8 @@ class LibraryViewModel(
             events.collect { event ->
                 // Cover publications only change images, which the awaiting coroutines refresh themselves.
                 if (event is TaskEvent.CacheChanged && event.request !is TaskRequest.CoverLoad) reload()
+                // Without metadata the page shows the sync under way, so its changes are followed too.
+                if (event is TaskEvent.Changed && content == LibraryContent.NoMetadata && event.record.isLibrarySync()) reload()
             }
         }
         reload()
@@ -541,7 +553,7 @@ class LibraryViewModel(
     private fun levelRequest(offset: Int, pageSize: Int, overview: LibraryOverview) = LibraryRequest(
         search = search?.query.orEmpty(), searchScope = search?.scope ?: SearchScope.All,
         categorization = categorization, folder = folder, sort = sort, foldersAscending = foldersAscending, filters = filters,
-        offset = offset, pageSize = pageSize, expected = overview.revision,
+        formatPriority = priority, offset = offset, pageSize = pageSize, expected = overview.revision,
     )
 
     private fun reload() {
@@ -566,17 +578,22 @@ class LibraryViewModel(
             backend = null
             overview = null
             content = LibraryContent.Unconfigured
+            syncing = null
             finishSelection()
             resetCovers(null)
             return
         }
         backend = selected.backend
+        priority = formatPriority()
         repeat(MAX_ATTEMPTS) {
             val current = queries.overview()
             if (current == null) {
                 if (generation != loadGeneration) return
+                val sync = syncState(selected.token)
+                if (generation != loadGeneration) return
                 overview = null
                 content = LibraryContent.NoMetadata
+                syncing = sync
                 finishSelection()
                 resetCovers(selected.token)
                 return
@@ -610,8 +627,11 @@ class LibraryViewModel(
                 return@repeat
             }
             if (selection()?.token != selected.token || generation != loadGeneration) return
+            val sync = if (shown == LibraryContent.NoMetadata) syncState(selected.token) else null
+            if (selection()?.token != selected.token || generation != loadGeneration) return
             overview = current
             content = shown
+            syncing = sync
             if (coverToken != selected.token) resetCovers(selected.token)
             // A selection belongs to one library; an import or copy change only recounts it.
             if (selectionOwner != null && selectionOwner != selected.token) finishSelection() else expandSelection()
@@ -689,10 +709,15 @@ class LibraryViewModel(
                     QueueLibraryCovers(dependencies.covers, dependencies.coverService, dependencies.taskQueue, dependencies.taskCoordinator),
                     dependencies.taskQueue.events, dependencies.searchHistory,
                     QueueLibraryBatch(dependencies.copyService, dependencies.taskCoordinator, dependencies.maintenance),
+                    dependencies.state::formatPriority,
+                    { token -> dependencies.taskQueue.latestLibrarySync(token)?.state?.takeUnless { it is TaskState.Finished } },
                 ))!!
             }
         }
     }
 }
+
+private fun TaskRecord.isLibrarySync() =
+    (submission.request as? TaskRequest.CandidateConfiguration)?.operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC
 
 private fun <T> Set<T>.toggle(value: T): Set<T> = if (value in this) this - value else this + value

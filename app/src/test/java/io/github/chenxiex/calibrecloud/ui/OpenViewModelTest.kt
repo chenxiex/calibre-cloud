@@ -327,7 +327,7 @@ class OpenViewModelTest {
         model.open(second, "Second")
         advanceUntilIdle()
         assertEquals(OpenProblem.NO_METADATA, (model.status as OpenStatus.Failed).problem)
-        assertEquals(MoreTarget.ONEDRIVE_TASKS, openMoreTarget(model.status!!))
+        assertEquals(MoreTarget.SYNC, openMoreTarget(model.status!!))
 
         model.failNoFormat(second.book, "Empty")
         advanceUntilIdle()

@@ -12,13 +12,13 @@
 
 ## 回调接收与地址验证
 
-- `app/oauth-manifests/` 提供带 host 和无 host 的字面模板，由变体 sourceSet 选择；使用应用 OneDriveCallbackActivity，并移除依赖的 AppAuth receiver，避免遗留宽泛 filter。无 host 时省略 host/path 属性，不生成空属性。
+- `app/oauth-manifests/` 提供带 host 和无 host 的字面模板，由变体 sourceSet 选择；使用应用 OneDriveCallbackActivity，并移除依赖的 AppAuth receiver，避免遗留宽泛 filter。浏览器在自己的任务中启动回调，接收器以 `NEW_TASK | CLEAR_TOP | SINGLE_TOP` 交回应用任务中原有的 MainActivity（`onNewIntent`），不在浏览器任务中新建实例，从而保留发起登录时的页面（如添加向导）。无 host 时省略 host/path 属性，不生成空属性。
 - 带 host 时按 scheme、host 和精确 path 匹配；无 host 的 `scheme:/oauth2redirect` 须正确支持，但 Android 忽略其路径 filter，因此同 scheme 的任意另一变体接收范围都会重叠，必须拒绝。同 scheme 仅在双方都有 host 且 host 或精确 path 不同的情况下允许。规则依据见 [Android data 元素](https://developer.android.com/guide/topics/manifest/data-element)。
 - 完整回调校验由 `OneDriveOAuthConfiguration.acceptsCallback` 承担，包含无 host 的路径检查；OAuth 返回的 query 留待协议流程处理。协调器处理结果前还须经 `AuthorizationTransactionGate` 核对待处理事务、state 与重复交付，不能把地址匹配视为已授权。
 
 ## 授权阶段与隐私
 
-- 全球个人账号 `consumers` 端点、授权码、S256 PKCE 与 `openid`、`offline_access`、`https://graph.microsoft.com/Files.ReadWrite` 范围由 AppAuth 构建；使用 AppAuth BrowserSelector 选择系统浏览器，并以 ACTION_VIEW 打开请求。应用接收原始回调，通过门禁后用 AppAuth 解析、兑换和显式刷新，不在授权模块访问 Graph。
+- 全球个人账号 `consumers` 端点、授权码、S256 PKCE 与 `openid`、`offline_access`、`https://graph.microsoft.com/Files.ReadWrite` 范围由 AppAuth 构建；只保存一个登录（Q60），“登录其他账号”及书库页的重新授权以 `begin(chooseAccount = true)` 加上 `prompt=select_account`，让登录页列出账号而不是沿用浏览器中的账号（Q61）；使用 AppAuth BrowserSelector 选择系统浏览器，并以 ACTION_VIEW 打开请求。应用接收原始回调，通过门禁后用 AppAuth 解析、兑换和显式刷新，不在授权模块访问 Graph。
 - 应用依赖容器持有唯一授权协调器，OneDriveAuthorizationViewModel 复用它并串行调用；ViewModel 清理不能关闭进程共享 AppAuth 组件。协调器使用同一 mutex 串行浏览器回调与后端刷新；不会在重绘／恢复首页时重新登录或刷新。浏览器返回未完成时提供显式取消，十分钟过期；兑换／刷新最多一分钟，显示分类错误和重试入口。页面使用静态文字、显式分页和无动画控件。
 - 待处理 AuthorizationRequest（含 state 与 PKCE verifier）和 AuthState 共存于加密 envelope。使用 elapsedRealtime 与系统 boot count 约束有效期，进程重建可恢复、设备重启作废。门禁检查完整地址、唯一 state 和唯一 code/error；无待处理或重复结果不兑换。兑换前原子保存消费与 interrupted 标志，进程中断后要求重新登录，不重兑旧代码。
 - EncryptedAuthStateStore 使用 Android Keystore 不可导出 AES-256-GCM 密钥、随机 96-bit IV、认证标签和应用／存储域 AAD；AtomicFile 写入 noBackupFilesDir/onedrive-auth/state.bin，所有磁盘 I/O 运行于 IO dispatcher。恢复失败只清理授权存储，不修改本地目录配置或书籍副本；恢复时校验配置身份，防止复用旧注册。

@@ -2,181 +2,126 @@ package io.github.chenxiex.calibrecloud.ui
 
 import android.content.Context
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import io.github.chenxiex.calibrecloud.CalibreCloudApplication
-import io.github.chenxiex.calibrecloud.metadata.MetadataRepository
-import io.github.chenxiex.calibrecloud.model.BookKey
-import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.state.LibrarySelection
 import io.github.chenxiex.calibrecloud.storage.api.CopyReadResult
 import io.github.chenxiex.calibrecloud.storage.api.CopyReader
 import io.github.chenxiex.calibrecloud.storage.api.DownloadedCopy
-import io.github.chenxiex.calibrecloud.tasks.api.SubmissionResult
-import io.github.chenxiex.calibrecloud.tasks.api.TaskId
-import io.github.chenxiex.calibrecloud.tasks.api.TaskRecord
-import io.github.chenxiex.calibrecloud.tasks.api.TaskRequest
-import io.github.chenxiex.calibrecloud.tasks.api.TaskState
-import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
-import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
-import io.github.chenxiex.calibrecloud.tasks.persistence.TaskCoordinator
+import io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance
+import io.github.chenxiex.calibrecloud.storage.cache.CleanupPlan
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import java.util.UUID
 
-data class DownloadOption(val key: CopyKey, val title: String, val sizeBytes: Long?)
 enum class DownloadCopyStatus { AVAILABLE, MISSING, FAILED }
 data class DownloadListEntry(val copy: DownloadedCopy, val status: DownloadCopyStatus)
 
-/** All restored data and copy checks are private reads. Only explicit actions run source tasks. */
+/**
+ * The minimal "已下载文件" list (R12): the current library's complete copies from the manifest, usable
+ * without a full import. Reading it and checking each shown copy are private reads; only a confirmed
+ * removal changes anything, and it removes application copies, never source files.
+ */
 class DownloadViewModel(
     private val state: ApplicationStateRepository,
-    private val metadata: MetadataRepository,
     private val reader: CopyReader,
-    private val queue: DurableTaskQueue,
-    private val coordinator: TaskCoordinator,
-    private val maintenance: io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance,
-    private val submitCopy: suspend (CopyKey, UUID) -> SubmissionResult,
+    private val maintenance: CacheMaintenance,
 ) : ViewModel() {
     var selection by mutableStateOf<LibrarySelection?>(null)
         private set
-    var options by mutableStateOf<List<DownloadOption>>(emptyList())
-        private set
     var entries by mutableStateOf<List<DownloadListEntry>>(emptyList())
         private set
-    var listPage by mutableIntStateOf(0)
+    var total by mutableIntStateOf(0)
         private set
-    var listHasNext by mutableStateOf(false)
+    /** Index of the first shown entry; always the start of a page of [capacity] entries. */
+    var offset by mutableIntStateOf(0)
         private set
-    var record by mutableStateOf<TaskRecord?>(null)
-        private set
-    var submitting by mutableStateOf(false)
-        private set
-    var rejected by mutableStateOf(false)
+    var capacity by mutableIntStateOf(0)
         private set
     var readFailed by mutableStateOf(false)
         private set
-    var removal by mutableStateOf<io.github.chenxiex.calibrecloud.storage.cache.CleanupPlan?>(null)
+    var removal by mutableStateOf<CleanupPlan?>(null)
         private set
     var removalResult by mutableStateOf<Boolean?>(null)
         private set
+    var submitting by mutableStateOf(false)
+        private set
+    private val reads = Mutex()
 
+    fun restore() {
+        viewModelScope.launch { reads.withLock { refresh(offset) } }
+    }
+
+    fun onMeasured(value: Int) {
+        if (value <= 0 || value == capacity) return
+        capacity = value
+        restore()
+    }
+
+    fun showPage(page: Int) {
+        if (capacity <= 0 || page < 0) return
+        viewModelScope.launch { reads.withLock { refresh(page * capacity) } }
+    }
+
+    /** Previews removing the entry's format, or every format of its book with [allFormats]. */
     fun previewRemoval(entry: DownloadListEntry, allFormats: Boolean = false) {
+        if (submitting) return
         viewModelScope.launch {
-            removal = maintenance.previewCopies(setOf(entry.copy.key.book), if (allFormats) null else setOf(entry.copy.key.format))
-            removalResult = null
+            try {
+                removal = maintenance.previewCopies(setOf(entry.copy.key.book), if (allFormats) null else setOf(entry.copy.key.format))
+                removalResult = if (removal == null) false else null
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                removalResult = false
+            }
         }
     }
-    fun cancelRemoval() { removal = null }
+
+    fun cancelRemoval() {
+        removal = null
+    }
+
     fun confirmRemoval() {
         val plan = removal ?: return
         if (submitting) return
         submitting = true
         viewModelScope.launch {
-            try { removalResult = maintenance.execute(plan) }
-            catch (failure: CancellationException) { throw failure }
-            catch (_: Exception) { removalResult = false }
-            finally { removal = null; submitting = false; restore() }
-        }
-    }
-    private var observer: Job? = null
-    private val reads = Mutex()
-
-    fun restore() {
-        viewModelScope.launch {
-            reads.withLock { refresh() }
-        }
-    }
-
-    fun paginate(page: Int) {
-        if (page < 0) return
-        viewModelScope.launch { reads.withLock { refresh(page) } }
-    }
-
-    fun download(option: DownloadOption) {
-        val token = selection?.token ?: return
-        if (submitting) return
-        submitting = true
-        viewModelScope.launch {
             try {
-                val result = submitCopy(option.key, token)
-                val id = when (result) {
-                    is SubmissionResult.Created -> result.taskId
-                    is SubmissionResult.Reused -> result.taskId
-                    is SubmissionResult.Promoted -> result.taskId
-                    is SubmissionResult.Rejected -> { rejected = true; return@launch }
-                }
-                rejected = false
-                observe(id, token)
-                wake()
+                removalResult = maintenance.execute(plan)
             } catch (failure: CancellationException) {
                 throw failure
             } catch (_: Exception) {
-                rejected = true
+                removalResult = false
             } finally {
+                removal = null
                 submitting = false
                 restore()
             }
         }
     }
 
-    fun control(command: TaskControl) {
-        val displayed = record ?: return
-        val token = selection?.token ?: return
-        viewModelScope.launch {
-            val selected = state.current()
-            if (selected?.token != token || selected.identity?.id != displayed.submission.request.libraryId) return@launch
-            if (queue.control(displayed.id, command) && command in setOf(TaskControl.RESUME, TaskControl.RETRY)) {
-                wake()
-            }
-            restore()
-        }
-    }
-
-    fun runQueued() {
-        wake()
-    }
-
-    private fun wake() {
-        viewModelScope.launch {
-            try {
-                coordinator.requestRun()
-            } catch (failure: CancellationException) {
-                throw failure
-            } catch (_: Exception) {
-                rejected = true
-            } finally {
-                restore()
-            }
-        }
-    }
-
-    private suspend fun refresh(requestedPage: Int = listPage) {
+    private suspend fun refresh(requested: Int) {
         try {
-            coordinator.restorePending()
             val before = state.current()
             val switched = before?.token != selection?.token || before?.identity != selection?.identity
-            val page = if (switched) 0 else requestedPage
-            val imported = metadata.currentImport()?.takeIf { it.identity == before?.identity }
-            val updatedOptions = imported?.metadata?.books.orEmpty().flatMap { book ->
-                book.formats.map { format -> DownloadOption(
-                    CopyKey(BookKey(imported!!.identity.id, book.sourceId, book.sourceUuid), format.format),
-                    book.title, format.sizeBytes,
-                ) }
-            }
-            val copies = before?.identity?.let { state.listCopies(it.id, LIST_SIZE + 1, page * LIST_SIZE) }.orEmpty()
-            val updatedEntries = copies.take(LIST_SIZE).map { copy ->
+            val identity = before?.identity
+            val size = capacity.coerceAtLeast(1)
+            val count = identity?.let { state.countCopies(it.id) } ?: 0
+            // A page left beyond the end after a removal shows the last page instead.
+            val start = if (switched) 0 else minOf(requested, lastPageStart(count, size)).coerceAtLeast(0) / size * size
+            val copies = identity?.let { state.listCopies(it.id, size.coerceAtMost(200), start) }.orEmpty()
+            val checked = copies.map { copy ->
                 val status = when (val read = reader.read(copy.key)) {
                     is CopyReadResult.Available -> {
                         withContext(Dispatchers.IO + NonCancellable) { read.handle.close() }
@@ -187,57 +132,29 @@ class DownloadViewModel(
                 }
                 DownloadListEntry(copy, status)
             }
-            val latest = before?.identity?.let { identity -> queue.list().filter {
-                it.record.submission.request is TaskRequest.FormatCopy && it.record.submission.request.libraryId == identity.id
-            }.maxByOrNull { it.record.scheduling.sequence.value }?.record }
             if (state.current()?.token != before?.token) return
             if (switched) {
-                observer?.cancel()
-                record = null
                 removal = null
                 removalResult = null
-                rejected = false
             }
             selection = before
-            options = updatedOptions
-            entries = updatedEntries
-            listPage = page
-            listHasNext = copies.size > LIST_SIZE
+            entries = checked
+            total = count
+            offset = start
             readFailed = false
-            if (latest != null && record?.id != latest.id) observe(latest.id, before!!.token)
         } catch (failure: CancellationException) {
             throw failure
         } catch (_: Exception) {
-            options = emptyList()
             entries = emptyList()
             readFailed = true
         }
     }
 
-    private fun observe(id: TaskId, token: UUID) {
-        observer?.cancel()
-        observer = viewModelScope.launch {
-            queue.observe(id).collect { updated ->
-                val current = state.current()
-                if (current?.token == token && current.identity?.id == updated.submission.request.libraryId) {
-                    record = updated
-                    if (updated.state is TaskState.Finished) restore()
-                } else {
-                    record = null
-                }
-            }
-        }
-    }
-
     companion object {
-        private const val LIST_SIZE = 1
-
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
-                return modelClass.cast(DownloadViewModel(dependencies.state, dependencies.metadata,
-                    dependencies.copyReader, dependencies.taskQueue, dependencies.taskCoordinator, dependencies.maintenance,
-                    { key, token -> dependencies.copyService.submit(key, token) }))!!
+                return modelClass.cast(DownloadViewModel(dependencies.state, dependencies.copyReader, dependencies.maintenance))!!
             }
         }
     }

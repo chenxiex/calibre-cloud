@@ -81,18 +81,10 @@ import io.github.chenxiex.calibrecloud.library.LibraryProblem
 import io.github.chenxiex.calibrecloud.library.ReadFilter
 import io.github.chenxiex.calibrecloud.library.ReadMarkAction
 import io.github.chenxiex.calibrecloud.library.ReadMarkBlock
-import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
+import io.github.chenxiex.calibrecloud.tasks.api.TaskState
 import io.github.chenxiex.calibrecloud.model.CopyKey
-
-/** The "更多" pages that the library hands over to when it needs configuration, sync or downloads. */
-internal object MoreTarget {
-    const val LOCAL_AUTHORIZATION = 0
-    const val ONEDRIVE_LOGIN = 1
-    const val ONEDRIVE_TASKS = 3
-    const val DOWNLOAD_LIST = 7
-}
 
 // Count first (R27): the most cells of at least these sizes, then stretched to fill the content box.
 private val MIN_CELL_WIDTH = 96.dp
@@ -294,12 +286,23 @@ private fun LibraryBody(
                 LibraryContent.Loading -> Message(stringResource(R.string.library_loading))
                 LibraryContent.Unconfigured -> Message(stringResource(R.string.library_unconfigured)) {
                     StaticButton(stringResource(R.string.library_open_settings), true, Modifier.testTag("library_open_settings")) {
-                        openMore(MoreTarget.LOCAL_AUTHORIZATION)
+                        openMore(MoreTarget.LOCATION)
                     }
                 }
-                LibraryContent.NoMetadata -> Message(stringResource(R.string.library_no_metadata)) {
-                    StaticButton(stringResource(R.string.library_sync), true, Modifier.testTag("library_sync")) {
-                        openMore(if (model.backend == BackendKind.ONEDRIVE) MoreTarget.ONEDRIVE_TASKS else MoreTarget.LOCAL_AUTHORIZATION)
+                // A sync under way (such as the first one of a new library) is shown instead of offering another one.
+                LibraryContent.NoMetadata -> Message(stringResource(when (model.syncing) {
+                    null -> R.string.library_no_metadata
+                    TaskState.Queued, is TaskState.Running -> R.string.library_syncing
+                    else -> R.string.library_sync_waiting
+                })) {
+                    if (model.syncing == null) {
+                        StaticButton(stringResource(R.string.library_sync), true, Modifier.testTag("library_sync")) {
+                            openMore(MoreTarget.SYNC)
+                        }
+                    } else {
+                        StaticButton(stringResource(R.string.library_sync_progress), true, Modifier.testTag("library_sync_progress")) {
+                            openMore(MoreTarget.SYNC)
+                        }
                     }
                     Spacer(Modifier.height(8.dp))
                     StaticButton(stringResource(R.string.library_downloaded_files), true, Modifier.testTag("library_downloaded_files")) {
@@ -676,6 +679,14 @@ internal sealed interface MenuEntry {
         override val height get() = MENU_NOTE_HEIGHT
     }
 
+    /** A place in an order, moved by the up and down buttons at the row end (tagged `<tag>_up` and `<tag>_down`). */
+    class Ordered(
+        val tag: String, val label: String, val upDescription: String, val downDescription: String,
+        val canUp: Boolean, val canDown: Boolean, val onUp: () -> Unit, val onDown: () -> Unit,
+    ) : MenuEntry {
+        override val height get() = ICON_TOUCH_SIZE
+    }
+
     /** [mark] is drawn at the row end: a check for a chosen option, an arrow for the chosen sort direction. */
     class Choice(
         val tag: String, val label: String, @DrawableRes val icon: Int? = null, @DrawableRes val mark: Int? = null,
@@ -789,15 +800,22 @@ private fun FilterPanel(model: LibraryViewModel, page: Int, onPage: (Int) -> Uni
 
 private fun <T> Set<T>.toggle(value: T): Set<T> = if (value in this) this - value else this + value
 
-/** Lays out grouped rows by height; the page row only appears when the entries need more than one page. */
+/**
+ * Lays out grouped rows by height; the page row only appears when the entries need more than one page.
+ * When [focus] changes, the page that holds that entry index is shown.
+ */
 @Composable
-internal fun PagedEntries(entries: List<MenuEntry>, page: Int, onPage: (Int) -> Unit, modifier: Modifier, tagPrefix: String) {
+internal fun PagedEntries(entries: List<MenuEntry>, page: Int, onPage: (Int) -> Unit, modifier: Modifier, tagPrefix: String, focus: Int? = null) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val blocks = entries.map { PageBlock(it.height.value, keepWithNext = it is MenuEntry.Heading, separator = it is MenuEntry.Rule) }
         val pages = paginate(blocks, maxHeight.value).takeIf { it.size <= 1 }
             ?: paginate(blocks, maxHeight.value - MENU_PAGE_BAR_HEIGHT.value)
         val current = page.coerceIn(0, pages.size - 1)
         LaunchedEffect(current, page) { if (current != page) onPage(current) }
+        LaunchedEffect(focus) {
+            val target = focus?.let { index -> pages.indexOfFirst { index in it } } ?: -1
+            if (target >= 0 && target != current) onPage(target)
+        }
         PagedArea(current, pages.size, tagPrefix, MENU_PAGE_BAR_HEIGHT, onPage, Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize()) {
                 pages[current].forEach { MenuRow(entries[it]) }
@@ -807,7 +825,7 @@ internal fun PagedEntries(entries: List<MenuEntry>, page: Int, onPage: (Int) -> 
 }
 
 @Composable
-private fun MenuRow(entry: MenuEntry) {
+internal fun MenuRow(entry: MenuEntry) {
     when (entry) {
         MenuEntry.Rule -> Box(Modifier.fillMaxWidth().height(entry.height), contentAlignment = Alignment.Center) {
             HorizontalRule(Modifier.padding(horizontal = 8.dp))
@@ -818,6 +836,14 @@ private fun MenuRow(entry: MenuEntry) {
         }
         is MenuEntry.Heading -> Box(Modifier.fillMaxWidth().height(entry.height).padding(horizontal = 16.dp), contentAlignment = Alignment.BottomStart) {
             Text(entry.label, Modifier.padding(bottom = 4.dp), fontWeight = FontWeight.Bold, fontSize = 18.sp, maxLines = 1)
+        }
+        is MenuEntry.Ordered -> Row(
+            Modifier.fillMaxWidth().height(entry.height).testTag(entry.tag).padding(start = 16.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(entry.label, Modifier.weight(1f), fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            IconAction(R.drawable.ic_arrow_up, entry.upDescription, entry.canUp, Modifier.testTag("${entry.tag}_up"), onClick = entry.onUp)
+            IconAction(R.drawable.ic_arrow_down, entry.downDescription, entry.canDown, Modifier.testTag("${entry.tag}_down"), onClick = entry.onDown)
         }
         is MenuEntry.Choice -> {
             val tint = if (entry.enabled) Color.Black else DISABLED_TINT

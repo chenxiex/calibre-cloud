@@ -137,6 +137,21 @@ adb -s <PA6> shell am instrument -w -e class io.github.chenxiex.calibrecloud.ui.
 
 用户于 2026-10-07 在 PA6 墨水屏上试用后确认步骤 02 通过，包括图标与梯形斜幅的灰度辨识、残影、无动画、滑动翻页与触控体验，以及 4×3 网格与 6 行列表的可读性。验收结束后已卸载 `io.github.chenxiex.calibrecloud.debug` 与 `.debug.test`，并删除设备上的 `Download/calibre-step02-acceptance-20261007` 测试库副本和 ADB 界面转储文件；设备上不再有本应用的包。
 
+#### 添加书库后的首次同步在图书馆页不可见（2026-10-09）
+
+用户反馈：向导点“完成”后自动开始同步并回到图书馆页，但页面仍显示“尚无完整元数据”和“同步元数据”按钮，没有正在同步的提示，容易误以为没有同步而反复点击。原因是 `LibraryViewModel` 只按本地导入判断空状态，不读同步任务。
+
+- 先在 `LibraryViewModelTest` 加 `aSyncUnderWayReplacesTheSyncEntryUntilItFinishes`（同步排队时应报告该状态，同步任务结束事件后清除）；修复前因视图模型没有同步状态而无法通过（编译失败）。
+- `LibraryViewModel` 增加 `syncing`（经 `latestLibrarySync` 取当前选择未完成的书库同步），无元数据时也跟随书库同步任务事件重读；图书馆页据此显示“正在同步书库元数据，完成后自动显示书籍。”或等待说明，以“查看同步状态”代替“同步元数据”。`LibraryScreenTest.noLibraryAndNoMetadataOfferTheirEntries` 扩展了该状态。
+- `testDebugUnitTest` 通过；PA6 上 `LibraryScreenTest` 与 `LibrariesPageTest` 共 **33 tests、0 failures**；`assembleDebugAndroidTest lintDebug`（0 errors、5 个既有 warnings）与 `git diff --check` 通过，新 APK 已安装。真实添加后的显示待用户复测。
+
+#### 书库页移除“个人 OneDrive 已授权”提示（2026-10-09）
+
+用户指出书库页顶部的“个人 OneDrive 已授权。”只是提示，没有对应操作，要求移除。原条件在登录有遗留问题时就显示该区域；暂时的刷新失败（网络／服务器）保持已授权状态，于是只显示这一行。
+
+- 书库页的登录区域只在未处于已授权状态且正在浏览器登录、兑换或有问题时显示；`LoginState` 不再为已授权输出文字，删除字符串 `onedrive_authorized`。向导登录步骤登录后直接进入目录选择，不受影响。属界面删减，按用户指示直接修改，未另加测试。
+- `assembleDebug assembleDebugAndroidTest lintDebug`（0 errors、5 个既有 warnings）与 `git diff --check` 通过；PA6 上 `LibrariesPageTest` 与 `OneDriveCallbackActivityTest` 共 **4 tests、0 failures**，新 APK 已安装。
+
 ### 未完成
 
 - 无配置／无元数据两个入口只有 Compose 测试证据，真机显示未单独核对。
@@ -176,6 +191,14 @@ adb -s <PA6> shell am instrument -w -e class io.github.chenxiex.calibrecloud.ui.
 
 - 2026-10-07 用户在 PA6 上试用搜索页输入与清空图标、字段徽标、历史与筛选面板（含 Q45、Q46 调整）后确认通过，步骤 03 提交；随后已卸载 debug 与测试包，`/data/local/tmp` 无本项目遗留文件。
 
+#### 添加书库后的首次同步在图书馆页不可见（2026-10-09）
+
+用户反馈：向导点“完成”后自动开始同步并回到图书馆页，但页面仍显示“尚无完整元数据”和“同步元数据”按钮，没有正在同步的提示，容易误以为没有同步而反复点击。原因是 `LibraryViewModel` 只按本地导入判断空状态，不读同步任务。
+
+- 先在 `LibraryViewModelTest` 加 `aSyncUnderWayReplacesTheSyncEntryUntilItFinishes`（同步排队时应报告该状态，同步任务结束事件后清除）；修复前因视图模型没有同步状态而无法通过（编译失败）。
+- `LibraryViewModel` 增加 `syncing`（经 `latestLibrarySync` 取当前选择未完成的书库同步），无元数据时也跟随书库同步任务事件重读；图书馆页据此显示“正在同步书库元数据，完成后自动显示书籍。”或等待说明，以“查看同步状态”代替“同步元数据”。`LibraryScreenTest.noLibraryAndNoMetadataOfferTheirEntries` 扩展了该状态。
+- `testDebugUnitTest` 通过；PA6 上 `LibraryScreenTest` 与 `LibrariesPageTest` 共 **33 tests、0 failures**；`assembleDebugAndroidTest lintDebug`（0 errors、5 个既有 warnings）与 `git diff --check` 通过，新 APK 已安装。真实添加后的显示待用户复测。
+
 ### 未完成
 
 - 书籍点击打开、上次打开位置留步骤 04；选择模式下的搜索／筛选限制留步骤 06。
@@ -201,6 +224,14 @@ adb -s <PA6> shell am instrument -w -e class io.github.chenxiex.calibrecloud.ui.
 ### 设备上的阅读器
 
 `cmd package query-activities -a android.intent.action.VIEW -t <MIME> -d content://…` 在 PA6 上的结果：EPUB 为 `hanvon.aebr.hvxreader`，PDF 为 `hanvon.aebr.hvreader`，MOBI 为 `hanvon.aebr.hvepubreader` 与 `hanvon.aebr.hvxreader`，TXT 另有系统 HTML 查看器；`application/octet-stream` 没有处理应用，可用于核对“无阅读器”路径（库内未知格式）。
+
+#### 添加书库后的首次同步在图书馆页不可见（2026-10-09）
+
+用户反馈：向导点“完成”后自动开始同步并回到图书馆页，但页面仍显示“尚无完整元数据”和“同步元数据”按钮，没有正在同步的提示，容易误以为没有同步而反复点击。原因是 `LibraryViewModel` 只按本地导入判断空状态，不读同步任务。
+
+- 先在 `LibraryViewModelTest` 加 `aSyncUnderWayReplacesTheSyncEntryUntilItFinishes`（同步排队时应报告该状态，同步任务结束事件后清除）；修复前因视图模型没有同步状态而无法通过（编译失败）。
+- `LibraryViewModel` 增加 `syncing`（经 `latestLibrarySync` 取当前选择未完成的书库同步），无元数据时也跟随书库同步任务事件重读；图书馆页据此显示“正在同步书库元数据，完成后自动显示书籍。”或等待说明，以“查看同步状态”代替“同步元数据”。`LibraryScreenTest.noLibraryAndNoMetadataOfferTheirEntries` 扩展了该状态。
+- `testDebugUnitTest` 通过；PA6 上 `LibraryScreenTest` 与 `LibrariesPageTest` 共 **33 tests、0 failures**；`assembleDebugAndroidTest lintDebug`（0 errors、5 个既有 warnings）与 `git diff --check` 通过，新 APK 已安装。真实添加后的显示待用户复测。
 
 ### 未完成
 
@@ -410,3 +441,139 @@ Q53／Q54 真实服务验证（2026-10-08）：用户先在应用下载《哈姆
 - `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`：`BUILD SUCCESSFUL`，lint 无新增问题。
 - PA6 `LibraryScreenTest` **OK，30 tests**（输出 `app/build/verification/phase3-step06-popup/instrument.txt`）。文件夹选择用例新增：菜单宽 240dp、右缘距屏幕 4dp、上缘在顶栏下方，页面内容仍显示；点菜单外关闭且已选数量不变，系统返回同样只关闭菜单。首版把菜单放在可点击的关闭层内，子节点语义被合并、测试找不到菜单，已改为并列结构后通过。
 - 真机 helper：`flow --elements-only` 长按书籍 5 后点“更多操作”，2 步全部确认；截图显示菜单位于右上角，列出写回不可用原因、禁用的“标为已读”和“移除下载”，左侧书籍仍可见。两次系统返回依次关闭菜单、退出选择，回到图书馆标题。
+
+## 步骤 07：更多页、设置、关于与临时入口收口（2026-10-08）
+
+对应 R30、R19 的启动同步设置、R24 的格式优先级、R08 的目录选择、R13 的栏目设置、R18 的任务入口、R12／R03 的清理入口与 R36；覆盖 AC09 的更多菜单路径。第二阶段的十三个临时页（含单格式下载页与按需封面页）已删除，其能力迁入正式入口。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :app:assembleRelease :app:lintRelease
+./gradlew :app:connectedDebugAndroidTest
+./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=io.github.chenxiex.calibrecloud.ui.MoreScreenTest
+```
+
+- 基线 `BUILD SUCCESSFUL`：JVM **160 tests、0 failures**；debug／release lint 0 错误，5 项均为既有的 Gradle／依赖新版本提示；`app/gradle.lockfile` 无变化，`git diff --check` 通过。合并后的 release Manifest 权限与此前相同（INTERNET、ACCESS_NETWORK_STATE、WAKE_LOCK、RECEIVE_BOOT_COMPLETED、FOREGROUND_SERVICE、FOREGROUND_SERVICE_DATA_SYNC、POST_NOTIFICATIONS 及 WorkManager 的动态接收器权限），本步未改 Manifest 与构建脚本。
+- 新增 JVM：`ThirdPartyNoticesTest`（4）核对 release 运行时依赖锁的 120 个模块在声明中各出现一次且没有多余模块、许可证均在 GPL-3.0 兼容清单并有全文资源、内置 GPL 文本与根目录 `LICENSE` 逐字节相同、格式错误被拒绝；`FormatOrderTest`（2）；`LibraryViewModelTest` 新增已保存优先级决定默认格式、修改后下次刷新生效、已缓存格式仍优先。
+- 第三方声明来源：逐个读取 Gradle 缓存中这 120 个模块的 POM，均声明 Apache License 2.0（`listenablefuture` 经父 POM `guava-parent`）；jar／aar 中只有 AndroidX 的 `LICENSE.txt`，没有 NOTICE 文件。Apache-2.0 全文取自系统 `/usr/share/common-licenses/Apache-2.0`。
+- PA6（Android 14）全量 `connectedDebugAndroidTest`：**257 tests，1 failed，18 skipped**（跳过项均为需显式参数的真实 SAF／OneDrive／扩展库用例）。失败的是新测试 `noticesNameEveryComponentAndOpenItsLicense` 自身的断言错误（测试盒高度受屏幕约束，声明已分页；且 “Copyright Square, Inc.” 在 OkHttp 与 Okio 各出现一次）；改为翻页核对后单独重跑 `MoreScreenTest` **5 tests、0 failures**。其余用例包括：
+  - `ApplicationStateRepositoryTest.formatPriorityStartsWithEpubPersistsAndSurvivesVersionTenMigration`：默认 EPUB，保存后重开仍在，由 v10 升级保留启动设置并得到默认顺序，重复格式被拒绝；所有经 `StateSchemaHistory` 的迁移测试在 v11 下通过。
+  - `MoreScreenTest`：菜单搜索只匹配菜单名并保留所属分组、多词同时命中、无结果提示；240dp 高度下菜单分 3 页且标题不落在页尾；格式优先级上移两次后状态库依次保存 `EPUB,PDF,MOBI`、`PDF,EPUB,MOBI`，首末项的上移／下移禁用；GPL 全文分页翻到末页；第三方声明首页为 AndroidX、末页为 Material Icons，点击许可证按钮打开 Apache-2.0。
+  - `TaskScreenTest`（改为分页列表，6 项）：仅排队任务显示“排队：第 N 位”，等待条件显示原因且不占位次；12 项分 4 页，删减后页码收回；失败显示阶段、原因和重试起点；只出现可用控制。
+  - `FormatCopyTaskHandlerTest` 中原由临时下载页承担的两项恢复测试改由任务队列页执行：打开时把已终止进程遗留的 Running 记录恢复为排队且不读取源；执行中的任务保持 Running。
+  - `OneDriveCandidateTaskHandlerTest`：目录分页改为按测得的每页条数切片，页大小改变后保留原首个可见目录所在页，翻页不发请求、不增加任务。
+  - 删除只测试临时封面页的 `coverPageRequestsOnlyTheVisibleBook…`；可见页封面入队由已有的 `LibraryViewModelTest`／`LibraryScreenTest` 覆盖。
+
+### 真机 ADB 核对（PA6，未配置书库）
+
+`adb install -r` 安装 debug 包 `io.github.chenxiex.calibrecloud.debug`（`aapt2` 核对包名与 `0.1.0-debug`），没有书库授权。用 helper `flow --elements-only` 按资源 ID 操作，结果在被忽略的 `app/build/verification/phase3-step07/`：
+
+- 图书馆“打开设置” → 书库位置（“尚未选择书库。”）→ OneDrive → 返回 → 返回到菜单，元数据分组显示“尚未配置书库，请先设置书库位置。” → 搜索图标打开输入框：8 步全部确认（`run-menu4`）。输入 “OneDrive” 后只列出“设置 › OneDrive”，“立即同步元数据”不在结果中（`search.png`）。
+- 退出搜索 → 任务队列 → 返回 → 已下载文件（“尚未选择或验证书库，没有已下载文件。”）→ 返回 → 菜单末页 → 关于（“版本 0.1.0-debug”）→ 第三方声明末页（Material Icons）→ Apache-2.0 全文：12 步全部确认（`run-pages`）。菜单共 2 页，许可证全文 10 页，均无滚动（`menu-last.png`、`apache-license.png`）。
+- 首轮 flow 在“书库位置”页等待“资源 ID＋文字”时超时（无点击未确认）：说明行的文字在未加标签的子节点上。曾尝试合并语义，UI dump 不变，已撤回，改为按包名与文字等待。
+
+### 用户反馈后的修改：书库列表与添加向导（Q58–Q61）
+
+用户在验收前提出：后台与通知页删去“后台任务仍可能运行……”后半句；书库位置页的提示与按钮区分不明显、切换书库不便，改为书库列表加逐步添加向导。设计写入 spec.md 的 R02、R03、R30、R12（Q58），删除范围（Q59，A）、单一 OneDrive 登录（Q60，A）与换号入口（Q61，A）经用户回答后同步。
+
+- 状态库 v12：`configured_libraries`（位置键、目录名、访问键）与 `library_addition`。v11 的单一本地授权迁为当前书库列表项的访问键；没有位置的旧候选选择被移除。每个本地书库保存自己的持久授权，替换、放弃添加和删除后只释放不再使用的授权。
+- OneDrive 目录浏览改为绑定进行中的添加，不再在浏览时把当前书库换成候选；队列按添加代号判断浏览任务是否有效，放弃的浏览暂存由既有恢复清理回收。
+- 删除书库是 `CacheMaintenance` 的 `LIBRARY` 计划：清除该位置全部绑定的副本、清单、索引、封面、未完成任务、偏好、搜索历史、上次打开与列表项，删除当前书库时移除当前选择；未提交写回等保护资料保留。没有当前书库时“清除所有其它书库缓存”也可用。
+- “登录其他账号”和书库页的 OneDrive 重新授权在授权请求中加 `prompt=select_account`。
+
+自动检查（2026-10-08）：
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :app:assembleRelease :app:lintRelease
+./gradlew :app:connectedDebugAndroidTest
+./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=io.github.chenxiex.calibrecloud.ui.LibrariesPageTest,io.github.chenxiex.calibrecloud.tasks.OneDriveCandidateTaskHandlerTest
+```
+
+- 基线 `BUILD SUCCESSFUL`：JVM **153 tests、0 failures**（单一授权的旧测试由按书库授权的 `LocalDirectoryAuthorizationTest` 8 项取代，旧 ViewModel 的 3 项随类删除）；debug／release lint 0 错误，仍为 5 项既有版本提示；锁文件无变化，`git diff --check` 通过。删除 13 条已无引用的旧位置页文案。
+- PA6 全量 `connectedDebugAndroidTest`：**284 tests，2 failed，18 skipped**。两项失败均为新测试自身：OneDrive 测试夹具的目录名为 “Display library-4” 而断言写成 “library-4”；书库行内元素在合并语义树中不可单独定位，需用未合并树。修正后单独重跑这两个类 **10 tests、0 failures**。新增或改写的用例包括：
+  - `LibrariesPageTest`（3）：本地添加三步走完、上一步释放未用授权、完成后列表／当前书库／访问键／同步各一次；取消向导保持当前书库并释放新授权；列表切换、只接受同一目录的重新授权、删除当前书库后无当前书库并释放其授权。
+  - `CacheMaintenanceTest`：删除非当前书库清除副本、封面、任务、搜索历史、上次打开、偏好和导入且保留其它书库；删除当前书库时过期计划被拒、执行后无当前选择、受保护写回保留，之后仍可预览其它书库清理。原“未验证候选”两项改为“进行中的添加”和“没有当前书库”。
+  - `ApplicationStateRepositoryTest`：列表顺序、访问键、只能切换到列表中的书库、同一位置重复添加只更新；添加在完成前不改当前书库、被替换后旧代号失效；v11→v12 迁移授权并移除无位置选择。`TaskSchemaMigrationTest` 的 v1 授权最终落到列表项。
+  - `DurableTaskQueueTest`：没有当前书库时添加的浏览任务可执行、重开后保留，同步不能借用添加代号，重新开始添加后旧任务失效；取消浏览不影响添加与当前书库。`OneDriveCandidateTaskHandlerTest` 改为在添加上浏览、选择、完成后同步。
+  - `OneDriveAuthorizationTest.choosingAnotherAccountAsksForTheAccountPicker`：普通登录不带 prompt，换号登录带 `select_account`。
+
+真机 ADB 核对（PA6，`adb install -r` 升级已安装的 debug 包，无书库）：helper `flow --elements-only` 共 12 步全部确认，产物在 `app/build/verification/phase3-step07-libraries/`。
+
+- 更多菜单第 2 页 → 书库（“尚未添加书库。”）→ 添加书库（“第 1 步，共 3 步：选择位置类型”）→ OneDrive（第 2 步，未登录时只有“登录”）→ 上一步回到第 1 步（`run-2`、`step1-type.png`、`step2-onedrive.png`）。
+- 点击“本地目录”立即打开 `com.android.documentsui` 选择器（因无对应资源 ID，由主 agent 按实测元素边界点击并以焦点窗口核对）；未授予权限，返回键逐级退出后回到第 2 步的“选择目录”（`picker.png`、`step2-local.png`）。
+- 取消 → 空列表；图书馆“打开设置”直接进入书库页；向导顶栏返回在第 1 步回到列表（`run-5`）。
+- 发现登录步骤的容器与按钮同用 `wizard_onedrive_login` 标签（helper 匹配 2 个），容器改为 `wizard_onedrive_sign_in` 后重新安装。
+
+#### 书库页与向导去掉额外横幅（2026-10-09）
+
+用户反馈书库页上下各多一条横幅：书库页底部的“添加书库”改为顶栏右侧加号；向导删去页内步骤横幅与底部按钮栏，步骤名和进度（如“选择位置类型（1/3）”）作为顶栏标题，顶栏返回在第 1 步取消、之后回到上一步，第 3 步的“完成”移到顶栏右侧。spec.md 的 R30、app/README.md、界面约束与 helper 资源 ID 说明同步更新。
+
+- `./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest lintDebug`：`BUILD SUCCESSFUL`，lint 0 错误、5 项既有版本提示；`git diff --check` 通过。
+- `LibrariesPageTest` 改为顶栏加页面的组合：核对三步标题、第 1 步返回描述为“取消”、之后为“上一步”、只有第 3 步有“完成”，以及从确认页连按返回逐步退回并在第 1 步离开向导。PA6 无线调试恢复后执行 `./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=io.github.chenxiex.calibrecloud.ui.LibrariesPageTest`：**3 tests、0 failures**。
+- 运行结束卸载了 debug 包，重新 `adb install` 新 APK（无书库）。helper `flow --elements-only` 共 14 步全部确认（`app/build/verification/phase3-step07-topbar/run-2`、`run-3`）：更多 → 书库，顶栏右侧有 `libraries_add` 加号，页面只剩“尚未添加书库。”；加号进入向导，标题“选择位置类型（1/3）”、返回描述“取消”；OneDrive 进入“授权并选择书库目录（2/3）”、返回描述“上一步”；返回回到第 1 步，再返回回到书库页（`step1.png`、`libraries.png`）。第 3 步顶栏“完成”由设备测试覆盖，真机需添加书库后再看。
+
+#### 浏览器登录后回到图书馆页而非向导（2026-10-09）
+
+用户反馈：已有本地书库时在向导中添加 OneDrive，浏览器登录后应用显示图书馆页，再进书库页只见列表，不见未完成的向导。`dumpsys activity activities` 显示 PA6 的汉王浏览器（`com.Hanovn.HanovnBrowser`）在自己的任务中启动 `OneDriveCallbackActivity`，它不带 `NEW_TASK` 启动 MainActivity，于是在浏览器任务中新建了一个从图书馆页开始的实例；原实例（停在向导）留在应用任务后面。
+
+- 先加 `OneDriveCallbackActivityTest`：以 `NEW_TASK | MULTIPLE_TASK` 让回调处在另一任务，断言回到原 MainActivity 且只有一个实例。修复前 PA6 上失败（`expected same:<MainActivity@729dc47> was not:<MainActivity@94f503c>`）。
+- 回调接收器加 `FLAG_ACTIVITY_NEW_TASK` 后，该测试与 `OneDriveAuthorizationTest` 共 **24 tests、0 failures**；`testDebugUnitTest assembleDebug lintDebug` 通过，新 APK 已安装。真实浏览器登录返回向导待用户复测。
+
+#### 目录步骤自动加载与单行目录栏（2026-10-09）
+
+用户要求：登录后自动加载目录，不再手动点“从 OneDrive 根目录浏览”；加载中只显示简单的加载图标；去掉底部按钮栏和“目录已加载”提示，目录栏改为单行，右侧放返回上级（向上箭头）和选择当前目录（勾）两个图标。
+
+- `OneDriveLibraryViewModel.browseIfEmpty`：没有目录结果且没有进行中或失败的加载时提交一次根目录加载；排队和执行中显示静止的沙漏图标，等待条件与失败时显示原因，失败后显示“重新加载”。
+- 新增 `OneDriveCandidateTaskHandlerTest.viewModelOpensTheRootOnceWhenTheDirectoryStepHasNoListing`：空状态提交一次，加载中和已有结果时不重复提交。PA6 上该类与 `LibrariesPageTest` 共 **11 tests、0 failures**；`testDebugUnitTest assembleDebug assembleDebugAndroidTest lintDebug` 通过（lint 0 errors、5 个既有 warnings），`git diff --check` 通过，新 APK 已安装。真实登录后的自动加载与目录栏外观待用户复测。
+- 用户追问后续上传的书库如何出现：进入／返回目录本就重新加载，但无法原地刷新当前目录（根目录尤甚）。目录栏加刷新图标（`OneDriveLibraryViewModel.reload`，保留返回路径）；上述测试扩展为刷新提交同一目录的新加载并保持返回状态。PA6 上该类与 `LibrariesPageTest` 共 **11 tests、0 failures**，`testDebugUnitTest assembleDebug assembleDebugAndroidTest lintDebug` 与 `git diff --check` 通过，新 APK 已安装。
+
+#### 添加书库后的首次同步在图书馆页不可见（2026-10-09）
+
+用户反馈：向导点“完成”后自动开始同步并回到图书馆页，但页面仍显示“尚无完整元数据”和“同步元数据”按钮，没有正在同步的提示，容易误以为没有同步而反复点击。原因是 `LibraryViewModel` 只按本地导入判断空状态，不读同步任务。
+
+- 先在 `LibraryViewModelTest` 加 `aSyncUnderWayReplacesTheSyncEntryUntilItFinishes`（同步排队时应报告该状态，同步任务结束事件后清除）；修复前因视图模型没有同步状态而无法通过（编译失败）。
+- `LibraryViewModel` 增加 `syncing`（经 `latestLibrarySync` 取当前选择未完成的书库同步），无元数据时也跟随书库同步任务事件重读；图书馆页据此显示“正在同步书库元数据，完成后自动显示书籍。”或等待说明，以“查看同步状态”代替“同步元数据”。`LibraryScreenTest.noLibraryAndNoMetadataOfferTheirEntries` 扩展了该状态。
+- `testDebugUnitTest` 通过；PA6 上 `LibraryScreenTest` 与 `LibrariesPageTest` 共 **33 tests、0 failures**；`assembleDebugAndroidTest lintDebug`（0 errors、5 个既有 warnings）与 `git diff --check` 通过，新 APK 已安装。真实添加后的显示待用户复测。
+
+#### 任务队列分标签、筛选与扁平任务行（2026-10-09，Q62）
+
+用户要求：任务队列用标签分开进行中和已完成任务；任务行变扁，精简标题下方小字显示元数据，用户请求用置顶箭头，进度用百分比，去掉不必要的说明，控制改为右侧的暂停／继续、取消、重试图标，完成显示勾；允许筛选用户请求和自动任务。先按用户直接指示更新 spec R18 并记录 Q62，再实现。
+
+- `TaskList` 增加“进行中／已完成”标签（已完成含失败和取消）和“全部／用户请求／自动任务”筛选，切换时回到第一页；排队序号仍按整个队列计算。任务行由 136dp 改为 64dp：任务类型标题（缩短为“下载书籍”“检查更新”“加载封面”等；书库同步与目录加载的名称见下一节），下方一行小字为状态（“排队 #N”、等待原因、阶段 · 百分比、已暂停 · 阶段、失败：阶段（原因）等），去掉提升说明、重试起点和暂停续传说明；用户请求前显示新增的置顶箭头图标 `ic_pin_top`；右侧为 `IconAction` 的暂停（新增 `ic_pause`）、继续（新增 `ic_play`）、重试（`ic_refresh`）、取消（`ic_close`），成功完成显示勾。
+- `TaskScreenTest` 改写为 7 项：空队列、20 项分 4 页且删减后收回、等待原因不占序号、执行中阶段与百分比及只出现可用图标（点击暂停、取消）、已完成标签中的失败重试与完成勾、来源筛选。
+- `assembleDebug assembleDebugAndroidTest lintDebug` 通过（0 errors、5 个既有 warnings）；PA6 上 `TaskScreenTest` 与 `TaskViewModelTest` 共 **9 tests、0 failures**；`git diff --check` 通过，新 APK 已安装。真实任务的显示和墨水屏观感待用户确认。
+
+#### 已授权书库的真机核对（2026-10-09，PA6）
+
+用户确认书库页、向导、目录栏、同步提示与任务队列界面，并在向导中添加了本地测试书库副本 `/sdcard/Download/calibre-step04-test-library`（286 本扩展库，此时 288 本）和登录后选择的个人 OneDrive 书库 `library-a`（3 本），两者均已同步。agent 用 helper 按资源 ID 操作（`flow --elements-only` 与单步 `tap`／`long-press`），只读 UI 树由 `uiautomator dump` 取得，产物在被忽略的 `app/build/verification/phase3-step07-libs/`。
+
+- 书库页：两行分别显示“OneDrive · 已登录”和“本地目录 · 已授权”，当前书库有勾。切换后图书馆页显示对应书库（本地 24 页；OneDrive 1 页 3 本），本地已下载的书在 OneDrive 书库不带下载标记，已读栏目各书库独立。
+- 格式优先级：书 7 有 EPUB（1759 B）和 PDF（589 B）。列表视图搜索 “Tales of Harbor 2” 显示 1.8 kB；在设置中将 PDF 上移两次后回到搜索结果显示 589 B；强停并重新启动后顺序仍为 PDF、EPUB、MOBI。随后已恢复为 EPUB、MOBI、PDF。
+- 已读栏目：页面只列出两个布尔栏目（`#read_status`、`#retired`），没有文本、枚举、整数和组合栏目；选择 `#read_status` 后为 checked，图书馆首页的“已读”角标（书 4、281、284、287）与源库值一致。
+- 已下载文件：选择模式批量下载“李尔王”后，已下载文件页显示“EPUB、246 kB、源状态：上次确认可用”；“打开”弹出系统选择框并列出汉王阅读器与 KOReader（实际阅读器打开在步骤 04 已验，此处按返回关闭）；“移除此格式”的确认页说明范围，确认后显示“副本移除完成”与空列表。
+- 立即同步与清理：更多页显示上次成功同步时间，“立即同步”后更新；对 OneDrive 书库“清除元数据缓存”（范围 1 个书库、0 个副本、635 kB）后图书馆页显示无元数据及“同步元数据”／“已下载文件”入口，更多页说明“尚无完整元数据，请同步；已下载的文件仍可打开。”，再次同步后恢复。切到本地书库执行“清除所有其它书库缓存”（范围 1 个书库、1.3 MB）后本地仍为 24 页，OneDrive 书库回到无元数据状态。
+- 删除书库：删除当前的 OneDrive 书库，确认页列出将删除的数据并提示删除后没有当前书库；确认后列表只剩本地书库，图书馆页显示“尚未配置书库”；切回本地书库后 24 页与已读角标仍在。
+- 源书库 620 个文件在下载、移除、清理、删除前后的 `md5sum` 一致。
+- helper 的查询偶有单次 30 秒超时（自动重试恢复，或未发出点击）；均为查询耗时，不是应用失败。
+
+核对中发现并修复两个问题，均先加复现测试：
+
+- 书库同步在任务队列中显示为“书库验证”：书库同步和 OneDrive 目录加载都是 `CandidateConfiguration` 请求，标题只看请求类型。`taskTypeResource` 改为按操作区分，`library_sync` 显示“元数据同步”，`onedrive_browse` 显示“加载目录”，其它（旧版本遗留）显示“书库配置”。`TaskScreenTest.librarySyncIsNamedAsMetadataSyncAndDirectoryLoadsByTheirOperation` 修复前失败、修复后通过；真机已完成列表随即显示正确名称。
+- 当前书库行是禁用的可点击容器，内部的删除按钮可用：无障碍树中删除按钮位于禁用祖先之下，helper 按护栏拒绝点击，等待“当前书库”标记也会超时。当前行改为不设点击动作。`LibrariesPageTest` 增加断言（当前行无点击动作且未禁用、删除可用），修复前失败、修复后通过；真机上随后删除和等待当前标记均一次成功。
+- 修复后 `assembleDebug assembleDebugAndroidTest lintDebug` 通过（0 errors、5 个既有 warnings）；PA6 上 `TaskScreenTest` **8 tests**、`LibrariesPageTest` **3 tests**，均 0 failures。
+
+观察到两处并请用户决定：“已完成”标签按入队顺序列出，最早的在前；书库删除确认页标题为“删除书库”，确认按钮为“移除”。
+
+#### 已完成任务倒序与“移除书库”用词（2026-10-09，Q63）
+
+用户决定“已完成”改为最新的在最前，书库删除统一称“移除”。先更新 spec R18／R30 并记录 Q63。
+
+- 队列不记录完成时间，`TaskList` 在“已完成”标签按调度序号倒序（被提升的任务用提升时的序号）。`TaskScreenTest.finishedTasksLiveInTheirOwnTabWithACheckOrARetry` 增加顺序断言，修改前失败、修改后通过。真机已完成列表首页依次为最近两次元数据同步、此前的下载和封面任务。
+- 行内图标描述、确认页标题与当前书库提示改为“移除”。真机复看确认页时发现范围句把整个书库可释放的空间写成副本大小（“将删除 0 个应用内副本，共 1.8 MB”）；确认页改用自己的句子“可释放 1.8 MB 应用空间：0 个书籍副本，以及索引……”，不再借用移除下载的副本句。`LibrariesPageTest` 增加该句断言，修改前失败、修改后通过；真机确认页显示新句子后取消，本地书库保留。
+- `testDebugUnitTest`（JVM **154 tests、0 failures**）、`assembleDebug assembleDebugAndroidTest lintDebug assembleRelease lintRelease` 通过（debug／release lint 均 0 errors）；PA6 上 `TaskScreenTest` 8、`LibrariesPageTest` 3、`TaskViewModelTest` 2，均 0 failures；`git diff --check` 通过。
+
+### 未完成
+
+- OneDrive 书库已在核对中删除；如需继续使用，可在向导中重新添加。
+- 用户确认更多页、关于页与墨水屏体验的整体结论后提交，并卸载 debug 包。

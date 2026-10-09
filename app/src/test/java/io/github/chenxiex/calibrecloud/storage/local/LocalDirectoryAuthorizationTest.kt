@@ -9,16 +9,14 @@ import org.junit.Test
 import java.util.concurrent.Executors
 
 class LocalDirectoryAuthorizationTest {
-    private val oldUri = "content://local/tree/old"
-    private val newUri = "content://local/tree/new"
+    private val uri = "content://local/tree/library"
 
-    /** This fake has no source file access: only configuration and OS grant metadata. */
-    private class Access : DirectoryPermissionAccess, LocalDirectoryConfiguration {
-        var selected: String? = null
-        var commitSucceeds = true
+    /** This fake has no source file access: only OS grant metadata and the tree root's name. */
+    private class Access : DirectoryPermissionAccess {
         var persistFails = false
         var grantLookupFails = false
         var releaseFails = false
+        var nameFails = false
         var checkThread: (() -> Unit)? = null
         val grants = mutableMapOf<String, DirectoryGrant>()
         val unsupported = mutableSetOf<String>()
@@ -52,169 +50,100 @@ class LocalDirectoryAuthorizationTest {
             grants.remove(treeUri)
         }
 
-        override fun load(): String? {
+        override fun displayName(treeUri: String): String? {
             checkThread?.invoke()
-            return selected
-        }
-
-        override fun save(treeUri: String): Boolean {
-            checkThread?.invoke()
-            events += "save:$treeUri"
-            if (commitSucceeds) selected = treeUri
-            return commitSucceeds
-        }
-    }
-
-    private fun authorizedOldSelection() = Access().apply {
-        selected = oldUri
-        grants[oldUri] = DirectoryGrant(true, true)
-    }
-
-    @Test
-    fun cancellationPreservesOldSelectionAndNeverMutatesGrants() = runTest {
-        val access = authorizedOldSelection()
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        val restored = authorization.restore()
-        assertEquals(restored, authorization.select(null, 0))
-        assertEquals(oldUri, access.selected)
-        assertTrue(access.events.isEmpty())
-    }
-
-    @Test
-    fun actualPickerFlagsArePassedAndSuccessfulCommitPrecedesOldGrantRelease() = runTest {
-        val access = authorizedOldSelection().apply { grants[newUri] = DirectoryGrant(true, true) }
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        val state = authorization.select(newUri, 0x41)
-        assertEquals(listOf(newUri to 0x41), access.persisted)
-        assertEquals(listOf("persist:$newUri", "save:$newUri", "release:$oldUri"), access.events)
-        assertEquals(newUri, access.selected)
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, state.status)
-        assertEquals(LibraryLocation.Local("local", "new"), state.location)
-    }
-
-    @Test
-    fun readableGrantWithoutWritePermissionIsSavedAsReadOnly() = runTest {
-        val access = Access().apply { grants[newUri] = DirectoryGrant(true, false) }
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        assertEquals(DirectoryAuthorizationStatus.READ_ONLY, authorization.select(newUri, 1).status)
-        assertEquals(newUri, access.selected)
-        assertEquals(DirectoryAuthorizationStatus.READ_ONLY, authorization.restore().status)
-    }
-
-    @Test
-    fun missingAndUnreadablePersistedGrantsRejectReplacementAndRetainOldGrant() = runTest {
-        listOf(null, DirectoryGrant(false, true)).forEach { newGrant ->
-            val access = authorizedOldSelection().apply { if (newGrant != null) grants[newUri] = newGrant }
-            val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-            val state = authorization.select(newUri, 3)
-            assertEquals(DirectorySelectionIssue.PERSISTENCE_FAILED, state.selectionIssue)
-            assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, state.status)
-            assertEquals(LibraryLocation.Local("local", "old"), state.location)
-            assertEquals(oldUri, access.selected)
-            assertEquals(listOf(newUri), access.released)
-            assertEquals(DirectoryGrant(true, true), access.grants[oldUri])
-            assertFalse(access.events.any { it.startsWith("save:") })
+            if (nameFails) throw IllegalStateException("Provider unavailable")
+            return "Calibre 书库"
         }
     }
 
     @Test
-    fun persistenceExceptionRejectsReplacementWithoutLosingOldSelection() = runTest {
-        val access = authorizedOldSelection().apply { persistFails = true }
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        assertEquals(DirectorySelectionIssue.PERSISTENCE_FAILED, authorization.select(newUri, 3).selectionIssue)
-        assertEquals(oldUri, access.selected)
-        assertEquals(listOf(newUri), access.released)
-        assertEquals(DirectoryGrant(true, true), access.grants[oldUri])
-    }
-
-    @Test
-    fun configurationFailureReleasesOnlyNewGrantAndRestoresOldSelection() = runTest {
-        val access = authorizedOldSelection().apply {
-            grants[newUri] = DirectoryGrant(true, true)
-            commitSucceeds = false
-        }
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        val state = authorization.select(newUri, 3)
-        assertEquals(DirectorySelectionIssue.CONFIGURATION_FAILED, state.selectionIssue)
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, state.status)
-        assertEquals(oldUri, access.selected)
-        assertEquals(listOf(newUri), access.released)
-        assertEquals(DirectoryGrant(true, true), access.grants[oldUri])
-        assertNull(access.grants[newUri])
-    }
-
-    @Test
-    fun retryingCurrentSelectionNeverReleasesItsGrantOnFailureOrSuccess() = runTest {
-        val access = authorizedOldSelection().apply { commitSucceeds = false }
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        assertEquals(DirectorySelectionIssue.CONFIGURATION_FAILED, authorization.select(oldUri, 3).selectionIssue)
-        access.commitSucceeds = true
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.select(oldUri, 3).status)
-        access.persistFails = true
-        assertEquals(DirectorySelectionIssue.PERSISTENCE_FAILED, authorization.select(oldUri, 3).selectionIssue)
-        assertTrue(access.released.isEmpty())
-        assertEquals(DirectoryGrant(true, true), access.grants[oldUri])
-    }
-
-    @Test
-    fun unsupportedReplacementDoesNotRequestPermissionOrReplaceSelection() = runTest {
-        val access = authorizedOldSelection().apply { unsupported += newUri }
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        val state = authorization.select(newUri, 3)
-        assertEquals(DirectorySelectionIssue.UNSUPPORTED_PROVIDER, state.selectionIssue)
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, state.status)
-        assertEquals(oldUri, access.selected)
-        assertTrue(access.events.isEmpty())
-    }
-
-    @Test
-    fun restoreRechecksRevokedGrantRatherThanTrustingSavedSelection() = runTest {
-        val access = authorizedOldSelection()
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.restore().status)
-        access.grants.clear()
-        assertEquals(DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED, authorization.restore().status)
-        access.grantLookupFails = true
-        assertEquals(DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED, authorization.restore().status)
-        assertEquals(oldUri, access.selected)
-        assertTrue(access.events.isEmpty())
-    }
-
-    @Test
-    fun restoreDistinguishesNoSelectionAndUnsupportedSavedProvider() = runTest {
+    fun cancellationTouchesNoGrant() = runTest {
         val access = Access()
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        assertEquals(DirectoryAuthorizationState(DirectoryAuthorizationStatus.UNSELECTED), authorization.restore())
-        access.selected = oldUri
-        access.unsupported += oldUri
-        assertEquals(DirectoryAuthorizationState(DirectoryAuthorizationStatus.UNSUPPORTED_PROVIDER), authorization.restore())
-        assertEquals(oldUri, access.selected)
+        val authorization = LocalDirectoryAuthorization(access, StandardTestDispatcher(testScheduler))
+        assertEquals(DirectoryGrantResult.Cancelled, authorization.grant(null, 0))
         assertTrue(access.events.isEmpty())
     }
 
     @Test
-    fun revokedOldGrantDuringReleaseDoesNotUndoNewCommittedSelection() = runTest {
-        val access = authorizedOldSelection().apply {
-            grants[newUri] = DirectoryGrant(true, true)
-            releaseFails = true
-        }
-        val authorization = LocalDirectoryAuthorization(access, access, StandardTestDispatcher(testScheduler))
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.select(newUri, 3).status)
-        assertEquals(newUri, access.selected)
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.restore().status)
+    fun actualPickerFlagsArePersistedAndTheGrantIsReturnedWithItsName() = runTest {
+        val access = Access().apply { grants[uri] = DirectoryGrant(true, true) }
+        val authorization = LocalDirectoryAuthorization(access, StandardTestDispatcher(testScheduler))
+        val result = authorization.grant(uri, 0x41) as DirectoryGrantResult.Granted
+        assertEquals(listOf(uri to 0x41), access.persisted)
+        assertEquals(LibraryLocation.Local("local", "library"), result.location)
+        assertEquals(uri, result.treeUri)
+        assertEquals("Calibre 书库", result.displayName)
+        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, result.status)
+        assertTrue(access.released.isEmpty())
     }
 
     @Test
-    fun configurationAndPermissionAccessRunOnInjectedIoDispatcher() = runTest {
-        val access = authorizedOldSelection().apply {
-            grants[newUri] = DirectoryGrant(true, true)
+    fun aGrantWithoutWriteIsReadOnlyAndAMissingNameIsNoFailure() = runTest {
+        val access = Access().apply {
+            grants[uri] = DirectoryGrant(true, false)
+            nameFails = true
+        }
+        val authorization = LocalDirectoryAuthorization(access, StandardTestDispatcher(testScheduler))
+        val result = authorization.grant(uri, 1) as DirectoryGrantResult.Granted
+        assertEquals(DirectoryAuthorizationStatus.READ_ONLY, result.status)
+        assertNull(result.displayName)
+        assertEquals(DirectoryAuthorizationStatus.READ_ONLY, authorization.status(uri))
+    }
+
+    @Test
+    fun anUnreadableOrFailedGrantIsRejectedAndReleasedUnlessALibraryKeepsIt() = runTest {
+        listOf(false, true).forEach { kept ->
+            listOf<Access.() -> Unit>({ }, { grants[uri] = DirectoryGrant(false, true) }, { persistFails = true }).forEach { setUp ->
+                val access = Access().apply(setUp)
+                val authorization = LocalDirectoryAuthorization(access, StandardTestDispatcher(testScheduler))
+                val result = authorization.grant(uri, 3) { it == uri && kept }
+                assertEquals(DirectoryGrantResult.Rejected(DirectorySelectionIssue.PERSISTENCE_FAILED), result)
+                assertEquals(if (kept) emptyList() else listOf(uri), access.released)
+            }
+        }
+    }
+
+    @Test
+    fun anUnsupportedProviderIsRejectedWithoutAskingForAGrant() = runTest {
+        val access = Access().apply { unsupported += uri }
+        val authorization = LocalDirectoryAuthorization(access, StandardTestDispatcher(testScheduler))
+        assertEquals(DirectoryGrantResult.Rejected(DirectorySelectionIssue.UNSUPPORTED_PROVIDER), authorization.grant(uri, 3))
+        assertEquals(DirectoryAuthorizationStatus.UNSUPPORTED_PROVIDER, authorization.status(uri))
+        assertTrue(access.events.isEmpty())
+    }
+
+    @Test
+    fun statusRechecksTheOsGrantEveryTime() = runTest {
+        val access = Access().apply { grants[uri] = DirectoryGrant(true, true) }
+        val authorization = LocalDirectoryAuthorization(access, StandardTestDispatcher(testScheduler))
+        assertEquals(DirectoryAuthorizationStatus.UNSELECTED, authorization.status(null))
+        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.status(uri))
+        access.grants.clear()
+        assertEquals(DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED, authorization.status(uri))
+        access.grantLookupFails = true
+        assertEquals(DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED, authorization.status(uri))
+        assertTrue(access.events.isEmpty())
+    }
+
+    @Test
+    fun releasingAnAlreadyRevokedGrantIsNoFailure() = runTest {
+        val access = Access().apply { releaseFails = true }
+        LocalDirectoryAuthorization(access, StandardTestDispatcher(testScheduler)).release(uri)
+        assertEquals(listOf(uri), access.released)
+    }
+
+    @Test
+    fun permissionAccessRunsOnInjectedIoDispatcher() = runTest {
+        val access = Access().apply {
+            grants[uri] = DirectoryGrant(true, true)
             checkThread = { assertEquals("directory-io", Thread.currentThread().name) }
         }
         Executors.newSingleThreadExecutor { task -> Thread(task, "directory-io") }.asCoroutineDispatcher().use { dispatcher ->
-            val authorization = LocalDirectoryAuthorization(access, access, dispatcher)
-            authorization.restore()
-            authorization.select(newUri, 3)
-            authorization.select(null, 0)
+            val authorization = LocalDirectoryAuthorization(access, dispatcher)
+            authorization.grant(uri, 3)
+            authorization.status(uri)
+            authorization.release(uri)
         }
     }
 }

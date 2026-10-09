@@ -26,15 +26,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-/** State transitions are immediate; progress-only changes share a two-second display gate. */
+/**
+ * State transitions are immediate; progress-only changes share a two-second display gate. Showing the
+ * page first runs [restorePending], which returns records left Running by an ended process to the queue
+ * when no executor holds the lock; it never reads a source or starts a transfer.
+ */
 class TaskViewModel(
     private val queue: DurableTaskQueue,
     private val startupEnabled: suspend () -> Boolean,
     private val setStartupEnabled: suspend (Boolean) -> Unit,
     private val wake: suspend () -> Unit,
-    private val manualSync: suspend () -> Boolean,
     application: Application,
     private val platformWaiting: () -> Boolean,
+    private val restorePending: suspend () -> Unit = {},
 ) : AndroidViewModel(application) {
     var records by mutableStateOf<List<TaskRecord>>(emptyList())
         private set
@@ -45,8 +49,6 @@ class TaskViewModel(
     var failed by mutableStateOf(false)
         private set
     var operationFailed by mutableStateOf(false)
-        private set
-    var syncUnavailable by mutableStateOf(false)
         private set
     var notificationsEnabled by mutableStateOf(true)
         private set
@@ -66,6 +68,13 @@ class TaskViewModel(
         observing?.cancel()
         if (!visible) return
         polling = viewModelScope.launch {
+            try {
+                restorePending()
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                failed = true
+            }
             while (true) {
                 refresh()
                 delay(2_000)
@@ -138,6 +147,18 @@ class TaskViewModel(
         }
     }
 
+    /** Reads the startup setting for the settings group without polling the queue. */
+    fun loadSettings() {
+        viewModelScope.launch {
+            try {
+                automaticSync = startupEnabled()
+                settingsLoaded = true
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) { failed = true }
+        }
+    }
+
     fun toggleStartup() {
         viewModelScope.launch {
             try {
@@ -150,25 +171,14 @@ class TaskViewModel(
         }
     }
 
-    fun synchronize() {
-        viewModelScope.launch {
-            try {
-                syncUnavailable = !manualSync()
-                refresh()
-            } catch (failure: CancellationException) {
-                throw failure
-            } catch (_: Exception) { failed = true }
-        }
-    }
-
     companion object {
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
                 val background = dependencies.backgroundTasks
                 return modelClass.cast(TaskViewModel(dependencies.taskQueue, background::startupEnabled,
-                    background::setStartupEnabled, background::wake, background::manualSync, context.applicationContext as Application,
-                    background::platformWaiting))!!
+                    background::setStartupEnabled, background::wake, context.applicationContext as Application,
+                    background::platformWaiting, dependencies.taskCoordinator::restorePending))!!
             }
         }
     }

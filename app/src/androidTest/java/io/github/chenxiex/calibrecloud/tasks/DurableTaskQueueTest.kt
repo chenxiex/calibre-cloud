@@ -559,47 +559,48 @@ class DurableTaskQueueTest {
     }
 
     @Test
-    fun firstCandidateDiscoveryPersistsWithoutRootAndRejectsOldAuthorizationContext() = runBlocking<Unit> {
+    fun additionListingRunsWithoutCurrentLibraryAndARestartedAdditionDeactivatesIt() = runBlocking<Unit> {
         database.close()
         assertTrue(context.deleteDatabase(name))
         reopen()
         assertNull(state.current())
-        val candidate = state.beginCandidate(BackendKind.ONEDRIVE, UUID.randomUUID())
-        assertNull(state.current()!!.location)
-        assertNull(state.current()!!.identity)
-        val task = created(TaskSubmission(TaskRequest.CandidateConfiguration(candidate, "discover"), TaskOrigin.MANUAL_SYNC))
+        val addition = state.beginAddition(BackendKind.ONEDRIVE, UUID.randomUUID()).first
+        val listing = requireNotNull(addition.context)
+        val task = created(TaskSubmission(TaskRequest.CandidateConfiguration(listing, "onedrive_browse"), TaskOrigin.MANUAL_SYNC))
+        database.readableDatabase.rawQuery("SELECT scope_library_id FROM queued_tasks WHERE task_id = ?",
+            arrayOf(task.value.toString())).use { assertTrue(it.moveToFirst()); assertTrue(it.isNull(0)) }
         assertEquals(task, queue.claim(0, { emptySet() }, { true })!!.record.id)
         queue.update(task) { entry -> entry.copy(record = entry.record.copy(state = TaskState.Queued)) }
         database.close()
         reopen()
-        assertNull(state.current()!!.location)
-        val discovered = LibraryLocation.OneDrive("fixture-account", "fixture-drive", "fixture-root")
-        assertTrue(state.resolveCandidate(candidate, discovered))
-        assertEquals(discovered, state.current()!!.location)
-        assertNull(state.current()!!.identity)
-        val newAccount = state.beginCandidate(BackendKind.ONEDRIVE, UUID.randomUUID())
-        assertNotEquals(candidate.selectionToken, newAccount.selectionToken)
-        assertFalse(state.resolveCandidate(candidate, discovered))
-        assertNull(state.current()!!.location)
+        assertEquals(addition, state.addition())
+        // Only a listing belongs to an addition; a sync needs a current library.
+        assertTrue(queue.submit(TaskSubmission(TaskRequest.CandidateConfiguration(listing,
+            TaskRequest.CandidateConfiguration.LIBRARY_SYNC), TaskOrigin.MANUAL_SYNC)) is SubmissionResult.Rejected)
+        val root = LibraryLocation.OneDrive("fixture-account", "fixture-drive", "fixture-root")
+        val restarted = state.beginAddition(BackendKind.ONEDRIVE, UUID.randomUUID()).first
+        assertNotEquals(addition.token, restarted.token)
+        assertTrue(state.chooseAddition(addition.token, root, null, null).isFailure)
+        assertNull(state.addition()!!.location)
+        assertNull(state.current())
         assertNull(queue.claim(0, { emptySet() }, { true }))
         assertTrue(WaitingReason.INACTIVE_LIBRARY in (queue.get(task)!!.record.state as TaskState.Waiting).reasons)
-        assertTrue(queue.submit(TaskSubmission(TaskRequest.CandidateConfiguration(candidate, "validate"), TaskOrigin.MANUAL_SYNC)) is SubmissionResult.Rejected)
+        assertTrue(queue.submit(TaskSubmission(TaskRequest.CandidateConfiguration(listing, "onedrive_browse", "other"),
+            TaskOrigin.MANUAL_SYNC)) is SubmissionResult.Rejected)
     }
 
     @Test
-    fun cancellingCandidateRevokesLateResolutionAndFurtherSubmissions() = runBlocking<Unit> {
-        val candidate = state.beginCandidate(BackendKind.ONEDRIVE, UUID.randomUUID())
-        val submission = TaskSubmission(TaskRequest.CandidateConfiguration(candidate, "discover"), TaskOrigin.MANUAL_SYNC)
+    fun cancellingAListingKeepsTheAdditionAndTheCurrentLibrary() = runBlocking<Unit> {
+        val selected = state.current()
+        val addition = state.beginAddition(BackendKind.ONEDRIVE, UUID.randomUUID()).first
+        val submission = TaskSubmission(TaskRequest.CandidateConfiguration(requireNotNull(addition.context), "onedrive_browse"),
+            TaskOrigin.MANUAL_SYNC)
         val task = created(submission)
         assertTrue(queue.control(task, TaskControl.CANCEL))
-        assertFalse(state.resolveCandidate(candidate, LibraryLocation.OneDrive("fixture-account", "fixture-drive", "fixture-root")))
-        assertTrue(queue.submit(submission) is SubmissionResult.Rejected)
-        assertNull(state.current()!!.identity)
+        assertEquals(addition, state.addition())
+        assertEquals(selected, state.current())
         assertNull(queue.get(task)!!.record.libraryId)
-        database.close()
-        reopen()
-        assertFalse(state.resolveCandidate(candidate, LibraryLocation.OneDrive("fixture-account", "fixture-drive", "fixture-root")))
-        assertTrue(queue.submit(submission) is SubmissionResult.Rejected)
+        assertTrue(queue.submit(submission) is SubmissionResult.Created)
     }
 
     private class FixtureHandler(val body: suspend (QueueEntry, TaskExecution) -> StageOutcome) : TaskHandler {

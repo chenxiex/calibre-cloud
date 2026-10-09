@@ -109,7 +109,8 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 state = TaskState.Queued, controls = queuedControls)
             save(this, QueueEntry(record, initialStage(request)))
             if (request is TaskRequest.CandidateConfiguration) execSQL("""UPDATE queued_tasks SET scope_library_id =
-                (SELECT library_id FROM current_selection WHERE singleton = 1) WHERE task_id = ?""", arrayOf(id.value.toString()))
+                (SELECT library_id FROM current_selection WHERE singleton = 1 AND token = ?) WHERE task_id = ?""",
+                arrayOf(request.context.selectionToken.toString(), id.value.toString()))
             dependencies.forEach { edge -> execSQL("INSERT INTO task_dependencies VALUES(?, ?, ?)",
                 arrayOf(id.value.toString(), edge.taskId.value.toString(), edge.requirement.code)) }
             if (submission.origin.priority == TaskPriority.HIGH) dependencies.forEach {
@@ -279,21 +280,25 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         changed.forEach { publish(it.record) }
     }
 
+    /**
+     * A candidate request is active while its token is the current selection's or, for a directory
+     * listing of the library being added, the addition's; both under the same backend and authorization.
+     */
     private fun activeCandidate(db: SQLiteDatabase, request: TaskRequest): Boolean {
         val candidate = request as? TaskRequest.CandidateConfiguration ?: return false
-        return db.rawQuery("SELECT token, backend, authorization_id FROM current_selection WHERE singleton = 1", null).use {
+        fun matches(table: String) = db.rawQuery("SELECT token, backend, authorization_id FROM $table WHERE singleton = 1", null).use {
             it.moveToFirst() && it.getString(0) == candidate.context.selectionToken.toString() &&
                 it.getString(1) == backendCode(candidate.context.backend) &&
                 (it.isNull(2) || it.getString(2) == candidate.context.authorizationId.toString())
         }
+        return matches("current_selection") ||
+            (candidate.operation != TaskRequest.CandidateConfiguration.LIBRARY_SYNC && matches("library_addition"))
     }
 
-    private fun active(db: SQLiteDatabase, record: TaskRecord): Boolean = db.rawQuery("SELECT token, backend, library_id, authorization_id FROM current_selection WHERE singleton = 1", null).use {
-        if (!it.moveToFirst()) false else when (val request = record.submission.request) {
-            is TaskRequest.CandidateConfiguration -> it.getString(0) == request.context.selectionToken.toString() &&
-                it.getString(1) == backendCode(request.context.backend) &&
-                (it.isNull(3) || it.getString(3) == request.context.authorizationId.toString())
-            else -> it.getString(2) == record.libraryId?.value.toString()
+    private fun active(db: SQLiteDatabase, record: TaskRecord): Boolean = when (val request = record.submission.request) {
+        is TaskRequest.CandidateConfiguration -> activeCandidate(db, request)
+        else -> db.rawQuery("SELECT library_id FROM current_selection WHERE singleton = 1", null).use {
+            it.moveToFirst() && it.getString(0) == record.libraryId?.value.toString()
         }
     }
 

@@ -32,7 +32,7 @@ class LocalSourceBackendDeviceTest {
     fun realSafRangeMatchesFullSourceSuffix() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
-        val tree = withContext(Dispatchers.IO) { dependencies.localConfiguration.load() }
+        val tree = dependencies.state.current()?.location?.let { dependencies.state.accessKey(it) }
         assertNotNull("Authorize a dedicated sample copy through the system picker first", tree)
         val path = RelativeSourcePath("metadata.db")
         val backend = dependencies.localBackend
@@ -53,7 +53,7 @@ class LocalSourceBackendDeviceTest {
     fun realSafSnapshotSourceReadsCancellationAndRevocation() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
-        val tree = withContext(Dispatchers.IO) { dependencies.localConfiguration.load() }
+        val tree = dependencies.state.current()?.location?.let { dependencies.state.accessKey(it) }
         assertNotNull("Authorize only the dedicated sample copy through the system picker first", tree)
         tree!!
         val backend = dependencies.localBackend
@@ -93,6 +93,6 @@ class LocalSourceBackendDeviceTest {
         assertEquals(StorageErrorKind.AUTHORIZATION_EXPIRED,
             (backend.acquireSnapshot(tree, UUID.randomUUID()) as LocalSourceResult.Failed).error.kind)
         assertTrue(snapshot.value.file.isFile)
-        assertEquals(DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED, dependencies.localAuthorization.restore().status)
+        assertEquals(DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED, dependencies.localAuthorization.status(tree))
     }
 }

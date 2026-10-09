@@ -104,8 +104,7 @@ internal fun openMoreTarget(status: OpenStatus): Int? {
         WaitingReason.DIRECTORY_AUTHORIZATION in reasons -> MoreTarget.LOCAL_AUTHORIZATION
         (failure as? TaskError.Source)?.error?.kind == StorageErrorKind.LOGIN_REQUIRED -> MoreTarget.ONEDRIVE_LOGIN
         (failure as? TaskError.Source)?.error?.kind == StorageErrorKind.AUTHORIZATION_EXPIRED -> directory
-        status is OpenStatus.Failed && status.problem == OpenProblem.NO_METADATA ->
-            if (status.backend == BackendKind.LOCAL) MoreTarget.LOCAL_AUTHORIZATION else MoreTarget.ONEDRIVE_TASKS
+        status is OpenStatus.Failed && status.problem == OpenProblem.NO_METADATA -> MoreTarget.SYNC
         else -> null
     }
 }

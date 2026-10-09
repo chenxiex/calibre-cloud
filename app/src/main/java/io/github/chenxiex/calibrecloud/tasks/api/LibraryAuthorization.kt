@@ -1,7 +1,11 @@
 package io.github.chenxiex.calibrecloud.tasks.api
 
 import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.state.LibrarySelection
+
+/** Whether a listed library can be used now (R30): fully, without source writes, or after re-authorizing. */
+enum class LibraryAccess { READY, READ_ONLY, REAUTHORIZE }
 
 /**
  * A backend's authorization as library syncs see it. Every backend implements the whole contract and
@@ -14,6 +18,9 @@ interface LibraryAuthorization {
 
     /** Whether work that waits for this backend's re-authorization can continue now. */
     suspend fun ready(): Boolean
+
+    /** Whether [location], listed with [accessKey], can be used now; decided locally, with no source request. */
+    suspend fun access(location: LibraryLocation, accessKey: String?): LibraryAccess
 
     /**
      * The context a new sync of the current [selection] runs under. When the authorization changed since

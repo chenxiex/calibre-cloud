@@ -1,0 +1,107 @@
+<resources>
+    <string name="more_back">返回</string>
+    <string name="more_search">搜索菜单</string>
+    <string name="more_search_input">搜索菜单名称</string>
+    <string name="more_search_clear">清空输入</string>
+    <string name="more_search_empty">没有名称匹配的菜单。</string>
+    <string name="more_group_metadata">元数据</string>
+    <string name="more_group_storage">存储与缓存</string>
+    <string name="more_group_tasks">任务</string>
+    <string name="more_group_settings">设置</string>
+    <string name="more_group_about">关于</string>
+    <string name="more_unconfigured">尚未选择书库，请先在“书库”中添加或选择。</string>
+    <string name="more_no_metadata">尚无完整元数据，请同步；已下载的文件仍可打开。</string>
+    <string name="more_configure">添加或选择书库</string>
+    <string name="more_clear_metadata">清除元数据缓存</string>
+    <string name="more_downloads">已下载文件</string>
+    <string name="more_clear_others">清除所有其它书库缓存</string>
+    <string name="more_tasks">任务队列</string>
+    <string name="more_background">后台与通知</string>
+    <string name="more_libraries">书库</string>
+    <string name="more_location_local">本地目录</string>
+    <string name="more_location_onedrive">OneDrive</string>
+    <string name="more_startup_sync">启动应用时自动同步</string>
+    <string name="more_formats">格式优先级</string>
+    <string name="more_read_column">已读栏目</string>
+    <string name="more_about">关于本应用</string>
+    <string name="more_sync_rejected">无法同步当前书库，请检查书库位置、登录或目录授权。</string>
+    <string name="more_sync_queued">同步已排队。</string>
+    <string name="more_sync_running">正在同步元数据。</string>
+    <string name="more_sync_waiting">同步正在等待：%1$s</string>
+    <string name="more_sync_paused">同步已暂停，可在任务队列中继续。</string>
+    <string name="more_sync_cancelled">上次同步已取消。</string>
+    <string name="more_sync_failed">上次同步失败：%1$s。原有效元数据保留。</string>
+    <!-- Joins short items of a list, such as waiting reasons or a format and its size. -->
+    <string name="list_separator">、</string>
+
+    <string name="libraries_empty">尚未添加书库。</string>
+    <string name="libraries_add">添加书库</string>
+    <string name="libraries_unnamed">（未知目录名）</string>
+    <string name="libraries_current">当前书库</string>
+    <string name="libraries_status">%1$s · %2$s</string>
+    <string name="libraries_ready_local">已授权</string>
+    <string name="libraries_read_only">只读授权，不能写回已读状态</string>
+    <string name="libraries_reauthorize_local">目录授权已失效</string>
+    <string name="libraries_ready_onedrive">已登录</string>
+    <string name="libraries_reauthorize_onedrive">需要登录此书库的账号</string>
+    <string name="libraries_reauthorize">重新授权</string>
+    <string name="libraries_delete">移除书库 %1$s</string>
+    <string name="libraries_issue_wrong_directory">所选目录不是此书库的目录，授权未更改。</string>
+    <string name="libraries_issue_failed">操作未完成，书库列表可能已变化，请查看后重试。</string>
+    <string name="libraries_delete_title">移除书库“%1$s”？</string>
+    <string name="libraries_delete_scope">将清除此书库在本应用中的全部数据，可释放 %2$s 应用空间：%1$d 个书籍副本，以及索引、封面、未完成任务、搜索历史、上次打开记录和已读栏目设置。源书库中的文件不受影响。</string>
+    <string name="libraries_delete_current">这是当前书库；移除后没有当前书库，需要另选或添加。</string>
+
+    <string name="wizard_step">%2$s（%1$d/3）</string>
+    <string name="wizard_step_type">选择位置类型</string>
+    <string name="wizard_step_directory">授权并选择书库目录</string>
+    <string name="wizard_step_confirm">确认</string>
+    <string name="wizard_type_prompt">Calibre 书库在哪里？</string>
+    <string name="wizard_type_local_description">设备存储或 SD 卡中的书库目录</string>
+    <string name="wizard_type_onedrive_description">个人 OneDrive 中的书库目录</string>
+    <string name="wizard_type_onedrive_unavailable">OneDrive 未配置，不能选择；配置方法见 README 的“OneDrive 应用注册”。</string>
+    <string name="wizard_local_prompt">在系统目录选择器中选择 Calibre 书库目录，即包含 metadata.db 的目录。仅支持设备存储或 SD 卡。</string>
+    <string name="wizard_local_choose">选择目录</string>
+    <string name="wizard_onedrive_login_prompt">登录个人 OneDrive 账号以浏览目录。</string>
+    <string name="wizard_onedrive_login">登录</string>
+    <string name="wizard_onedrive_signed_in">已登录 OneDrive。</string>
+    <string name="wizard_onedrive_use_current">使用当前账号</string>
+    <string name="wizard_onedrive_other_account">登录其他账号</string>
+    <string name="wizard_onedrive_other_note">登录其他账号后，属于原账号的书库需要重新登录才能使用。</string>
+    <string name="wizard_confirm_prompt">将添加以下书库，并设为当前书库、开始同步元数据：</string>
+    <string name="wizard_confirm_type">位置：%1$s</string>
+    <string name="wizard_confirm_directory">目录：%1$s</string>
+    <string name="wizard_confirm_existing">此书库已在列表中，完成后将切换到它并沿用已有数据。</string>
+    <string name="wizard_previous">上一步</string>
+    <string name="wizard_cancel">取消</string>
+    <string name="wizard_complete">完成</string>
+    <string name="onedrive_root_name">OneDrive 根目录</string>
+    <string name="onedrive_task_paused">目录加载已暂停。</string>
+    <string name="onedrive_task_missing">目录已不存在，请返回上层或重新浏览。</string>
+
+    <string name="download_no_library">尚未选择或验证书库，没有已下载文件。</string>
+    <string name="download_remove_all_scope">移除此书全部格式的副本</string>
+    <string name="cleanup_review">重新查看清理范围</string>
+
+    <string name="format_explanation">打开和下载时，先按此顺序选已下载的格式，没有再按此顺序选源格式。</string>
+    <string name="format_failed">格式优先级未保存，请重试。</string>
+    <string name="format_position">%1$d. %2$s</string>
+    <string name="format_move_up">将 %1$s 上移</string>
+    <string name="format_move_down">将 %1$s 下移</string>
+    <string name="read_column_no_import">需要先完整同步元数据，才能选择已读栏目。</string>
+
+    <string name="about_version">版本 %1$s</string>
+    <string name="about_project_license">本项目许可证</string>
+    <string name="about_license_statement">本程序是自由软件：你可以依据自由软件基金会发布的 GNU 通用公共许可证（GPL）第 3 版或（按你的选择）任何更新版本的条款，重新分发和／或修改本程序。分发修改版时须按同一许可提供完整源码。本程序不提供任何担保，详见许可证全文（英文原文，以原文为准）。</string>
+    <string name="about_commercial">如需在 GPL 条款之外使用本程序，例如闭源分发，请与版权所有者协商另行授权。</string>
+    <string name="about_notices">第三方组件声明</string>
+    <string name="about_notices_summary">本应用包含的第三方库与图标保留各自的许可证和版权声明，均与 GPL-3.0 兼容；详见第三方组件声明。</string>
+    <string name="about_open_license">GPL 全文</string>
+    <string name="about_open_notices">第三方声明</string>
+    <string name="about_license_text">许可证全文</string>
+    <string name="about_license_full">%1$s 全文</string>
+    <string name="about_notice_license">许可证：%1$s</string>
+    <string name="about_notice_source">包含内容：%1$s</string>
+
+    <string name="task_queued_position">排队 #%1$d</string>
+</resources>

@@ -39,8 +39,8 @@ class OneDriveAuthorizationViewModel(
     }
 
     fun restore() { if (!busy) enqueue { authorization.restore() } }
-    fun login(launchBrowser: (Intent) -> Unit) = enqueue {
-        authorization.begin()?.let {
+    fun login(chooseAccount: Boolean = false, launchBrowser: (Intent) -> Unit) = enqueue {
+        authorization.begin(chooseAccount)?.let {
             publish()
             try { launchBrowser(it) } catch (_: android.content.ActivityNotFoundException) {
                 authorization.cancel(LoginIssue.NO_BROWSER)

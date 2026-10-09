@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks
 
+import io.github.chenxiex.calibrecloud.state.addLibrary
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -151,8 +152,8 @@ class LocalLibrarySyncTest {
         importer = MetadataRepository(database, state, File(snapshots, "imports"), Dispatchers.IO)
     }
 
-    private fun select(root: String) {
-        state.saveLocalSelection("content://test.documents/tree/$root", LibraryLocation.Local("test.documents", root))
+    private suspend fun select(root: String) {
+        state.addLibrary(LibraryLocation.Local("test.documents", root), "content://test.documents/tree/$root")
     }
 
     private suspend fun candidate(): CandidateContext {
@@ -169,7 +170,7 @@ class LocalLibrarySyncTest {
 
     private fun coordinator(): TaskCoordinator {
         val source = LocalLibrarySource(LocalSourceBackend(documents, snapshots, SnapshotValidator { it.length() > 0 }, Dispatchers.IO)) { location ->
-            if (state.current()?.location == location) state.localTreeUri() else null
+            state.accessKey(location)
         }
         return TaskCoordinator(queue, listOf(LibrarySyncTaskHandler(
             state, LibrarySources { source }, TestAuthorizations.of(state), importer, Dispatchers.IO,

@@ -320,7 +320,8 @@ class OneDriveSourceBackend(
         return OneDriveIdentity(account, driveId, root)
     }
 
-    private suspend fun signedInAccount(): String? =
+    /** The signed-in account as [LibraryLocation.OneDrive.accountId] stores it; no request. Never log it. */
+    suspend fun signedInAccount(): String? =
         accountProvider()?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) }?.let { "microsoft-consumers:$it" }
 
     /**

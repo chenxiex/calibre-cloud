@@ -23,6 +23,9 @@
     <string name="library_open_settings">打开设置</string>
     <string name="library_no_metadata">尚无完整元数据，请先同步书库。已下载的书籍副本仍然保留。</string>
     <string name="library_sync">同步元数据</string>
+    <string name="library_syncing">正在同步书库元数据，完成后自动显示书籍。</string>
+    <string name="library_sync_waiting">书库同步正在等待条件或已暂停，可查看同步状态。</string>
+    <string name="library_sync_progress">查看同步状态</string>
     <string name="library_downloaded_files">已下载文件</string>
     <string name="library_empty">书库中没有书籍。</string>
     <string name="library_empty_filtered">没有符合当前搜索或筛选的书籍。</string>

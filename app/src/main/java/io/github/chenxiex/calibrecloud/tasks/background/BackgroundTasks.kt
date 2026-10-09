@@ -33,7 +33,6 @@ class BackgroundTasks(private val context: Context, private val dependencies: Ap
         startup.onMainOpened()
         resumeAuthorizationWaits()
     }
-    suspend fun manualSync() = startup.manualSync()
 
     private val authorizationResume by lazy { AuthorizationResume(dependencies.taskQueue, dependencies.state,
         dependencies.libraryAuthorizations, requestSync = startup::request,

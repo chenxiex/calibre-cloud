@@ -5,7 +5,6 @@ import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
-import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
@@ -20,13 +19,10 @@ import io.github.chenxiex.calibrecloud.storage.api.*
 import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
-import io.github.chenxiex.calibrecloud.ui.CoverViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -254,46 +250,6 @@ class CoverTaskHandlerTest {
                 assertTrue(queue.control(task, TaskControl.CANCEL))
                 coordinator(source).drain()
             }
-        }
-    }
-
-    @Test
-    fun coverPageRequestsOnlyTheVisibleBookAndHiddenRestoreDoesNotReadSource() = runBlocking<Unit> {
-        val source = Source(image(64, 96, Color.RED))
-        val coordinator = coordinator(source)
-        val service = CoverService(state, metadata, coordinator)
-        // Explicit asynchronous fixture driver replaces the production WorkManager wake hook.
-        queue.onWake = { launch(Dispatchers.IO) { coordinator.drain() }; Unit }
-        val store = ViewModelStore()
-        val viewModel = withContext(Dispatchers.Main) {
-            CoverViewModel(state, metadata, covers, queue, coordinator, service::submit).also {
-                store.put("covers", it)
-                it.setVisible(false)
-                it.restore()
-            }
-        }
-        try {
-            delay(50)
-            assertEquals(0, source.opens.get())
-            assertTrue(queue.list().isEmpty())
-            withContext(Dispatchers.Main) { viewModel.setVisible(true) }
-            withTimeout(10_000) {
-                while (withContext(Dispatchers.Main) { viewModel.image == null }) delay(20)
-            }
-            assertEquals(1, source.opens.get())
-            assertEquals(1, queue.list().size)
-            withContext(Dispatchers.Main) { viewModel.paginate(1) }
-            withTimeout(10_000) {
-                while (withContext(Dispatchers.Main) { viewModel.image == null }) delay(20)
-            }
-            assertEquals(2, source.opens.get())
-            assertEquals(2, queue.list().size)
-            withContext(Dispatchers.Main) { viewModel.setVisible(false); viewModel.restore() }
-            delay(50)
-            assertEquals(2, source.opens.get())
-        } finally {
-            queue.onWake = {}
-            withContext(Dispatchers.Main) { store.clear() }
         }
     }
 

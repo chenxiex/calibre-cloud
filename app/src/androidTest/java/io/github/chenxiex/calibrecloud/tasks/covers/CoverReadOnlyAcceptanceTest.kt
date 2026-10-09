@@ -64,7 +64,7 @@ class CoverReadOnlyAcceptanceTest {
                 assertEquals(imported.identity, dependencies.state.current()?.identity)
                 when (location) {
                     is LibraryLocation.Local -> {
-                        val tree = requireNotNull(dependencies.state.localTreeUri())
+                        val tree = requireNotNull(dependencies.state.accessKey(location))
                         assertEquals("Only the prepared test library is eligible", "library-a",
                             AndroidLocalDocumentAccess(context).root(tree).name)
                     }

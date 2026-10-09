@@ -23,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -50,10 +51,10 @@ private const val TAB_MORE = 1
 /**
  * Top-level frame: the selected tab fills the space above a static bottom bar. Test tags are exposed
  * as resource IDs so device checks can select controls without relying on position or page number.
- * [more] draws the "更多" page for the given temporary page index. A book being opened shows its
+ * [more] draws the "更多" tab and opens the [MoreTarget] it is handed once. A book being opened shows its
  * mark: a cancellable progress mark while it downloads, a warning when it needs the user, whose
- * reason [notify] posts as a system notification. [moreRequest] (from such a notification) shows a
- * "更多" page once. [notifyBatch] posts a batch action of the library that was not fully done. [startReader] hands a ready copy to the system, and leaving the page revokes the
+ * reason [notify] posts as a system notification. [moreRequest] (from such a notification) opens a
+ * [MoreTarget] once. [notifyBatch] posts a batch action of the library that was not fully done. [startReader] hands a ready copy to the system, and leaving the page revokes the
  * wait so a finished download never opens a reader later.
  */
 @OptIn(ExperimentalComposeUiApi::class)
@@ -66,17 +67,18 @@ internal fun MainScreen(
     notifyBatch: (BatchNotice) -> Unit = {},
     moreRequest: Int? = null,
     onMoreRequestHandled: () -> Unit = {},
-    more: @Composable (page: Int, onPage: (Int) -> Unit) -> Unit,
+    /** The "更多" tab; its last argument shows the library tab, as finishing the add-library wizard does. */
+    more: @Composable (request: Int?, onRequestHandled: () -> Unit, showLibrary: () -> Unit) -> Unit,
 ) {
     var tab by rememberSaveable { mutableIntStateOf(TAB_LIBRARY) }
-    var morePage by rememberSaveable { mutableIntStateOf(0) }
+    var moreTarget by rememberSaveable { mutableStateOf<Int?>(null) }
     val select = { target: Int ->
         if (target != tab) open.revoke()
         tab = target
         open.refresh()
     }
     val openMore = { target: Int ->
-        morePage = target
+        moreTarget = target
         select(TAB_MORE)
     }
     LaunchedEffect(open) { open.refresh() }
@@ -111,7 +113,10 @@ internal fun MainScreen(
                 LibraryScreen(library, onOpen = open::open, onNoFormat = open::failNoFormat, mark = open.mark,
                     onCancelDownload = open::cancelDownload, downloads = open.downloads, onCancelTask = open::cancelTask, openMore = openMore)
             } else {
-                more(morePage) { morePage = it }
+                more(moreTarget, { moreTarget = null }) {
+                    select(TAB_LIBRARY)
+                    library.refresh()
+                }
             }
         }
         HorizontalRule()

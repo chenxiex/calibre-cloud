@@ -36,11 +36,24 @@ import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
 import io.github.chenxiex.calibrecloud.state.LibrarySelection
 import io.github.chenxiex.calibrecloud.state.SearchHistoryStore
+import io.github.chenxiex.calibrecloud.tasks.api.CandidateContext
+import io.github.chenxiex.calibrecloud.tasks.api.QueueSequence
+import io.github.chenxiex.calibrecloud.tasks.api.SchedulingPosition
+import io.github.chenxiex.calibrecloud.tasks.api.TaskControls
+import io.github.chenxiex.calibrecloud.tasks.api.TaskEvent
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
+import io.github.chenxiex.calibrecloud.tasks.api.TaskOrigin
+import io.github.chenxiex.calibrecloud.tasks.api.TaskPriority
+import io.github.chenxiex.calibrecloud.tasks.api.TaskRecord
+import io.github.chenxiex.calibrecloud.tasks.api.TaskRequest
+import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
+import io.github.chenxiex.calibrecloud.tasks.api.TaskState
+import io.github.chenxiex.calibrecloud.tasks.api.TaskSubmission
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -127,9 +140,11 @@ class LibraryViewModelTest {
     private var copies: List<DownloadedCopy> = emptyList()
     private val batch = FakeBatch()
 
+    private var priority = listOf(BookFormat.parse("EPUB"))
+
     private fun TestScope.model(covers: FakeCovers = FakeCovers()): LibraryViewModel {
         val service = LibraryQueryService(FakeImports { imported }, { copies }, dispatcher)
-        return LibraryViewModel({ selection }, service, covers, emptyFlow(), history, batch).also {
+        return LibraryViewModel({ selection }, service, covers, emptyFlow(), history, batch, { priority }).also {
             it.setVisible(true)
             advanceUntilIdle()
         }
@@ -149,6 +164,29 @@ class LibraryViewModelTest {
         advanceUntilIdle()
         assertEquals(LibraryContent.NoMetadata, model.content)
         assertEquals(BackendKind.ONEDRIVE, model.backend)
+    }
+
+    @Test
+    fun aSyncUnderWayReplacesTheSyncEntryUntilItFinishes() = runTest(dispatcher) {
+        // Adding a library starts its first sync; the empty library must say so rather than offer another sync.
+        var sync: TaskState? = TaskState.Queued
+        val events = MutableSharedFlow<TaskEvent>()
+        val service = LibraryQueryService(FakeImports { imported }, { copies }, dispatcher)
+        val model = LibraryViewModel({ selection }, service, FakeCovers(), events, history, batch, { priority }) { selected ->
+            sync.takeIf { selected == token }
+        }.also { it.setVisible(true); it.onMeasured(6); advanceUntilIdle() }
+        assertEquals(LibraryContent.NoMetadata, model.content)
+        assertEquals(TaskState.Queued, model.syncing)
+
+        sync = null
+        val request = TaskRequest.CandidateConfiguration(CandidateContext(token, BackendKind.LOCAL, UUID.randomUUID()),
+            TaskRequest.CandidateConfiguration.LIBRARY_SYNC)
+        events.emit(TaskEvent.Changed(TaskRecord(TaskId(UUID.randomUUID()), TaskSubmission(request, TaskOrigin.MANUAL_SYNC),
+            SchedulingPosition(TaskPriority.HIGH, QueueSequence(1)), state = TaskState.Finished(TaskResult.Completed),
+            controls = TaskControls(false, false, false, false))))
+        advanceUntilIdle()
+        assertEquals(LibraryContent.NoMetadata, model.content)
+        assertNull(model.syncing)
     }
 
     @Test
@@ -409,6 +447,20 @@ class LibraryViewModelTest {
 
     private fun copy(n: Int, format: BookFormat) = DownloadedCopy(CopyKey(key(n), format), CompleteCopyLocation(libraryId, UUID.randomUUID()),
         "Book $n", 1, FileVersion(BackendKind.LOCAL, "v"), SourceAvailability.AVAILABLE)
+
+    @Test
+    fun savedFormatPriorityChoosesTheDefaultFormatAndAChangeAppliesOnTheNextRefresh() = runTest(dispatcher) {
+        imported = formatted(listOf(epub, pdf))
+        val model = model().also { it.onMeasured(10); advanceUntilIdle() }
+        assertEquals(epub, (model.content as LibraryContent.Books).rows.single().defaultFormat!!.format)
+        priority = listOf(pdf, epub)
+        model.refresh(); advanceUntilIdle()
+        assertEquals(pdf, (model.content as LibraryContent.Books).rows.single().defaultFormat!!.format)
+        // A cached format still wins over a preferred source format.
+        copies = listOf(copy(1, epub))
+        model.refresh(); advanceUntilIdle()
+        assertEquals(epub, (model.content as LibraryContent.Books).rows.single().defaultFormat!!.format)
+    }
 
     @Test
     fun selectionCountsTheDistinctBooksOfChosenFoldersAndEndsWhenTheLevelChanges() = runTest(dispatcher) {

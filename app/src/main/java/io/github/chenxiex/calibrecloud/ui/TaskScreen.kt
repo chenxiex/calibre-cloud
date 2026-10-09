@@ -1,128 +1,217 @@
 package io.github.chenxiex.calibrecloud.ui
 
 import android.os.Build
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.*
+import io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
 
+private val TASK_ROW_HEIGHT = 64.dp
+
+/** Which side of the queue the page shows: unfinished work or finished results (including failures and cancels). */
+internal enum class TaskTab { ACTIVE, FINISHED }
+
+/** Who triggered the work; promoted tasks count as user requests. */
+internal enum class TaskSourceFilter { ALL, USER, AUTOMATIC }
+
+/** The task page polls only while shown; leaving it stops the two-second refresh. */
 @Composable
 internal fun TaskScreen(model: TaskViewModel) {
+    DisposableEffect(model) {
+        model.setVisible(true)
+        onDispose { model.setVisible(false) }
+    }
     TaskList(model.records, model.failed, model.operationFailed, model::control)
 }
 
+/**
+ * The durable queue (R18, Q62) as a paged list under two tabs and a source filter, as many flat rows per
+ * page as fit: a short type title, a line of small status text (a pin-to-top arrow marks user requests,
+ * the scheduling position while it only waits its turn, otherwise stage and percentage, waiting reasons or
+ * result), and on the right only the control icons its state supports, or a check once completed.
+ */
 @Composable
 internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFailed: Boolean = false, onControl: (TaskRecord, TaskControl) -> Unit) {
-    Text(stringResource(R.string.task_title), style = MaterialTheme.typography.titleMedium)
-    if (failed) Text(stringResource(R.string.task_local_error))
-    if (operationFailed) Text(stringResource(R.string.task_control_error))
     var page by rememberSaveable { mutableIntStateOf(0) }
-    val count = maxOf(1, records.size)
-    val current = page.coerceIn(0, count - 1)
-    val record = records.getOrNull(current)
-    if (record == null) {
-        Text(stringResource(R.string.task_empty))
-    } else {
-        Text(stringResource(taskTypeResource(record.submission.request)))
-        Text(stringResource(if (record.effectiveOrigin.priority == TaskPriority.HIGH)
-            R.string.task_user else R.string.task_automatic))
-        if (record.promotion != null) Text(stringResource(R.string.task_promoted))
-        if (record.state == TaskState.Queued || record.state is TaskState.Waiting) {
-            val pending = records.filter { it.state == TaskState.Queued || it.state is TaskState.Waiting }
-            Text(stringResource(R.string.task_order, pending.indexOf(record) + 1))
+    var tab by rememberSaveable { mutableStateOf(TaskTab.ACTIVE) }
+    var source by rememberSaveable { mutableStateOf(TaskSourceFilter.ALL) }
+    Column(Modifier.fillMaxSize().testTag("task_page")) {
+        if (failed) Text(stringResource(R.string.task_local_error), Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        if (operationFailed) Text(stringResource(R.string.task_control_error), Modifier.padding(horizontal = 16.dp, vertical = 4.dp))
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            TaskTab.entries.forEach { entry ->
+                Choice(stringResource(if (entry == TaskTab.ACTIVE) R.string.task_tab_active else R.string.task_tab_finished),
+                    entry == tab, 16.sp, "task_tab_${entry.name.lowercase()}") { tab = entry; page = 0 }
+            }
+            Spacer(Modifier.weight(1f))
+            TaskSourceFilter.entries.forEach { entry ->
+                Choice(stringResource(when (entry) {
+                    TaskSourceFilter.ALL -> R.string.task_filter_all
+                    TaskSourceFilter.USER -> R.string.task_filter_user
+                    TaskSourceFilter.AUTOMATIC -> R.string.task_filter_automatic
+                }), entry == source, 13.sp, "task_filter_${entry.name.lowercase()}") { source = entry; page = 0 }
+            }
         }
-        TaskStatus(record)
-        Spacer(Modifier.height(8.dp))
-        val controls = record.controls
-        Row {
-            if (controls.canPause) StaticButton(stringResource(R.string.task_pause), true) { onControl(record, TaskControl.PAUSE) }
-            if (controls.canResume) StaticButton(stringResource(R.string.task_resume), true) { onControl(record, TaskControl.RESUME) }
-            if (controls.canRetry) StaticButton(stringResource(R.string.task_retry), true) { onControl(record, TaskControl.RETRY) }
-            if (controls.canCancel) {
-                Spacer(Modifier.width(8.dp))
-                StaticButton(stringResource(R.string.task_cancel), true) { onControl(record, TaskControl.CANCEL) }
+        HorizontalDivider(color = Color.Black)
+        // Only tasks that wait their turn have a scheduling position, counted over the whole queue.
+        val pending = records.filter { it.state == TaskState.Queued }
+        val shown = records.filter { record ->
+            (record.state is TaskState.Finished) == (tab == TaskTab.FINISHED) && when (source) {
+                TaskSourceFilter.ALL -> true
+                TaskSourceFilter.USER -> record.effectiveOrigin.priority == TaskPriority.HIGH
+                TaskSourceFilter.AUTOMATIC -> record.effectiveOrigin.priority == TaskPriority.LOW
+            }
+        }.let { filtered ->
+            // No finish time is kept: the latest submitted (or promoted) finished task comes first (Q63).
+            if (tab == TaskTab.FINISHED) filtered.sortedByDescending { it.scheduling.sequence.value } else filtered
+        }
+        if (shown.isEmpty()) {
+            Text(stringResource(R.string.task_empty), Modifier.padding(16.dp).testTag("task_empty"))
+            return@Column
+        }
+        BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+            val whole = listGeometry(maxWidth.value, maxHeight.value, TASK_ROW_HEIGHT.value).rows
+            val rows = if (shown.size <= whole) whole else listGeometry(maxWidth.value, maxHeight.value - 48f, TASK_ROW_HEIGHT.value).rows
+            val pages = pageCount(shown.size, rows)
+            val current = page.coerceIn(0, pages - 1)
+            PagedArea(current, pages, "tasks", 48.dp, { page = it }, Modifier.fillMaxSize()) {
+                Column(Modifier.fillMaxSize()) {
+                    shown.drop(current * rows).take(rows).forEach { record ->
+                        TaskRow(record, pending.indexOf(record).takeIf { it >= 0 }?.plus(1), onControl)
+                    }
+                }
             }
         }
     }
-    Spacer(Modifier.height(8.dp))
-    Text(stringResource(R.string.task_page, current + 1, count))
-    Row {
-        StaticButton(stringResource(R.string.task_previous), current > 0) { page = current - 1 }
-        Spacer(Modifier.width(8.dp))
-        StaticButton(stringResource(R.string.task_next), current + 1 < count) { page = current + 1 }
+}
+
+/** A tab or filter option; the selected one is bold and underlined, so it reads without color. */
+@Composable
+private fun Choice(label: String, selected: Boolean, size: TextUnit, tag: String, onClick: () -> Unit) {
+    Column(
+        Modifier.height(44.dp).clickable(remember { MutableInteractionSource() }, null, role = Role.Tab, onClick = onClick)
+            .semantics { this.selected = selected }.padding(horizontal = 8.dp).testTag(tag),
+        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+    ) {
+        Text(label, fontSize = size, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal, maxLines = 1)
+        Box(Modifier.padding(top = 2.dp).width(24.dp).height(2.dp).then(if (selected) Modifier.background(Color.Black) else Modifier))
     }
 }
 
 @Composable
-private fun TaskStatus(record: TaskRecord) {
-    if (record.restartedTransfer && (record.state is TaskState.Running || record.state is TaskState.Paused)) {
-        Text(stringResource(R.string.task_transfer_restarted))
+private fun TaskRow(record: TaskRecord, position: Int?, onControl: (TaskRecord, TaskControl) -> Unit) {
+    // The divider stays inside the row height, so a page of rows fits the measured space.
+    Column(Modifier.fillMaxWidth().height(TASK_ROW_HEIGHT).testTag("task_${record.id.value}")) {
+        Row(Modifier.fillMaxWidth().weight(1f).padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(stringResource(taskTypeResource(record.submission.request)),
+                    fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (record.effectiveOrigin.priority == TaskPriority.HIGH) {
+                        Icon(painterResource(R.drawable.ic_pin_top), stringResource(R.string.task_filter_user),
+                            Modifier.padding(end = 4.dp).size(14.dp).testTag("task_user_mark"), tint = Color.Black)
+                    }
+                    Text(taskStatusLine(record, position), Modifier.testTag("task_status"),
+                        fontSize = 13.sp, lineHeight = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            val controls = record.controls
+            val result = (record.state as? TaskState.Finished)?.result
+            if (controls.canPause) IconAction(R.drawable.ic_pause, stringResource(R.string.task_pause), true, Modifier.testTag("task_pause")) { onControl(record, TaskControl.PAUSE) }
+            if (controls.canResume) IconAction(R.drawable.ic_play, stringResource(R.string.task_resume), true, Modifier.testTag("task_resume")) { onControl(record, TaskControl.RESUME) }
+            if (controls.canRetry) IconAction(R.drawable.ic_refresh, stringResource(R.string.task_retry), true, Modifier.testTag("task_retry")) { onControl(record, TaskControl.RETRY) }
+            if (controls.canCancel) IconAction(R.drawable.ic_close, stringResource(R.string.task_cancel), true, Modifier.testTag("task_cancel")) { onControl(record, TaskControl.CANCEL) }
+            if (!controls.canRetry && (result == TaskResult.Completed || result is TaskResult.CompletedWithBookFailures)) {
+                Box(Modifier.size(ICON_TOUCH_SIZE), contentAlignment = Alignment.Center) {
+                    Icon(painterResource(R.drawable.ic_check), stringResource(R.string.task_completed), Modifier.size(24.dp).testTag("task_done"), tint = Color.Black)
+                }
+            }
+        }
+        HorizontalDivider(color = DISABLED_TINT)
     }
+}
+
+/** A task that only waits its turn shows "排队" and its position (R18); other states a short stage, percentage or reason. */
+@Composable
+private fun taskStatusLine(record: TaskRecord, position: Int?): String = buildList {
     when (val state = record.state) {
-        TaskState.Queued -> Text(stringResource(R.string.task_queued))
-        is TaskState.Waiting -> {
-            Text(stringResource(R.string.task_waiting))
-            state.reasons.forEach { Text(stringResource(waitingResource(it))) }
-        }
+        TaskState.Queued -> add(if (position != null) stringResource(R.string.task_queued_position, position) else stringResource(R.string.task_queued))
+        is TaskState.Waiting -> add(state.reasons.map { stringResource(waitingResource(it)) }.joinToString(stringResource(R.string.list_separator)))
         is TaskState.Running -> {
-            Text(stringResource(R.string.task_running, stringResource(stageResource(state.stage))))
+            add(stringResource(stageResource(state.stage)))
             val progress = state.progress
-            Text(if (progress?.total == null) stringResource(R.string.task_progress_unknown)
-                else stringResource(R.string.task_progress, progress.completed, progress.total))
-            if (state.stage == TaskStage.WRITE_COMMIT) Text(stringResource(R.string.task_committing))
-        }
-        is TaskState.Paused -> Text(stringResource(R.string.task_paused, stringResource(stageResource(state.stage))))
-        is TaskState.Finished -> when (val result = state.result) {
-            TaskResult.Completed -> Text(stringResource(R.string.task_completed))
-            is TaskResult.CompletedWithBookFailures -> Text(stringResource(R.string.task_partial, result.failures.size))
-            is TaskResult.Cancelled -> Text(stringResource(if (result.commit == CommitState.NotCommitted)
-                R.string.task_cancelled else R.string.task_cancelled_committed))
-            is TaskResult.Failed -> {
-                Text(stringResource(R.string.task_failed, stringResource(stageResource(result.failure.stage))))
-                Text(stringResource(taskErrorResource(result.failure.error)))
-                Text(stringResource(when (result.failure.retryFrom) {
-                    RetryFrom.FAILED_STAGE -> R.string.task_retry_stage
-                    RetryFrom.WRITE_REFETCH -> R.string.task_retry_refresh
-                    RetryFrom.RECOVERY_CHECK -> R.string.task_retry_recovery
-                }))
+            val total = progress?.total
+            if (progress != null && total != null && total > 0) {
+                add(stringResource(R.string.task_progress, (progress.completed * 100 / total).toInt().coerceIn(0, 100)))
             }
+            if (state.stage == TaskStage.WRITE_COMMIT) add(stringResource(R.string.task_committing))
+        }
+        is TaskState.Paused -> {
+            add(stringResource(R.string.task_paused))
+            add(stringResource(stageResource(state.stage)))
+        }
+        is TaskState.Finished -> when (val result = state.result) {
+            TaskResult.Completed -> add(stringResource(R.string.task_completed))
+            is TaskResult.CompletedWithBookFailures -> add(stringResource(R.string.task_partial, result.failures.size))
+            is TaskResult.Cancelled -> add(stringResource(if (result.commit == CommitState.NotCommitted)
+                R.string.task_cancelled else R.string.task_cancelled_committed))
+            is TaskResult.Failed -> add(stringResource(R.string.task_failed, stringResource(stageResource(result.failure.stage)),
+                stringResource(taskErrorResource(result.failure.error))))
         }
     }
-}
-
-@Composable
-internal fun TaskSettings(model: TaskViewModel) {
-    Text(stringResource(R.string.task_settings), style = MaterialTheme.typography.titleMedium)
-    Text(stringResource(R.string.task_startup_explanation))
-    Spacer(Modifier.height(8.dp))
-    StaticButton(stringResource(if (!model.settingsLoaded) R.string.task_settings_loading
-        else if (model.automaticSync) R.string.task_startup_on else R.string.task_startup_off), model.settingsLoaded) {
-        model.toggleStartup()
+    if (record.restartedTransfer && (record.state is TaskState.Running || record.state is TaskState.Paused)) {
+        add(stringResource(R.string.task_transfer_restarted))
     }
-    Spacer(Modifier.height(16.dp))
-    StaticButton(stringResource(R.string.task_sync_now), true) { model.synchronize() }
-    if (model.syncUnavailable) Text(stringResource(R.string.task_sync_unavailable))
-    if (model.failed) Text(stringResource(R.string.task_local_error))
-}
+}.joinToString(stringResource(R.string.task_status_separator))
 
+/** Notification permission and the platform's background limits, which can delay queued work. */
 @Composable
-internal fun BackgroundSettings(model: TaskViewModel, onRequestNotifications: () -> Unit) {
-    Text(stringResource(R.string.task_background_settings), style = MaterialTheme.typography.titleMedium)
-    Spacer(Modifier.height(8.dp))
+internal fun BackgroundSettings(model: TaskViewModel, onRequestNotifications: () -> Unit) = Column(
+    Modifier.fillMaxSize().padding(16.dp).testTag("background_page"), verticalArrangement = Arrangement.spacedBy(12.dp),
+) {
+    LaunchedEffect(model) { model.refreshCapabilities() }
     Text(stringResource(if (model.notificationsEnabled) R.string.task_notifications_on else R.string.task_notifications_off))
     if (!model.notificationsEnabled && Build.VERSION.SDK_INT >= 33) {
         StaticButton(stringResource(R.string.task_notifications_request), true) { onRequestNotifications() }
@@ -137,7 +226,11 @@ internal fun BackgroundSettings(model: TaskViewModel, onRequestNotifications: ()
 }
 
 internal fun taskTypeResource(request: TaskRequest): Int = when (request) {
-    is TaskRequest.CandidateConfiguration -> R.string.task_type_candidate
+    is TaskRequest.CandidateConfiguration -> when (request.operation) {
+        TaskRequest.CandidateConfiguration.LIBRARY_SYNC -> R.string.task_type_metadata
+        OneDriveCandidateTaskHandler.BROWSE -> R.string.task_type_directory
+        else -> R.string.task_type_candidate
+    }
     is TaskRequest.MetadataSync -> R.string.task_type_metadata
     is TaskRequest.FormatCopy -> R.string.task_type_copy
     is TaskRequest.FormatCheck -> R.string.task_type_check

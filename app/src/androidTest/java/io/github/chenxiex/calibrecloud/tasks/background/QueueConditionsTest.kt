@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.tasks.background
 
+import io.github.chenxiex.calibrecloud.state.selectSignedIn
 import io.github.chenxiex.calibrecloud.storage.SourcePolicies
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -55,8 +56,7 @@ class QueueConditionsTest {
         try {
             val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
             val session = UUID.randomUUID()
-            val candidate = state.beginCandidate(BackendKind.ONEDRIVE, session)
-            assertTrue(state.resolveCandidate(candidate, LibraryLocation.OneDrive("account", "drive", "root")))
+            state.selectSignedIn(LibraryLocation.OneDrive("account", "drive", "root"), session)
             state.setStartupEnabled(true)
             var connected = false
             var calls = 0

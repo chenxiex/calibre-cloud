@@ -38,33 +38,40 @@ class LocalDirectoryAuthorizationDeviceTest {
     fun realPersistedGrantSurvivesRecreationAndRevocationIsVisible() = runBlocking {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val permissions = AndroidDirectoryPermissions(context)
-        val configuration = (context.applicationContext as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies.localConfiguration
-        val uri = configuration.load()
-        assertNotNull("First authorize the dedicated test library in the system picker", uri)
+        val dependencies = (context.applicationContext as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies
+        val location = dependencies.state.current()?.location
+        assertNotNull("First add the dedicated test library through the system picker", location)
+        val uri = dependencies.state.accessKey(location!!)
+        assertNotNull("The current library must be a listed local library", uri)
         uri!!
-        assertNotNull(permissions.localLocation(uri))
+        assertEquals(location, permissions.localLocation(uri))
         assertNull(permissions.localLocation("content://cloud.example/tree/library"))
         assertNull(permissions.localLocation("file:///storage/emulated/0/library"))
         assertNull(permissions.localLocation("content://com.android.externalstorage.documents/document/primary%3Alibrary"))
         assertNull(permissions.localLocation("content://com.android.externalstorage.documents/tree/primary%3Alibrary/document/primary%3Aother"))
         assertThrows(SecurityException::class.java) { permissions.persist(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
         val authorization = createLocalDirectoryAuthorization(context)
-        // The authorization entry now lives under the bottom bar's "更多" tab, which survives recreation.
+        val authorized = context.getString(R.string.libraries_status, context.getString(R.string.more_location_local),
+            context.getString(R.string.libraries_ready_local))
+        // The list of libraries lives under the bottom bar's "更多" tab, which survives recreation.
         compose.onNodeWithTag("nav_more").performClick()
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.restore().status)
-        awaitText(context.getString(R.string.local_authorized))
+        compose.onNodeWithTag("more_libraries").performClick()
+        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.status(uri))
+        awaitText(authorized)
         compose.activityRule.scenario.recreate()
         compose.waitForIdle()
-        assertEquals(uri, configuration.load())
-        assertEquals(DirectoryAuthorizationStatus.AUTHORIZED, authorization.restore().status)
-        awaitText(context.getString(R.string.local_authorized))
+        assertEquals(uri, dependencies.state.accessKey(location))
+        awaitText(authorized)
         permissions.release(uri)
-        assertEquals(DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED, authorization.restore().status)
+        assertEquals(DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED, authorization.status(uri))
         compose.activityRule.scenario.recreate()
         compose.waitForIdle()
-        awaitText(context.getString(R.string.local_reauthorize))
-        assertEquals(uri, configuration.load())
+        awaitText(context.getString(R.string.libraries_status, context.getString(R.string.more_location_local),
+            context.getString(R.string.libraries_reauthorize_local)))
+        awaitText(context.getString(R.string.libraries_reauthorize))
+        assertEquals(uri, dependencies.state.accessKey(location))
     }
+
     private fun awaitText(text: String) {
         compose.waitUntil(5_000) { compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText(text).assertIsDisplayed()

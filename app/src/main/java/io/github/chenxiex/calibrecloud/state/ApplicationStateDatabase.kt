@@ -22,6 +22,9 @@ import android.database.sqlite.SQLiteOpenHelper
  * downloaded copy was confirmed against, a task's one stale-path sync with its missing path, and
  * library throttle deadlines.
  * Version 10 stores library locations as opaque storage keys instead of per-backend columns.
+ * Version 11 adds the format priority setting, EPUB first by default.
+ * Version 12 keeps the list of configured libraries, each with its own access key, and the library
+ * being added; the single local grant and candidate selections without a location are migrated away.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  * Raising [VERSION] also requires its reversal in the androidTest StateSchemaHistory fixture.
@@ -29,7 +32,7 @@ import android.database.sqlite.SQLiteOpenHelper
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
     SQLiteOpenHelper(context.applicationContext, name, null, VERSION) {
     companion object {
-        const val VERSION = 10
+        const val VERSION = 12
     }
 
     private val privateFiles = context.applicationContext.filesDir
@@ -41,7 +44,6 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
     override fun onCreate(db: SQLiteDatabase) {
         createBindings(db)
         createSelection(db)
-        db.execSQL("CREATE TABLE local_authorization (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), tree_uri TEXT NOT NULL)")
         createCopies(db, "downloaded_copies")
         createQueue(db)
         createMetadata(db)
@@ -51,6 +53,8 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createSearchHistory(db)
         createLastOpened(db)
         createRequestCosts(db)
+        createFormatPriority(db)
+        createLibraryList(db)
     }
 
     /**
@@ -282,6 +286,50 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         db.execSQL("INSERT INTO application_settings(singleton, startup_sync) VALUES (1, 0)")
     }
 
+    /**
+     * Comma-separated format names, highest priority first; formats it does not name follow by name.
+     * Like the startup setting it is global and survives every cache cleanup.
+     */
+    private fun createFormatPriority(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE application_settings ADD COLUMN format_priority TEXT NOT NULL DEFAULT 'EPUB'")
+    }
+
+    /**
+     * Libraries the user added, in the order added. [access_key] is the backend's opaque reference to
+     * what authorizes the location (the local directory grant URI); null when the backend needs none.
+     * [library_addition] is the one library being added: its token scopes the directory listings of the
+     * addition, so browsing never changes the current selection; its location stays null until chosen.
+     * The version 11 local grant moves to the entry of the current selection; a selection without a
+     * location was an unfinished choice and is removed, leaving no current library.
+     */
+    private fun createLibraryList(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE configured_libraries (
+            backend TEXT NOT NULL,
+            location_key TEXT NOT NULL,
+            display_name TEXT,
+            access_key TEXT,
+            position INTEGER NOT NULL,
+            PRIMARY KEY(backend, location_key)
+        )""".trimIndent())
+        db.execSQL("""CREATE TABLE library_addition (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            token TEXT NOT NULL,
+            backend TEXT NOT NULL,
+            authorization_id TEXT,
+            location_key TEXT,
+            display_name TEXT,
+            access_key TEXT
+        )""".trimIndent())
+        val legacyGrant = db.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'local_authorization'", null).use {
+            it.moveToFirst()
+        }
+        db.execSQL("""INSERT INTO configured_libraries(backend, location_key, access_key, position)
+            SELECT backend, location_key, ${if (legacyGrant) "CASE backend WHEN 'local' THEN (SELECT tree_uri FROM local_authorization) END" else "NULL"}, 0
+            FROM current_selection WHERE location_key IS NOT NULL""")
+        db.execSQL("DELETE FROM current_selection WHERE location_key IS NULL")
+        if (legacyGrant) db.execSQL("DROP TABLE local_authorization")
+    }
+
     /** Executed queries only; [sequence] orders them newest first within one library. */
     private fun createSearchHistory(db: SQLiteDatabase) {
         db.execSQL("""CREATE TABLE search_history (
@@ -341,5 +389,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         if (oldVersion <= 7) createLastOpened(db)
         createRequestCosts(db)
         if (oldVersion <= 9) migrateLocationKeys(db)
+        if (oldVersion <= 10) createFormatPriority(db)
+        if (oldVersion <= 11) createLibraryList(db)
     }
 }

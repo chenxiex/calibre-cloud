@@ -10,6 +10,7 @@ import io.github.chenxiex.calibrecloud.model.*
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
 import io.github.chenxiex.calibrecloud.state.StateSchemaHistory
+import io.github.chenxiex.calibrecloud.state.addLibrary
 import io.github.chenxiex.calibrecloud.storage.api.*
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
@@ -442,8 +443,9 @@ class CacheMaintenanceTest {
         val protected = File(files, "write-recovery/${UUID.randomUUID()}/backup.db").apply {
             parentFile!!.mkdirs(); writeText("protected bytes")
         }
-        val candidate = state.beginCandidate(BackendKind.LOCAL, UUID.randomUUID())
-        val old = submit(TaskRequest.CandidateConfiguration(candidate, "local_snapshot"), TaskOrigin.MANUAL_SYNC)
+        // A listing for a library being added, abandoned with its addition.
+        val candidate = requireNotNull(state.beginAddition(BackendKind.ONEDRIVE, UUID.randomUUID()).first.context)
+        val old = submit(TaskRequest.CandidateConfiguration(candidate, "onedrive_browse"), TaskOrigin.MANUAL_SYNC)
         database.readableDatabase.rawQuery("SELECT scope_library_id FROM queued_tasks WHERE task_id = ?",
             arrayOf(old.value.toString())).use { assertTrue(it.moveToFirst()); assertTrue(it.isNull(0)) }
         val temporary = listOf(
@@ -452,8 +454,8 @@ class CacheMaintenanceTest {
             File(files, "onedrive-browser/${old.value}.json"),
             File(files, "onedrive-browser/${old.value}.part"),
         ).onEach { it.parentFile!!.mkdirs(); it.writeText("obsolete candidate input") }
-        state.select(requireNotNull(selected.location))
-        assertNotEquals(candidate.selectionToken, state.current()!!.token)
+        state.cancelAddition()
+        assertEquals(selected, state.current())
         queue.executionLock.lock()
         try { maintenance.recoverLocked() } finally { queue.executionLock.unlock() }
         assertCancelled(old)
@@ -466,6 +468,70 @@ class CacheMaintenanceTest {
         assertEquals(copy, state.find(copy.key))
         assertEquals("EPUB bytes", copyFile(copy).readText())
         assertEquals("protected bytes", protected.readText())
+    }
+
+    @Test
+    fun deletingAnotherLibraryClearsAllItsDataAndKeepsTheCurrentOne() = runBlocking<Unit> {
+        val deleted = listedLibrary("deleted")
+        val deletedCopy = publish(deleted, "EPUB")
+        val deletedCover = cover(deleted)
+        val deletedTask = pendingCopy(publish(deleted, "PDF").key)
+        val args = arrayOf<Any>(deleted.libraryId.value.toString())
+        database.writableDatabase.execSQL("INSERT INTO search_history(library_id, query, sequence) VALUES(?, '书名', 1)", args)
+        database.writableDatabase.execSQL(
+            "INSERT INTO last_opened(library_id, source_id, source_uuid, format, title) VALUES(?, 1, ?, 'EPUB', 'Fixture book')",
+            args + deleted.sourceUuid.toString())
+        val kept = listedLibrary("kept")
+        val keptCopy = publish(kept, "EPUB")
+        val current = state.current()
+        val location = requireNotNull(state.binding(deleted.libraryId)).location
+
+        val plan = requireNotNull(maintenance.previewLibrary(location))
+        assertEquals(setOf(deleted.libraryId), plan.libraries)
+        assertEquals(2, plan.copies.size)
+        assertFalse(plan.deletesCurrent)
+        assertTrue(plan.bytes >= requireNotNull(deletedCopy.sizeBytes))
+        assertTrue(maintenance.execute(plan))
+
+        assertEquals(listOf(requireNotNull(current?.location)), state.libraries().map { it.location })
+        assertEquals(current, state.current())
+        assertNull(state.find(deletedCopy.key))
+        assertFalse(copyFile(deletedCopy).exists())
+        assertFalse(deletedCover.exists())
+        assertCancelled(deletedTask)
+        for (table in listOf("search_history", "last_opened", "library_preferences", "metadata_imports", "cover_cache")) {
+            database.readableDatabase.rawQuery("SELECT COUNT(*) FROM $table WHERE library_id = ?", arrayOf(deleted.libraryId.value.toString())).use {
+                it.moveToFirst(); assertEquals(table, 0, it.getInt(0))
+            }
+        }
+        assertEquals(keptCopy, state.find(keptCopy.key))
+        assertEquals("EPUB bytes", copyFile(keptCopy).readText())
+        assertNotNull(metadata.currentImport())
+        assertNull(maintenance.previewLibrary(location))
+    }
+
+    @Test
+    fun deletingTheCurrentLibraryLeavesNoCurrentLibraryAndKeepsProtectedWrites() = runBlocking<Unit> {
+        val deleted = listedLibrary("current")
+        val copy = publish(deleted, "EPUB")
+        val protectedTask = protectedWrite(deleted)
+        val protectedEntry = queue.get(protectedTask)
+        val location = requireNotNull(state.current()!!.location)
+        val stale = requireNotNull(maintenance.previewLibrary(location))
+        assertTrue(stale.deletesCurrent)
+        // A plan made under another selection is not executed.
+        state.switchTo(location)
+        assertFalse(maintenance.execute(stale))
+        assertEquals(copy, state.find(copy.key))
+
+        assertTrue(maintenance.execute(requireNotNull(maintenance.previewLibrary(location))))
+        assertNull(state.current())
+        assertTrue(state.libraries().isEmpty())
+        assertNull(state.find(copy.key))
+        assertEquals(protectedEntry, queue.get(protectedTask))
+        // Other-library cleanup still works with no current library.
+        assertNotNull(maintenance.previewOtherLibraries())
+        assertNull(maintenance.previewMetadata())
     }
 
     @Test
@@ -499,7 +565,7 @@ class CacheMaintenanceTest {
     }
 
     @Test
-    fun otherLibraryCleanupBeforeCandidateValidationIncludesAllOldBindingsAndKeepsCandidateProtection() = runBlocking<Unit> {
+    fun otherLibraryCleanupWithoutCurrentLibraryIncludesAllOldBindingsAndKeepsProtection() = runBlocking<Unit> {
         val first = book
         val firstCopy = publish(first, "EPUB")
         val protectedTask = protectedWrite(first)
@@ -509,17 +575,15 @@ class CacheMaintenanceTest {
         val protected = File(files, "write-recovery/${UUID.randomUUID()}/backup.db").apply {
             parentFile!!.mkdirs(); writeText("unresolved source recovery")
         }
-        val candidate = state.beginCandidate(BackendKind.ONEDRIVE, UUID.randomUUID())
-        val selected = requireNotNull(state.current())
-        assertEquals(candidate.selectionToken, selected.token)
-        assertNull(selected.identity)
-        assertNull(selected.location)
+        val addition = state.beginAddition(BackendKind.ONEDRIVE, UUID.randomUUID()).first
+        noCurrentLibrary()
         assertNull(maintenance.previewMetadata())
         val plan = requireNotNull(maintenance.previewOtherLibraries())
         assertEquals(setOf(first.libraryId, second.libraryId), plan.libraries)
         assertEquals(setOf(firstCopy.key, secondCopy.key), plan.copies)
         assertTrue(maintenance.execute(plan))
-        assertEquals(selected, state.current())
+        assertNull(state.current())
+        assertEquals(addition, state.addition())
         assertNull(state.find(firstCopy.key))
         assertNull(state.find(secondCopy.key))
         assertFalse(copyFile(firstCopy).exists())
@@ -531,7 +595,7 @@ class CacheMaintenanceTest {
     }
 
     @Test
-    fun otherLibraryCleanupJournalAllowsCurrentUnvalidatedCandidateSnapshotSubmission() = runBlocking<Unit> {
+    fun otherLibraryCleanupJournalAllowsListingsForTheLibraryBeingAdded() = runBlocking<Unit> {
         for (backend in listOf(BackendKind.LOCAL, BackendKind.ONEDRIVE)) {
             val first = activate("journal-first-${backend.name.lowercase()}")
             val firstCopy = publish(first, "EPUB")
@@ -542,7 +606,8 @@ class CacheMaintenanceTest {
             val protected = File(files, "write-recovery/${UUID.randomUUID()}/backup.db").apply {
                 parentFile!!.mkdirs(); writeText("protected ${backend.name}")
             }
-            val candidate = state.beginCandidate(backend, UUID.randomUUID())
+            val candidate = requireNotNull(state.beginAddition(backend, UUID.randomUUID()).first.context)
+            noCurrentLibrary()
             val selected = state.current()
             val plan = requireNotNull(maintenance.previewOtherLibraries())
             assertTrue(first.libraryId in plan.libraries && second.libraryId in plan.libraries)
@@ -552,10 +617,9 @@ class CacheMaintenanceTest {
             try {
                 withTimeout(10_000) { while (count("cache_cleanup") == 0L) delay(10) }
                 assertFalse(cleanup.isCompleted)
-                val operation = if (backend == BackendKind.LOCAL) "local_snapshot" else "onedrive_snapshot"
-                val result = queue.submit(TaskSubmission(TaskRequest.CandidateConfiguration(candidate, operation),
+                val result = queue.submit(TaskSubmission(TaskRequest.CandidateConfiguration(candidate, "onedrive_browse"),
                     TaskOrigin.MANUAL_SYNC))
-                assertTrue("Current candidate snapshot was rejected for $backend", result is SubmissionResult.Created)
+                assertTrue("Listing for the addition was rejected for $backend", result is SubmissionResult.Created)
                 submitted = (result as SubmissionResult.Created).taskId
                 assertEquals(TaskState.Queued, queue.get(submitted)!!.record.state)
             } finally { queue.executionLock.unlock() }
@@ -582,6 +646,14 @@ class CacheMaintenanceTest {
         metadata = MetadataRepository(database, state, File(files, "metadata"), Dispatchers.IO)
         queue = DurableTaskQueue(database, Dispatchers.IO)
         maintenance = CacheMaintenance(database, state, queue, files, Dispatchers.IO)
+    }
+
+    /** A library added through the list, made current and imported. */
+    private suspend fun listedLibrary(name: String): BookKey {
+        val selected = state.addLibrary(LibraryLocation.Local("test.documents", name), "content://test.documents/tree/$name")
+        val uuid = UUID.randomUUID()
+        val identity = requireNotNull(metadata.importSnapshot(selected.token, CalibreFixture.create(File(root, "$name.db"), bookUuid = uuid)))
+        return BookKey(identity.id, 1, uuid)
     }
 
     private suspend fun activate(name: String): BookKey {
@@ -648,6 +720,11 @@ class CacheMaintenanceTest {
     private suspend fun assertCancelled(task: TaskId) {
         assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(task)!!.record.state)
         assertNull(queue.get(task)!!.checkpoint)
+    }
+
+    /** The state deleting the current library leaves: no current selection. */
+    private fun noCurrentLibrary() {
+        database.writableDatabase.delete("current_selection", null, null)
     }
 
     private fun count(table: String) = database.readableDatabase.rawQuery("SELECT COUNT(*) FROM $table", null).use {

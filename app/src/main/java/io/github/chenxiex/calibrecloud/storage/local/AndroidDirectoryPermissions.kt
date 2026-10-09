@@ -3,7 +3,6 @@ package io.github.chenxiex.calibrecloud.storage.local
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
-import android.annotation.SuppressLint
 import androidx.core.net.toUri
 import android.provider.DocumentsContract
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
@@ -53,26 +52,16 @@ class AndroidDirectoryPermissions(private val context: Context) : DirectoryPermi
         resolver.releasePersistableUriPermission(uri, flags)
     }
 
+    override fun displayName(treeUri: String): String? {
+        val tree = treeUri.toUri()
+        val document = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        return resolver.query(document, arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst() && !it.isNull(0)) it.getString(0).takeIf { name -> name.isNotBlank() } else null
+        }
+    }
+
     companion object {
         const val LOCAL_AUTHORITY = "com.android.externalstorage.documents"
-    }
-}
-
-class PreferencesLocalDirectoryConfiguration(context: Context) : LocalDirectoryConfiguration {
-    private val preferences = context.getSharedPreferences("local_directory", Context.MODE_PRIVATE)
-
-    override fun load(): String? = preferences.getString("tree_uri", null)
-
-    // commit runs on the I/O dispatcher; its Boolean is required before releasing the old grant.
-    @SuppressLint("ApplySharedPref", "UseKtx")
-    override fun save(treeUri: String): Boolean {
-        val oldUri = load()
-        if (preferences.edit().putString("tree_uri", treeUri).commit()) return true
-        // SharedPreferences changes memory even when the disk commit fails; restore the old value.
-        preferences.edit().apply {
-            if (oldUri == null) remove("tree_uri") else putString("tree_uri", oldUri)
-        }.commit()
-        return false
     }
 }
 

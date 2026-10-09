@@ -25,18 +25,23 @@ import java.io.File
 import java.nio.file.Files
 import java.util.UUID
 
-enum class CleanupKind { COPIES, METADATA, OTHER_LIBRARIES }
+/** LIBRARY deletes one listed library: everything OTHER_LIBRARIES clears for it, plus its settings and list entry (Q59). */
+enum class CleanupKind { COPIES, METADATA, OTHER_LIBRARIES, LIBRARY }
 
 @ConsistentCopyVisibility
 data class CleanupPlan internal constructor(
     val kind: CleanupKind,
-    val selectionToken: UUID,
+    /** The current selection the plan was made under; null when no library is current. */
+    val selectionToken: UUID?,
     val libraries: Set<LibraryId>,
     val copies: Set<CopyKey>,
     val bytes: Long,
     internal val books: Set<BookKey> = emptySet(),
     internal val formats: Set<BookFormat>? = null,
     internal val currentLibrary: LibraryId? = null,
+    /** LIBRARY only: the deleted location, and whether it is the current library. */
+    val location: LibraryLocation? = null,
+    internal val deletesCurrent: Boolean = false,
 )
 
 /**
@@ -46,8 +51,10 @@ data class CleanupPlan internal constructor(
  * A durable journal blocks matching new submissions until safe-boundary deletion finishes. The shared queue
  * lock prevents old producers writing files after deletion; revoked tasks cannot retry or publish.
  * Interrupted deletion is retried before dispatch. Protected write evidence is never enumerated.
- * An unvalidated current candidate has no established library identity; other-library cleanup
- * includes all persisted library bindings while retaining the candidate configuration and its tasks.
+ * When no library is current, or the current one has no import yet, other-library cleanup includes all
+ * persisted library bindings while retaining the library list and the library being added.
+ * Deleting a library also covers every binding at its location and, when it is current, the tasks of
+ * the current selection, which it removes; no library becomes current in its place.
  */
 class CacheMaintenance(
     private val database: ApplicationStateDatabase,
@@ -77,13 +84,33 @@ class CacheMaintenance(
     }
     suspend fun previewMetadata(): CleanupPlan? = withContext(io) { preview(CleanupKind.METADATA) }
     suspend fun previewOtherLibraries(): CleanupPlan? = withContext(io) { preview(CleanupKind.OTHER_LIBRARIES) }
+    suspend fun previewLibrary(location: LibraryLocation): CleanupPlan? = withContext(io) { preview(CleanupKind.LIBRARY, location = location) }
 
-    private suspend fun preview(kind: CleanupKind, books: Set<BookKey> = emptySet(), formats: Set<BookFormat>? = null): CleanupPlan? {
+    private fun bindingsAt(db: SQLiteDatabase, location: LibraryLocation): Set<LibraryId> = db.rawQuery(
+        "SELECT library_id FROM library_bindings WHERE backend = ? AND location_key = ?", state.locationArgs(location),
+    ).use { buildSet { while (it.moveToNext()) add(LibraryId(UUID.fromString(it.getString(0)))) } }
+
+    private fun listed(db: SQLiteDatabase, location: LibraryLocation) = db.rawQuery(
+        "SELECT 1 FROM configured_libraries WHERE backend = ? AND location_key = ?", state.locationArgs(location),
+    ).use { it.moveToFirst() }
+
+    private suspend fun preview(kind: CleanupKind, books: Set<BookKey> = emptySet(), formats: Set<BookFormat>? = null,
+                                location: LibraryLocation? = null): CleanupPlan? {
         val db = database.readableDatabase
         db.beginTransactionNonExclusive()
         try {
-            val selected = state.current(db) ?: return null
-            val current = selected.identity?.id
+            val selected = state.current(db)
+            if (kind == CleanupKind.LIBRARY) {
+                if (location == null || !listed(db, location)) return null
+                val deletesCurrent = selected?.location == location
+                val libraries = bindingsAt(db, location)
+                val plan = CleanupPlan(kind, selected?.token, FrozenSet(libraries), FrozenSet(allCopyKeys(db, libraries)), 0,
+                    currentLibrary = selected?.identity?.id, location = location, deletesCurrent = deletesCurrent)
+                return plan.copy(bytes = paths(db, plan, affectedTasks(db, plan)).distinct().sumOf { size(privateFile(it)) })
+            }
+            // With no current library, every library is another library.
+            if (selected == null && kind != CleanupKind.OTHER_LIBRARIES) return null
+            val current = selected?.identity?.id
             if (kind != CleanupKind.OTHER_LIBRARIES && current == null) return null
             if (books.any { it.libraryId != current }) return null
             val libraries = if (kind == CleanupKind.OTHER_LIBRARIES) db.rawQuery(
@@ -91,7 +118,7 @@ class CacheMaintenance(
                 current?.let { arrayOf(it.value.toString()) }).use { buildSet { while (it.moveToNext()) add(LibraryId(UUID.fromString(it.getString(0)))) } }
                 else setOf(requireNotNull(current))
             val copies = (if (kind == CleanupKind.METADATA) emptySet() else allCopyKeys(db, libraries)).filter { kind != CleanupKind.COPIES || (it.book in books && (formats == null || it.format in formats)) }.toSet()
-            val plan = CleanupPlan(kind, selected.token, FrozenSet(libraries), FrozenSet(copies), 0, books, formats, current)
+            val plan = CleanupPlan(kind, selected?.token, FrozenSet(libraries), FrozenSet(copies), 0, books, formats, current)
             val paths = paths(db, plan, affectedTasks(db, plan))
             val size = paths.distinct().sumOf { size(privateFile(it)) }
             return plan.copy(bytes = size)
@@ -101,11 +128,15 @@ class CacheMaintenance(
     suspend fun execute(plan: CleanupPlan): Boolean = withContext(io) { maintenance.withLock {
         val db = database.writableDatabase
         db.transaction {
-            val selected = state.current(db) ?: return@withLock false
-            val current = selected.identity?.id
-            if (selected.token != plan.selectionToken || current != plan.currentLibrary) return@withLock false
-            if (plan.kind == CleanupKind.OTHER_LIBRARIES && current in plan.libraries) return@withLock false
-            if (plan.kind != CleanupKind.OTHER_LIBRARIES && (current == null || plan.libraries != setOf(current))) return@withLock false
+            val selected = state.current(db)
+            val current = selected?.identity?.id
+            if (selected?.token != plan.selectionToken || current != plan.currentLibrary) return@withLock false
+            if (plan.kind == CleanupKind.LIBRARY) {
+                val location = plan.location ?: return@withLock false
+                if (!listed(db, location) || bindingsAt(db, location) != plan.libraries ||
+                    (selected?.location == location) != plan.deletesCurrent) return@withLock false
+            } else if (plan.kind == CleanupKind.OTHER_LIBRARIES && current in plan.libraries) return@withLock false
+            else if (plan.kind != CleanupKind.OTHER_LIBRARIES && (current == null || plan.libraries != setOf(current))) return@withLock false
             if (DurableTaskQueue.cacheCleanupPending(db)) return@withLock false
             val tasks = affectedTasks(db, plan)
             val paths = paths(db, plan, tasks)
@@ -113,7 +144,7 @@ class CacheMaintenance(
             val journal = JSONObject().put("paths", JSONArray(paths.filterNot { it.startsWith("books/") })).put("libraries", JSONArray(plan.libraries.map { it.value.toString() }))
                 .put("tasks", JSONArray(tasks.map { it.value.toString() }))
                 .put("retire", JSONArray(retiredGenerations(db, plan, tasks)))
-                .put("kind", plan.kind.name).put("token", plan.selectionToken.toString())
+                .put("kind", plan.kind.name).put("token", plan.selectionToken?.toString() ?: JSONObject.NULL)
                 .put("books", JSONArray(plan.books.map { "${it.libraryId.value}/${it.sourceId}/${it.sourceUuid}" }))
                 .put("formats", plan.formats?.let { JSONArray(it.map { format -> format.value }) } ?: JSONObject.NULL)
             db.insertOrThrow("cache_cleanup", null, ContentValues().apply { put("cleanup_id", id); put("payload", journal.toString()) })
@@ -124,6 +155,15 @@ class CacheMaintenance(
                 db.delete("metadata_imports", "library_id = ?", args)
                 db.delete("cover_cache", "library_id = ?", args)
                 db.update("downloaded_copies", ContentValues().apply { put("source_availability", "unconfirmed") }, "library_id = ?", args)
+            }
+            if (plan.kind == CleanupKind.LIBRARY) {
+                plan.libraries.forEach { library ->
+                    val args = arrayOf(library.value.toString())
+                    listOf("library_preferences", "search_history", "last_opened").forEach { db.delete(it, "library_id = ?", args) }
+                }
+                val location = requireNotNull(plan.location)
+                db.delete("configured_libraries", "backend = ? AND location_key = ?", state.locationArgs(location))
+                if (plan.deletesCurrent) db.delete("current_selection", "singleton = 1", null)
             }
             if (plan.kind != CleanupKind.METADATA) {
                 val keys = allCopyKeys(db, plan.libraries).filter { plan.kind != CleanupKind.COPIES ||
@@ -149,7 +189,7 @@ class CacheMaintenance(
             val paths = payload.getJSONArray("paths")
             for (index in 0 until paths.length()) delete(privateFile(paths.getString(index)))
             val libraries = payload.getJSONArray("libraries")
-            if (payload.optString("kind") == "OTHER_LIBRARIES") {
+            if (payload.optString("kind") in setOf("OTHER_LIBRARIES", "LIBRARY")) {
                 for (index in 0 until libraries.length()) state.collectUnreferenced(LibraryId(UUID.fromString(libraries.getString(index))))
             } else {
                 val retired = payload.optJSONArray("retire") ?: JSONArray()
@@ -189,12 +229,12 @@ class CacheMaintenance(
     private fun journalAbandonedInputs(db: SQLiteDatabase) {
         db.transaction {
             if (DurableTaskQueue.cacheCleanupPending(db)) return
-            val token = state.current(db)?.token
+            val tokens = setOfNotNull(state.current(db)?.token, state.addition(db)?.token)
             val tasks = db.rawQuery("SELECT task_id,record FROM queued_tasks WHERE scope_library_id IS NULL AND revoked = 0", null).use {
                 buildList { while (it.moveToNext()) {
                     val record = TaskCodec.decode(it.getString(1))
                     val request = record.submission.request as? TaskRequest.CandidateConfiguration ?: continue
-                    if (request.context.selectionToken != token) add(TaskId(UUID.fromString(it.getString(0))))
+                    if (request.context.selectionToken !in tokens) add(TaskId(UUID.fromString(it.getString(0))))
                 } }
             }
             if (tasks.isEmpty()) return
@@ -215,8 +255,9 @@ class CacheMaintenance(
             val request = record.submission.request
             val scope = if (it.isNull(1)) null else LibraryId(UUID.fromString(it.getString(1)))
             val candidate = request as? TaskRequest.CandidateConfiguration
+            val ownToken = plan.selectionToken != null && candidate?.context?.selectionToken == plan.selectionToken
             val belongs = request.libraryId in plan.libraries || scope in plan.libraries ||
-                (candidate?.context?.selectionToken == plan.selectionToken && plan.kind != CleanupKind.OTHER_LIBRARIES)
+                (ownToken && (plan.kind == CleanupKind.COPIES || plan.kind == CleanupKind.METADATA || plan.deletesCurrent))
             if (!belongs) continue
             val match = when (plan.kind) {
                 CleanupKind.COPIES -> when (request) {
@@ -227,7 +268,7 @@ class CacheMaintenance(
                 CleanupKind.METADATA -> request is TaskRequest.CoverLoad ||
                     (request is TaskRequest.MetadataSync && request.freshness == SnapshotFreshness.CurrentSource) ||
                     (candidate != null && candidate.operation in setOf("local_snapshot", "onedrive_snapshot"))
-                CleanupKind.OTHER_LIBRARIES -> when {
+                CleanupKind.OTHER_LIBRARIES, CleanupKind.LIBRARY -> when {
                     request is TaskRequest.ReadStatusWrite -> record.commit == CommitState.NotCommitted
                     request is TaskRequest.MetadataSync && request.freshness is SnapshotFreshness.AfterWrite -> {
                         val parent = request.freshness.writeTaskId
@@ -263,9 +304,9 @@ class CacheMaintenance(
         tasks.forEach { task ->
             add("book-staging/${task.value}"); add("cover-staging/${task.value}")
             add("snapshots/local/${task.value}"); add("snapshots/onedrive/${task.value}")
-            if (plan.kind == CleanupKind.OTHER_LIBRARIES) add("onedrive-browser/${task.value}.json")
+            if (plan.kind == CleanupKind.OTHER_LIBRARIES || plan.kind == CleanupKind.LIBRARY) add("onedrive-browser/${task.value}.json")
         }
-        if (plan.kind == CleanupKind.OTHER_LIBRARIES) {
+        if (plan.kind == CleanupKind.OTHER_LIBRARIES || plan.kind == CleanupKind.LIBRARY) {
             plan.libraries.forEach { add("books/${it.value}") }
         } else if (plan.kind == CleanupKind.COPIES) {
             retiredGenerations(db, plan, tasks).forEach { generation ->

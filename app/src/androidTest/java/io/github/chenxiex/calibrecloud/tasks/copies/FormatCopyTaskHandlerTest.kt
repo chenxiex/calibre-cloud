@@ -1,9 +1,11 @@
 package io.github.chenxiex.calibrecloud.tasks.copies
 
+import io.github.chenxiex.calibrecloud.state.addLibrary
 import android.content.Context
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.lifecycle.ViewModelStore
-import io.github.chenxiex.calibrecloud.ui.DownloadViewModel
+import android.app.Application
+import io.github.chenxiex.calibrecloud.ui.TaskViewModel
 import androidx.test.platform.app.InstrumentationRegistry
 import io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
@@ -691,7 +693,7 @@ class FormatCopyTaskHandlerTest {
                 return sourceFile.inputStream()
             }
         }
-        state.saveLocalSelection("content://test.documents/tree/first", LibraryLocation.Local("test.documents", "first"))
+        state.addLibrary(LibraryLocation.Local("test.documents", "first"), "content://test.documents/tree/first")
         assertEquals(book.libraryId, state.current()!!.identity!!.id)
         val local = LocalSourceBackend(documents, File(root, "local-snapshots"), SnapshotValidator { false }, Dispatchers.IO)
         val remote = OneDriveSourceBackend({ null }, File(root, "remote-snapshots"), SnapshotValidator { false }, Dispatchers.IO)
@@ -924,7 +926,7 @@ class FormatCopyTaskHandlerTest {
     }
 
     @Test
-    fun restoredDownloadScreenRequeuesInterruptedTaskWithoutReadingSource() = runBlocking<Unit> {
+    fun restoredTaskPageRequeuesInterruptedTaskWithoutReadingSource() = runBlocking<Unit> {
         val source = Source(epub("old"))
         submit()
         coordinator(source).drain()
@@ -936,20 +938,19 @@ class FormatCopyTaskHandlerTest {
             record = it.record.copy(state = TaskState.Running(TaskStage.FORMAT_PUBLISH))) }
         database.close()
         reopen()
-        val reader = PrivateCopyReader(state, files, Dispatchers.IO, state.copyAccess)
         val driver = coordinator(source)
         val store = ViewModelStore()
-        val viewModel = withContext(Dispatchers.Main) {
-            DownloadViewModel(state, metadata, reader, queue, driver, CacheMaintenance(database, state, queue, root, Dispatchers.IO), { _, _ -> error("Restoration must not submit source work") })
-                .also { store.put("download", it); it.restore() }
-        }
+        val viewModel = withContext(Dispatchers.Main) { taskPage(driver).also { store.put("tasks", it); it.setVisible(true) } }
         try {
             val restored = withTimeout(10_000) {
-                while (withContext(Dispatchers.Main) { viewModel.record } == null) delay(20)
-                withContext(Dispatchers.Main) { requireNotNull(viewModel.record) }
+                var shown: TaskRecord? = null
+                while (shown?.state != TaskState.Queued) {
+                    delay(20)
+                    shown = withContext(Dispatchers.Main) { viewModel.records.firstOrNull { it.id == interrupted } }
+                }
+                requireNotNull(shown)
             }
             assertEquals(interrupted, restored.id)
-            assertEquals(TaskState.Queued, restored.state)
             assertEquals(TaskState.Queued, queue.get(interrupted)!!.record.state)
             assertEquals(0, source.opens.get())
             assertEquals(old, state.find(key()))
@@ -958,7 +959,7 @@ class FormatCopyTaskHandlerTest {
     }
 
     @Test
-    fun restoringDownloadScreenDoesNotResetAnActivelyExecutingTask() = runBlocking<Unit> {
+    fun restoringTaskPageDoesNotResetAnActivelyExecutingTask() = runBlocking<Unit> {
         val source = Source(epub("active")).apply { block = true }
         val task = submit()
         val coordinator = coordinator(source)
@@ -966,17 +967,11 @@ class FormatCopyTaskHandlerTest {
         val store = ViewModelStore()
         try {
             assertTrue(source.started.await(10, TimeUnit.SECONDS))
-            val viewModel = withContext(Dispatchers.Main) {
-                DownloadViewModel(state, metadata, PrivateCopyReader(state, files, Dispatchers.IO, state.copyAccess),
-                    queue, coordinator, CacheMaintenance(database, state, queue, root, Dispatchers.IO), { _, _ -> error("Restoration must not submit source work") })
-                    .also { store.put("download", it); it.restore() }
+            val viewModel = withContext(Dispatchers.Main) { taskPage(coordinator).also { store.put("tasks", it); it.setVisible(true) } }
+            withTimeout(10_000) {
+                while (withContext(Dispatchers.Main) { viewModel.records.none { it.id == task } }) delay(20)
             }
-            val restored = withTimeout(10_000) {
-                while (withContext(Dispatchers.Main) { viewModel.record } == null) delay(20)
-                withContext(Dispatchers.Main) { requireNotNull(viewModel.record) }
-            }
-            assertEquals(task, restored.id)
-            assertTrue(restored.state is TaskState.Running)
+            assertTrue(withContext(Dispatchers.Main) { viewModel.records.single { it.id == task }.state } is TaskState.Running)
             assertTrue(queue.get(task)!!.record.state is TaskState.Running)
             assertEquals(1, source.opens.get())
         } finally {
@@ -987,6 +982,10 @@ class FormatCopyTaskHandlerTest {
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
         assertArrayEquals(source.bytes, readBytes())
     }
+
+    /** The task page as production builds it, restoring through [coordinator]; it never submits or wakes source work. */
+    private fun taskPage(coordinator: TaskCoordinator) = TaskViewModel(queue, { false }, {}, { error("Restoration must not wake the queue") },
+        context.applicationContext as Application, { false }, coordinator::restorePending)
 
     private fun partialFile(task: TaskId): File = File(context.filesDir, "book-staging/${task.value}")
         .listFiles().orEmpty().single { it.extension == "part" }
@@ -1106,11 +1105,9 @@ class FormatCopyTaskHandlerTest {
         }
     }
 
-    /** The production sources over the given backends, with the local grant of the current selection. */
+    /** The production sources over the given backends, with the local grant each library was listed with. */
     private fun productionSources(local: LocalSourceBackend, remote: OneDriveSourceBackend): LibrarySources {
-        val localSource = LocalLibrarySource(local) { location ->
-            if (state.current()?.location == location) state.localTreeUri() else null
-        }
+        val localSource = LocalLibrarySource(local) { location -> state.accessKey(location) }
         val oneDrive = OneDriveLibrarySource(remote)
         return LibrarySources { if (it == BackendKind.LOCAL) localSource else oneDrive }
     }

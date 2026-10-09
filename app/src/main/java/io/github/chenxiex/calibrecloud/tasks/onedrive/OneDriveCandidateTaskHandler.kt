@@ -10,8 +10,9 @@ import io.github.chenxiex.calibrecloud.tasks.persistence.*
 private class StaleOneDriveSelection : RuntimeException()
 
 /**
- * OneDrive root selection: lists directories of the signed-in drive and never activates a library.
- * Syncing the chosen root is the common library sync.
+ * OneDrive root selection for the library being added: lists directories of the signed-in drive and
+ * never changes the current library. Completing the addition makes the chosen root current; syncing
+ * it is the common library sync.
  */
 class OneDriveCandidateTaskHandler(
     private val state: ApplicationStateRepository,
@@ -33,7 +34,7 @@ class OneDriveCandidateTaskHandler(
         val request = entry.record.submission.request as TaskRequest.CandidateConfiguration
         suspend fun check() {
             execution.checkControl()
-            if (state.current()?.token != request.context.selectionToken) throw StaleOneDriveSelection()
+            if (state.addition()?.token != request.context.selectionToken) throw StaleOneDriveSelection()
             authorization.check(request.context)
         }
         return try {
@@ -62,13 +63,14 @@ class OneDriveCandidateTaskHandler(
             else authorizationWait(source, failure.error.kind)?.let { StageOutcome.Wait(it) }
                 ?: StageOutcome.Fail(TaskError.Source(failure.error))
         } catch (_: StaleOneDriveSelection) {
-            // The browser belongs to the replaced selection; a later login continues it for the current one.
+            // The listing belongs to a replaced addition; a later login continues it for the current one.
             StageOutcome.Wait(WaitingReason.LOGIN)
         }
     }
 
     companion object {
         const val BROWSE = "onedrive_browse"
+        /** Directories per page until the chooser has measured its space. */
         const val PAGE_SIZE = 3
     }
 }

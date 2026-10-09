@@ -26,6 +26,27 @@ data class LibrarySelection(
 )
 
 /**
+ * A library in the user's list (R03). [accessKey] is the backend's opaque reference to what authorizes
+ * the location, such as the local directory grant; [displayName] is the root directory's name when known.
+ */
+data class ConfiguredLibrary(val location: LibraryLocation, val displayName: String?, val accessKey: String?)
+
+/**
+ * The library being added. [token] scopes the directory listings made for it; [location] stays null
+ * until a root is chosen. Nothing about the addition changes the current selection before it completes.
+ */
+data class LibraryAddition(
+    val token: UUID,
+    val backend: BackendKind,
+    val authorizationId: UUID?,
+    val location: LibraryLocation?,
+    val displayName: String?,
+    val accessKey: String?,
+) {
+    val context: CandidateContext? get() = authorizationId?.let { CandidateContext(token, backend, it) }
+}
+
+/**
  * All public suspend operations dispatch database/file work off the caller's thread.
  * Selection tokens revoke old UI intents and candidate requests: the queue and publishers compare them
  * before publishing, and run library tasks only for current().identity. Selecting never validates a source.
@@ -42,46 +63,137 @@ class ApplicationStateRepository(
         transaction { selectInTransaction(this, location) }
     }
 
-    /** Starts explicit account/directory discovery before a stable root exists; no fabricated identity. */
-    suspend fun beginCandidate(backend: BackendKind, authorizationId: UUID): CandidateContext = withContext(ioDispatcher) {
+    /** Libraries in the order they were added. */
+    suspend fun libraries(): List<ConfiguredLibrary> = withContext(ioDispatcher) {
+        database.readableDatabase.query("configured_libraries", null, null, null, null, null, "position, rowid").use { cursor ->
+            buildList { while (cursor.moveToNext()) add(ConfiguredLibrary(cursor.location(), cursor.optionalText("display_name"),
+                cursor.optionalText("access_key"))) }
+        }
+    }
+
+    /** The access key [location] was added with; null when it is not in the list or needs none. */
+    suspend fun accessKey(location: LibraryLocation): String? = withContext(ioDispatcher) {
+        database.readableDatabase.query("configured_libraries", arrayOf("access_key"), "backend = ? AND location_key = ?",
+            locationArgs(location), null, null, null).use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+    }
+
+    /** Replaces the access key of a listed library, as re-authorizing does; returns the old key. */
+    suspend fun replaceAccessKey(location: LibraryLocation, accessKey: String): Result<String?> = withContext(ioDispatcher) {
         transaction {
-            val token = UUID.randomUUID()
-            val values = ContentValues().apply {
-                put("singleton", 1); put("token", token.toString()); put("backend", LocationKeys.backendCode(backend))
-                putNull("location_key")
-                putNull("library_id"); put("authorization_id", authorizationId.toString())
+            val old = query("configured_libraries", arrayOf("access_key"), "backend = ? AND location_key = ?", locationArgs(location),
+                null, null, null).use { if (!it.moveToFirst()) return@transaction Result.failure(NoSuchElementException())
+                    else if (it.isNull(0)) null else it.getString(0) }
+            update("configured_libraries", ContentValues().apply { put("access_key", accessKey) },
+                "backend = ? AND location_key = ?", locationArgs(location))
+            Result.success(old)
+        }
+    }
+
+    /** Whether some listed library or the addition still uses [accessKey]. */
+    suspend fun accessKeyInUse(accessKey: String): Boolean = withContext(ioDispatcher) {
+        database.readableDatabase.rawQuery("""SELECT 1 FROM configured_libraries WHERE access_key = ?
+            UNION SELECT 1 FROM library_addition WHERE access_key = ?""", arrayOf(accessKey, accessKey)).use { it.moveToFirst() }
+    }
+
+    /** Makes a listed library current, as choosing it in the list does; null when it is not listed. */
+    suspend fun switchTo(location: LibraryLocation): LibrarySelection? = withContext(ioDispatcher) {
+        transaction {
+            if (!listed(this, location)) return@transaction null
+            selectInTransaction(this, location)
+        }
+    }
+
+    suspend fun addition(): LibraryAddition? = withContext(ioDispatcher) { addition(database.readableDatabase) }
+
+    /**
+     * Starts adding a library of [backend], replacing an unfinished addition; listings bound to the old
+     * token stop being active. [authorizationId] is the sign-in session listings run under, if any.
+     * Returns the replaced addition so the caller can release what authorized it.
+     */
+    suspend fun beginAddition(backend: BackendKind, authorizationId: UUID?): Pair<LibraryAddition, LibraryAddition?> = withContext(ioDispatcher) {
+        transaction {
+            val previous = addition(this)
+            val next = LibraryAddition(UUID.randomUUID(), backend, authorizationId, null, null, null)
+            delete("library_addition", null, null)
+            insertOrThrow("library_addition", null, ContentValues().apply {
+                put("singleton", 1); put("token", next.token.toString()); put("backend", LocationKeys.backendCode(backend))
+                if (authorizationId == null) putNull("authorization_id") else put("authorization_id", authorizationId.toString())
+            })
+            next to previous
+        }
+    }
+
+    /**
+     * Records the chosen root of the addition [token]: [location], its [displayName] and the [accessKey]
+     * that authorizes it. A replaced or finished addition is rejected. Returns the replaced access key.
+     */
+    suspend fun chooseAddition(token: UUID, location: LibraryLocation, displayName: String?, accessKey: String?): Result<String?> =
+        withContext(ioDispatcher) {
+            transaction {
+                val current = addition(this)
+                if (current?.token != token || current.backend != location.backend) return@transaction Result.failure(IllegalStateException())
+                update("library_addition", locationValues(location).apply {
+                    if (displayName == null) putNull("display_name") else put("display_name", displayName)
+                    if (accessKey == null) putNull("access_key") else put("access_key", accessKey)
+                }, "singleton = 1", null)
+                Result.success(current.accessKey?.takeIf { it != accessKey })
             }
-            if (update("current_selection", values, "singleton = 1", null) == 0) insertOrThrow("current_selection", null, values)
-            CandidateContext(token, backend, authorizationId)
         }
-    }
 
-    /** Compare-and-publish the discovered stable location in the same selection transaction. */
-    suspend fun resolveCandidate(context: CandidateContext, location: LibraryLocation): Boolean = withContext(ioDispatcher) {
+    /** Returns to choosing a root for the addition [token], keeping its backend and session. */
+    suspend fun clearAdditionRoot(token: UUID): LibraryAddition? = withContext(ioDispatcher) {
         transaction {
-            val selected = current(this) ?: return@transaction false
-            if (selected.token != context.selectionToken || selected.backend != context.backend ||
-                selected.authorizationId != context.authorizationId || location.backend != context.backend) return@transaction false
-            if (selected.location != null && selected.location != location) return@transaction false
-            update("current_selection", locationValues(location), "singleton = 1", null)
-            true
-        }
-    }
-
-    /** Explicit directory selection rejects an obsolete browser context in the selection transaction. */
-    suspend fun chooseCandidate(context: CandidateContext, location: LibraryLocation): CandidateContext? = withContext(ioDispatcher) {
-        transaction {
-            val selected = current(this) ?: return@transaction null
-            if (selected.token != context.selectionToken || selected.backend != context.backend ||
-                selected.authorizationId != context.authorizationId || location.backend != context.backend) return@transaction null
-            val next = CandidateContext(UUID.randomUUID(), context.backend, context.authorizationId)
-            val cached = cachedIdentity(this, location)
-            update("current_selection", locationValues(location).apply {
-                put("token", next.selectionToken.toString())
-                if (cached == null) putNull("library_id") else put("library_id", cached.id.value.toString())
-                put("authorization_id", context.authorizationId.toString())
+            val current = addition(this)?.takeIf { it.token == token } ?: return@transaction null
+            update("library_addition", ContentValues().apply {
+                putNull("location_key"); putNull("display_name"); putNull("access_key")
             }, "singleton = 1", null)
-            next
+            current
+        }
+    }
+
+    /** Abandons the addition; returns it so the caller can release what authorized it. */
+    suspend fun cancelAddition(): LibraryAddition? = withContext(ioDispatcher) {
+        transaction { addition(this).also { delete("library_addition", null, null) } }
+    }
+
+    /**
+     * Completes the addition [token]: lists its location (or, when already listed, refreshes the name and
+     * access key) and makes it current in one transaction. Returns the selection and the access key
+     * the listed entry no longer uses, or null when the addition was replaced or has no root yet.
+     */
+    suspend fun completeAddition(token: UUID): Pair<LibrarySelection, String?>? = withContext(ioDispatcher) {
+        transaction {
+            val current = addition(this)?.takeIf { it.token == token } ?: return@transaction null
+            val location = current.location ?: return@transaction null
+            val old = query("configured_libraries", arrayOf("access_key"), "backend = ? AND location_key = ?", locationArgs(location),
+                null, null, null).use { if (it.moveToFirst()) (if (it.isNull(0)) null else it.getString(0)) to true else null to false }
+            val values = ContentValues().apply {
+                put("display_name", current.displayName)
+                if (current.accessKey == null) putNull("access_key") else put("access_key", current.accessKey)
+            }
+            if (old.second) {
+                update("configured_libraries", values, "backend = ? AND location_key = ?", locationArgs(location))
+            } else {
+                val position = rawQuery("SELECT COALESCE(MAX(position), -1) + 1 FROM configured_libraries", null).use {
+                    it.moveToFirst(); it.getInt(0)
+                }
+                insertOrThrow("configured_libraries", null, locationValues(location).apply { putAll(values); put("position", position) })
+            }
+            delete("library_addition", null, null)
+            selectInTransaction(this, location) to old.first?.takeIf { it != current.accessKey }
+        }
+    }
+
+    private fun listed(db: SQLiteDatabase, location: LibraryLocation): Boolean =
+        db.query("configured_libraries", arrayOf("position"), "backend = ? AND location_key = ?", locationArgs(location),
+            null, null, null).use { it.moveToFirst() }
+
+    internal fun addition(db: SQLiteDatabase): LibraryAddition? = db.query("library_addition", null, "singleton = 1", null, null, null, null).use {
+        if (!it.moveToFirst()) null else {
+            val backend = LocationKeys.backend(it.text("backend"))
+            LibraryAddition(UUID.fromString(it.text("token")), backend, it.optionalText("authorization_id")?.let(UUID::fromString),
+                it.optionalText("location_key")?.let { key -> LocationKeys.decode(backend, key) },
+                it.optionalText("display_name"), it.optionalText("access_key"))
         }
     }
 
@@ -113,6 +225,22 @@ class ApplicationStateRepository(
     suspend fun setStartupEnabled(enabled: Boolean): Unit = withContext(ioDispatcher) {
         transaction {
             update("application_settings", ContentValues().apply { put("startup_sync", if (enabled) 1 else 0) },
+                "singleton = 1", null)
+        }
+    }
+
+    /** Global R24 format order, highest first; formats it omits follow by name. Survives cache cleanup. */
+    suspend fun formatPriority(): List<BookFormat> = withContext(ioDispatcher) {
+        database.readableDatabase.rawQuery("SELECT format_priority FROM application_settings WHERE singleton = 1", null).use {
+            if (!it.moveToFirst()) return@use emptyList()
+            it.getString(0).split(',').filter { name -> name.isNotEmpty() }.map(BookFormat::parse)
+        }
+    }
+
+    suspend fun setFormatPriority(order: List<BookFormat>): Unit = withContext(ioDispatcher) {
+        require(order.distinct().size == order.size)
+        transaction {
+            update("application_settings", ContentValues().apply { put("format_priority", order.joinToString(",") { it.value }) },
                 "singleton = 1", null)
         }
     }
@@ -247,26 +375,9 @@ class ApplicationStateRepository(
         ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.copy()) } }
     }
 
-    // Called only by the local authorization adapter, itself confined to its I/O dispatcher.
-    internal fun localTreeUri(): String? = database.readableDatabase.rawQuery("SELECT tree_uri FROM local_authorization WHERE singleton = 1", null).use {
-        if (it.moveToFirst()) it.getString(0) else null
-    }
-
-    internal fun saveLocalSelection(treeUri: String, location: LibraryLocation.Local) {
-        transaction {
-            execSQL("INSERT INTO local_authorization(singleton, tree_uri) VALUES(1, ?) ON CONFLICT(singleton) DO UPDATE SET tree_uri = excluded.tree_uri", arrayOf(treeUri))
-            selectInTransaction(this, location)
-        }
-    }
-
-    /** One-time bridge from legacy local-directory preferences; never overwrites a newer current selection. */
-    internal fun importLocalAuthorization(treeUri: String, location: LibraryLocation.Local) {
-        transaction {
-            if (localTreeUri() == null) {
-                execSQL("INSERT INTO local_authorization(singleton, tree_uri) VALUES(1, ?)", arrayOf(treeUri))
-                if (current(this) == null) selectInTransaction(this, location)
-            }
-        }
+    suspend fun countCopies(libraryId: LibraryId): Int = withContext(ioDispatcher) {
+        database.readableDatabase.rawQuery("SELECT COUNT(*) FROM downloaded_copies WHERE library_id = ?",
+            arrayOf(libraryId.value.toString())).use { if (it.moveToFirst()) it.getInt(0) else 0 }
     }
 
     internal fun selectInTransaction(db: SQLiteDatabase, location: LibraryLocation): LibrarySelection {

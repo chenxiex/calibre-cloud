@@ -36,7 +36,7 @@ class BackgroundLifecycleAcceptanceTest {
         dependencies.taskQueue.executionLock.withLock {
             val selected = requireNotNull(dependencies.state.current())
             assertTrue("Only the authorized SAF fixture is eligible", selected.location is LibraryLocation.Local)
-            val tree = requireNotNull(dependencies.state.localTreeUri())
+            val tree = requireNotNull(dependencies.state.accessKey(requireNotNull(selected.location)))
             assertTrue("Only the step 09 dedicated library-a tree is eligible",
                 Uri.decode(tree.toString()).endsWith("calibre-step09-acceptance-20261007/library-a"))
             val imported = requireNotNull(dependencies.metadata.currentImport())

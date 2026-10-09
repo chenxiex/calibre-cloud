@@ -1,5 +1,6 @@
 package io.github.chenxiex.calibrecloud.ui
 
+import androidx.compose.ui.test.assertCountEquals
 import android.graphics.Bitmap
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Box
@@ -145,8 +146,11 @@ class LibraryScreenTest {
             override suspend fun wake() {}
         }
         return LibraryViewModel({ selection }, LibraryQueryService(imports, LibraryCopies { copies }, Dispatchers.Default), covers, emptyFlow(),
-            history, batch)
+            history, batch, syncState = { sync })
     }
+
+    /** The unfinished library sync the model reports for the selection. */
+    @Volatile private var sync: TaskState? = null
 
     /** Records batch submissions; removal plans cover one EPUB copy per book. */
     private val batch = object : LibraryBatch {
@@ -315,7 +319,7 @@ class LibraryScreenTest {
         show(model, openMore = { targets += it })
         awaitTag("library_open_settings")
         compose.onNodeWithTag("library_open_settings").performClick()
-        assertEquals(listOf(MoreTarget.LOCAL_AUTHORIZATION), targets)
+        assertEquals(listOf(MoreTarget.LOCATION), targets)
 
         selection = LibrarySelection(token, identity.location, identity, BackendKind.ONEDRIVE)
         index = null
@@ -323,7 +327,16 @@ class LibraryScreenTest {
         awaitTag("library_sync")
         compose.onNodeWithTag("library_sync").performClick()
         compose.onNodeWithTag("library_downloaded_files").performClick()
-        assertEquals(listOf(MoreTarget.LOCAL_AUTHORIZATION, MoreTarget.ONEDRIVE_TASKS, MoreTarget.DOWNLOAD_LIST), targets)
+        assertEquals(listOf(MoreTarget.LOCATION, MoreTarget.SYNC, MoreTarget.DOWNLOAD_LIST), targets)
+
+        // The first sync of a newly added library is under way: no second sync is offered.
+        sync = TaskState.Queued
+        compose.runOnIdle { model.refresh() }
+        awaitTag("library_sync_progress")
+        compose.onNodeWithText("正在同步书库元数据，完成后自动显示书籍。").assertExists()
+        compose.onAllNodesWithTag("library_sync").assertCountEquals(0)
+        compose.onNodeWithTag("library_sync_progress").performClick()
+        assertEquals(MoreTarget.SYNC, targets.last())
     }
 
     @Test
@@ -627,13 +640,13 @@ class LibraryScreenTest {
     fun bottomBarSwitchesBetweenLibraryAndMoreWithoutLosingTheLibraryPosition() {
         library((1..30).map { book(it) })
         val model = model()
-        compose.setContent { MainScreen(model, OpenViewModel(opening), { LaunchOutcome.STARTED }) { page, _ -> Text("更多页 $page") } }
+        compose.setContent { MainScreen(model, OpenViewModel(opening), { LaunchOutcome.STARTED }) { _, _, _ -> Text("更多页") } }
         awaitTag("library_page_status")
         compose.onNodeWithTag("library_next_page").performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("book_30").fetchSemanticsNodes().isEmpty() }
         compose.onNodeWithTag("nav_library").assertIsSelected()
         compose.onNodeWithTag("nav_more").assertIsNotSelected().performClick()
-        compose.onNodeWithText("更多页 0").assertExists()
+        compose.onNodeWithText("更多页").assertExists()
         compose.onNodeWithTag("nav_more").assertIsSelected()
         compose.onNodeWithTag("library_page_status").assertDoesNotExist()
         compose.onNodeWithTag("nav_library").performClick()
@@ -711,7 +724,7 @@ class LibraryScreenTest {
         val launched = mutableListOf<CopyKey>()
         val open = OpenViewModel(opening)
         compose.setContent {
-            MainScreen(model(), open, { launched += it.copy.key; LaunchOutcome.STARTED }) { page, _ -> Text("更多页 $page") }
+            MainScreen(model(), open, { launched += it.copy.key; LaunchOutcome.STARTED }) { _, _, _ -> Text("更多页") }
         }
         awaitTag("book_1")
         compose.onNodeWithTag("nav_last_opened").assertDoesNotExist()
@@ -732,8 +745,8 @@ class LibraryScreenTest {
         val launched = mutableListOf<CopyKey>()
         val notices = mutableListOf<OpenNotice>()
         compose.setContent {
-            MainScreen(model(), OpenViewModel(opening), { launched += it.copy.key; LaunchOutcome.STARTED }, { notices += it }) { page, _ ->
-                Text("更多页 $page")
+            MainScreen(model(), OpenViewModel(opening), { launched += it.copy.key; LaunchOutcome.STARTED }, { notices += it }) { _, _, _ ->
+                Text("更多页")
             }
         }
         awaitTag("book_1")
@@ -760,7 +773,7 @@ class LibraryScreenTest {
         library(listOf(book(1), book(2)))
         copies = listOf(copyOf(key(2), "书籍2"))
         compose.setContent {
-            MainScreen(model(), OpenViewModel(opening), { LaunchOutcome.STARTED }) { page, _ -> Text("更多页 $page") }
+            MainScreen(model(), OpenViewModel(opening), { LaunchOutcome.STARTED }) { _, _, _ -> Text("更多页") }
         }
         awaitTag("book_1")
         compose.onNode(hasTestTag("download_mark") and hasAnyAncestor(hasTestTag("book_2")), useUnmergedTree = true).assertExists()
@@ -780,7 +793,7 @@ class LibraryScreenTest {
         // Built once, as the activity's view model is: a model built in composition would collect anew each time.
         val library = model()
         val open = OpenViewModel(opening)
-        compose.setContent { MainScreen(library, open, { LaunchOutcome.STARTED }) { page, _ -> Text("更多页 $page") } }
+        compose.setContent { MainScreen(library, open, { LaunchOutcome.STARTED }) { _, _, _ -> Text("更多页") } }
         awaitTag("download_progress_2")
         compose.onNodeWithTag("download_progress_2").assert(hasContentDescription("取消下载《书籍2》"))
         compose.onNodeWithTag("download_progress_1").assertDoesNotExist()
@@ -796,7 +809,7 @@ class LibraryScreenTest {
         var attempts = 0
         val notices = mutableListOf<OpenNotice>()
         compose.setContent {
-            MainScreen(model(), OpenViewModel(opening), { attempts++; LaunchOutcome.NO_APP }, { notices += it }) { page, _ -> Text("更多页 $page") }
+            MainScreen(model(), OpenViewModel(opening), { attempts++; LaunchOutcome.NO_APP }, { notices += it }) { _, _, _ -> Text("更多页") }
         }
         awaitTag("book_1")
         compose.onNodeWithTag("book_1").performClick()
@@ -914,7 +927,7 @@ class LibraryScreenTest {
         val model = model()
         val notices = mutableListOf<BatchNotice>()
         compose.setContent {
-            MainScreen(model, OpenViewModel(opening), { LaunchOutcome.STARTED }, notifyBatch = { notices += it }) { page, _ -> Text("更多页 $page") }
+            MainScreen(model, OpenViewModel(opening), { LaunchOutcome.STARTED }, notifyBatch = { notices += it }) { _, _, _ -> Text("更多页") }
         }
         awaitTag("book_3")
         longPress("book_1")

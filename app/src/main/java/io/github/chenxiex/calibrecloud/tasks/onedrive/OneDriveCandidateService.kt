@@ -62,7 +62,11 @@ class OneDriveBrowseStore(private val directory: File) {
     }
 }
 
-/** Root selection submission/restoration only; all Graph access is owned by the registered handler. */
+/**
+ * Root selection of the OneDrive library being added: submission and restoration only; all Graph
+ * access is owned by the registered handler. Listings are bound to the addition and its login session;
+ * nothing here changes the current library.
+ */
 class OneDriveCandidateService(
     private val state: ApplicationStateRepository,
     private val authorization: OneDriveAuthorization,
@@ -70,27 +74,31 @@ class OneDriveCandidateService(
     val coordinator: TaskCoordinator,
     private val results: OneDriveBrowseStore,
 ) {
+    /**
+     * Lists [parentItemId] (the drive root when null) for the OneDrive addition. A login that changed
+     * since the addition began starts the addition again under the new session; null without one.
+     */
     suspend fun browse(parentItemId: String? = null): TaskId? {
         val session = authorization.sessionId() ?: return null
-        val selected = state.current()
-        val context = if (selected?.backend == BackendKind.ONEDRIVE && selected.authorizationId == session &&
-            selected.location == null) CandidateContext(selected.token, BackendKind.ONEDRIVE, session)
-            else state.beginCandidate(BackendKind.ONEDRIVE, session)
+        val addition = state.addition()?.takeIf { it.backend == BackendKind.ONEDRIVE } ?: return null
+        val context = addition.context?.takeIf { it.authorizationId == session }
+            ?: state.beginAddition(BackendKind.ONEDRIVE, session).first.context!!
         return submit(TaskRequest.CandidateConfiguration(context, OneDriveCandidateTaskHandler.BROWSE, parentItemId))
     }
 
+    /** Records the listed directory [itemId] (the shown directory or one of its children) as the addition's root. */
     suspend fun choose(itemId: String): Boolean {
-        val selected = state.current() ?: return false
+        val addition = state.addition() ?: return false
         val session = authorization.sessionId() ?: return false
-        if (selected.authorizationId != session) return false
+        if (addition.authorizationId != session) return false
         val result = currentPage() ?: return false
-        if (itemId != result.parentItemId && result.items.none { it.id == itemId }) return false
-        val location = result.location.copy(rootItemId = itemId)
+        val name = when (itemId) {
+            result.parentItemId -> result.directoryName
+            else -> result.items.firstOrNull { it.id == itemId }?.name ?: return false
+        }
         // Choosing a root is the explicit selection boundary; directory navigation never resolves it.
-        return state.chooseCandidate(CandidateContext(selected.token, BackendKind.ONEDRIVE, session), location) != null
+        return state.chooseAddition(addition.token, result.location.copy(rootItemId = itemId), name.ifEmpty { null }, null).isSuccess
     }
-
-    suspend fun currentLocation() = state.current()?.location as? LibraryLocation.OneDrive
 
     suspend fun currentRecord(): TaskRecord? = entries().maxByOrNull { it.scheduling.sequence.value }
 
@@ -103,12 +111,12 @@ class OneDriveCandidateService(
     }
 
     private suspend fun entries(): List<TaskRecord> {
-        val selected = state.current() ?: return emptyList()
+        val addition = state.addition() ?: return emptyList()
         val session = authorization.sessionId() ?: return emptyList()
-        if (selected.backend != BackendKind.ONEDRIVE || selected.authorizationId != session) return emptyList()
+        if (addition.backend != BackendKind.ONEDRIVE || addition.authorizationId != session) return emptyList()
         return queue.list().map { it.record }.filter {
             val request = it.submission.request as? TaskRequest.CandidateConfiguration
-            request?.context?.selectionToken == selected.token && request.context.authorizationId == session
+            request?.context?.selectionToken == addition.token && request.context.authorizationId == session
         }
     }
 

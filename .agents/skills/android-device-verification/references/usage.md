@@ -5,7 +5,7 @@
 ```bash
 adb devices -l
 python3 .agents/skills/android-device-verification/scripts/android_ui.py --help
-python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL inspect --selector '{"package":"io.github.chenxiex.calibrecloud.debug","text":"选择／重新授权目录"}'
+python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL inspect --selector '{"package":"io.github.chenxiex.calibrecloud.debug","resource_id":"more_libraries"}'
 ```
 
 ## 定位与等待
@@ -20,7 +20,7 @@ helper 自动找可点击父节点，并选择原目标与该父节点交集中�
 
 ```bash
 python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL long-press --hold-ms 1000 --selector '{"package":"io.github.chenxiex.calibrecloud.debug","resource_id":"book_17"}' --precondition '{"package":"io.github.chenxiex.calibrecloud.debug","resource_id":"library_title"}' --postcondition '{"package":"io.github.chenxiex.calibrecloud.debug","resource_id":"selection_top_bar"}'
-python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL wait --selector '{"package":"io.github.chenxiex.calibrecloud.debug","text":"目录已授权（读写）。导入状态见“当前书库与导入”页。"}' --timeout 15
+python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL wait --selector '{"package":"io.github.chenxiex.calibrecloud.debug","resource_id":"local_status","text":"目录已授权（读写），可以同步元数据。"}' --timeout 15
 python3 .agents/skills/android-device-verification/scripts/android_ui.py --serial SERIAL --artifacts app/build/verification/ui-helper/run-01 flow --elements-only --file app/build/verification/ui-helper/saf-flow.json
 ```
 
@@ -47,14 +47,16 @@ python3 .agents/skills/android-device-verification/scripts/android_ui.py --seria
             "action": "tap",
             "precondition": {"package": "ACTUAL_DIALOG_PACKAGE", "text": "EXACT_CONFIRMATION_PROMPT_FOR_DEBUG_APP_AND_TEST_FOLDER"},
             "selector": {"package": "ACTUAL_DIALOG_PACKAGE", "resource_id": "ACTUAL_ALLOW_RESOURCE_ID", "text": "ACTUAL_ALLOW_TEXT"},
-            "postcondition": {"package": "io.github.chenxiex.calibrecloud.debug", "text": "目录已授权（读写）。导入状态见“当前书库与导入”页。"},
+            "postcondition": {"package": "io.github.chenxiex.calibrecloud.debug", "resource_id": "wizard_confirm_directory", "text": "目录：EXACT_TEST_FOLDER_TITLE"},
             "timeout": 15
         }
     ]
 }
 ```
 
-这是“已导航到测试目录后的 SAF 确认”模板，所有 `ACTUAL_*` 和 `EXACT_*` 必须换成本轮元素查询取得的值，不能直接执行。不要假设厂商选择器的包名、语言或 ID 一样。运行前核对专用测试副本的提供方、完整目录位置和当前 debug 应用，确认弹窗也需核对接收方和范围；仅匹配末级目录名或“允许”不足以证明选择范围。页面未提供足够范围信息时交回主 agent，不让轻量角色猜测。确认返回应用后，再用现有授权测试／状态查询确认真实持久授权和所选位置。这段流程不负责登录、猜测目录或准备测试数据。
+应用内页面按资源 ID 定位：底栏 `nav_more`，更多菜单项 `more_<名称>`（如 `more_libraries`、`more_sync`、`more_downloads`），图书馆空状态的 `library_sync`（无同步时）／`library_sync_progress`（同步未完成时），书库页顶栏加号 `libraries_add` 与每行 `library_<键>` 及其 `_status`／`_reauthorize`／`_delete`，添加向导标题 `more_title`、`wizard_type_local`／`wizard_type_onedrive`、`wizard_local_choose`、`wizard_onedrive_login`／`wizard_use_current`／`wizard_other_account`，向导返回（第 1 步取消、之后上一步）为顶栏 `more_back`，完成为顶栏 `wizard_complete`，目录行 `directory_<项目 ID>`、目录栏的刷新 `onedrive_directory_reload`、返回上级 `onedrive_directory_up` 与选择当前目录 `onedrive_directory_choose`、加载图标 `directory_loading`，各分页区的翻页按钮 `<前缀>_next_page` 等；完整约定见[界面约束](../../../../app/src/main/java/io/github/chenxiex/calibrecloud/ui/AGENTS.md)，不按页码或位置定位。
+
+这是“添加向导打开系统选择器并已导航到测试目录后的 SAF 确认”模板，成功后应用回到向导第 3 步；所有 `ACTUAL_*` 和 `EXACT_*` 必须换成本轮元素查询取得的值，不能直接执行。不要假设厂商选择器的包名、语言或 ID 一样。运行前核对专用测试副本的提供方、完整目录位置和当前 debug 应用，确认弹窗也需核对接收方和范围；仅匹配末级目录名或“允许”不足以证明选择范围。页面未提供足够范围信息时交回主 agent，不让轻量角色猜测。确认返回应用后，再用现有授权测试／状态查询确认真实持久授权和所选位置。这段流程不负责登录、猜测目录或准备测试数据。
 
 ## 超时与恢复
 

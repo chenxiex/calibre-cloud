@@ -54,14 +54,15 @@ class OneDriveAuthorization(
         }
     }
 
-    suspend fun begin(): Intent? = mutex.withLock {
+    /** [chooseAccount] makes the login page ask which account to use instead of reusing the browser's one. */
+    suspend fun begin(chooseAccount: Boolean = false): Intent? = mutex.withLock {
         if (!loaded) recover()
         val config = configuration ?: return@withLock null
         try {
             val request = AuthorizationRequest.Builder(
                 AuthorizationServiceConfiguration(config.authorizationEndpoint.toUri(), config.tokenEndpoint.toUri()),
                 config.clientId, ResponseTypeValues.CODE, config.redirectUri.toUri(),
-            ).setScopes(config.scopes).build()
+            ).setScopes(config.scopes).apply { if (chooseAccount) setPrompt(AuthorizationRequest.Prompt.SELECT_ACCOUNT) }.build()
             val intent = withContext(Dispatchers.IO) { platform.browserIntent(request) }
                 ?: run { issue = LoginIssue.NO_BROWSER; return@withLock null }
             pending = request

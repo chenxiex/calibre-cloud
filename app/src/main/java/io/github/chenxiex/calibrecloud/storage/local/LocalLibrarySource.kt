@@ -11,8 +11,8 @@ import java.util.UUID
  * [LibrarySource] over a granted SAF tree. The version is the SHA-256 of all bytes, so it is also the
  * content digest and is read again before publication. Every downloaded copy is checked after each
  * import, a missing path is missing at once, nothing needs a network, and a lost grant waits for the
- * directory to be granted again. [treeUri] returns the grant of [LibraryLocation.Local] while it is the
- * current selection, otherwise null.
+ * directory to be granted again. [treeUri] returns the grant the library at [LibraryLocation.Local] was
+ * listed with, or null when it is not listed.
  */
 class LocalLibrarySource(
     private val source: LocalSourceBackend,

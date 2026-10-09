@@ -29,7 +29,7 @@ class CleanupViewModel(private val maintenance: CacheMaintenance) : ViewModel() 
         private set
 
     fun preview(kind: CleanupKind) {
-        if (busy || kind == CleanupKind.COPIES) return
+        if (busy || kind == CleanupKind.COPIES || kind == CleanupKind.LIBRARY) return
         busy = true
         result = null
         plan = null
@@ -38,7 +38,7 @@ class CleanupViewModel(private val maintenance: CacheMaintenance) : ViewModel() 
                 plan = when (kind) {
                     CleanupKind.METADATA -> maintenance.previewMetadata()
                     CleanupKind.OTHER_LIBRARIES -> maintenance.previewOtherLibraries()
-                    CleanupKind.COPIES -> null
+                    CleanupKind.COPIES, CleanupKind.LIBRARY -> null
                 }
                 if (plan == null) result = CleanupResult.UNAVAILABLE
             } catch (failure: CancellationException) {

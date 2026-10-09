@@ -3,6 +3,7 @@ package io.github.chenxiex.calibrecloud.tasks
 import io.github.chenxiex.calibrecloud.auth.LoginIssue
 import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
+import io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus
 import io.github.chenxiex.calibrecloud.tasks.api.LibraryAuthorizations
 import io.github.chenxiex.calibrecloud.tasks.local.LocalLibraryAuthorization
 import io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveLibraryAuthorization
@@ -16,7 +17,9 @@ object TestAuthorizations {
         issue: () -> LoginIssue? = { null },
         localGranted: suspend () -> Boolean = { true },
     ): LibraryAuthorizations {
-        val local = LocalLibraryAuthorization(localGranted)
+        val local = LocalLibraryAuthorization({
+            if (localGranted()) DirectoryAuthorizationStatus.AUTHORIZED else DirectoryAuthorizationStatus.REAUTHORIZATION_REQUIRED
+        }) { null }
         val oneDrive = OneDriveLibraryAuthorization(state, sessionId, issue)
         return LibraryAuthorizations { backend ->
             when (backend) {

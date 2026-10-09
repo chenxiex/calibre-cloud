@@ -5,11 +5,9 @@ import android.content.Context
 import io.github.chenxiex.calibrecloud.files.PrivateBookFiles
 import io.github.chenxiex.calibrecloud.state.ApplicationStateDatabase
 import io.github.chenxiex.calibrecloud.state.ApplicationStateRepository
-import io.github.chenxiex.calibrecloud.state.DatabaseLocalDirectoryConfiguration
 import io.github.chenxiex.calibrecloud.storage.cache.PrivateCopyReader
 import io.github.chenxiex.calibrecloud.storage.local.AndroidDirectoryPermissions
 import io.github.chenxiex.calibrecloud.storage.local.LocalDirectoryAuthorization
-import io.github.chenxiex.calibrecloud.storage.local.PreferencesLocalDirectoryConfiguration
 import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskCoordinator
 import io.github.chenxiex.calibrecloud.storage.local.AndroidLocalDocumentAccess
@@ -62,9 +60,7 @@ class ApplicationDependencies(context: Context) {
     }
     /** The only place that maps a backend kind to its implementation of the common source contract. */
     val librarySources: io.github.chenxiex.calibrecloud.storage.api.LibrarySources by lazy {
-        val local = io.github.chenxiex.calibrecloud.storage.local.LocalLibrarySource(localBackend) { location ->
-            if (state.current()?.location == location) state.localTreeUri() else null
-        }
+        val local = io.github.chenxiex.calibrecloud.storage.local.LocalLibrarySource(localBackend) { location -> state.accessKey(location) }
         val oneDrive = io.github.chenxiex.calibrecloud.storage.onedrive.OneDriveLibrarySource(oneDriveBackend)
         io.github.chenxiex.calibrecloud.storage.api.LibrarySources { backend ->
             when (backend) {
@@ -75,12 +71,11 @@ class ApplicationDependencies(context: Context) {
     }
     /** The only place that maps a backend kind to its authorization as library syncs see it. */
     val libraryAuthorizations: io.github.chenxiex.calibrecloud.tasks.api.LibraryAuthorizations by lazy {
-        val local = io.github.chenxiex.calibrecloud.tasks.local.LocalLibraryAuthorization {
-            localAuthorization.restore().status in setOf(io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus.AUTHORIZED,
-                io.github.chenxiex.calibrecloud.storage.local.DirectoryAuthorizationStatus.READ_ONLY)
+        val local = io.github.chenxiex.calibrecloud.tasks.local.LocalLibraryAuthorization(localAuthorization::status) {
+            state.current()?.location?.takeIf { it.backend == io.github.chenxiex.calibrecloud.model.BackendKind.LOCAL }?.let { state.accessKey(it) }
         }
         val oneDrive = io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveLibraryAuthorization(state,
-            { oneDriveAuthorization.sessionId() }, { oneDriveAuthorization.issue })
+            { oneDriveAuthorization.sessionId() }, { oneDriveAuthorization.issue }, oneDriveBackend::signedInAccount)
         io.github.chenxiex.calibrecloud.tasks.api.LibraryAuthorizations { backend ->
             when (backend) {
                 io.github.chenxiex.calibrecloud.model.BackendKind.LOCAL -> local
@@ -119,12 +114,7 @@ class ApplicationDependencies(context: Context) {
     val bookCatalog by lazy { io.github.chenxiex.calibrecloud.files.StateBookCatalog(state, applicationContext.filesDir) }
     val lastOpened by lazy { io.github.chenxiex.calibrecloud.state.LastOpenedRepository(database, Dispatchers.IO) }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }
-    val localConfiguration by lazy {
-        DatabaseLocalDirectoryConfiguration(state, localPermissions, PreferencesLocalDirectoryConfiguration(applicationContext))
-    }
-    val localAuthorization by lazy {
-        LocalDirectoryAuthorization(localPermissions, localConfiguration, Dispatchers.IO)
-    }
+    val localAuthorization by lazy { LocalDirectoryAuthorization(localPermissions, Dispatchers.IO) }
 }
 
 class CalibreCloudApplication : Application(), androidx.work.Configuration.Provider {

@@ -55,8 +55,22 @@ object StateSchemaHistory {
         calibre_recorded INTEGER NOT NULL DEFAULT 0, calibre_modified TEXT, calibre_size INTEGER,
         PRIMARY KEY(library_id, source_id, source_uuid, format), UNIQUE(library_id, file_generation))"""
 
+    private const val SETTINGS_V10 = """CREATE TABLE application_settings (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        startup_sync INTEGER NOT NULL DEFAULT 0 CHECK(startup_sync IN (0, 1)))"""
+
     /** Key: a version; value: turns that version's schema into the previous version's. */
     private val reversals: Map<Int, (SQLiteDatabase) -> Unit> = mapOf(
+        12 to { db ->
+            // Version 11 kept one local grant, that of the selected local directory.
+            db.execSQL("CREATE TABLE local_authorization (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), tree_uri TEXT NOT NULL)")
+            db.execSQL("""INSERT INTO local_authorization(singleton, tree_uri) SELECT 1, l.access_key FROM configured_libraries l
+                JOIN current_selection s ON s.backend = l.backend AND s.location_key = l.location_key
+                WHERE l.backend = 'local' AND l.access_key IS NOT NULL""")
+            db.execSQL("DROP TABLE configured_libraries")
+            db.execSQL("DROP TABLE library_addition")
+        },
+        11 to { db -> rebuild(db, "application_settings", SETTINGS_V10) },
         10 to { db ->
             locationColumns(db, "library_bindings", BINDINGS_V9)
             db.execSQL("CREATE INDEX binding_location ON library_bindings(backend, authority, root_id, account_id, drive_id)")
