@@ -4,9 +4,16 @@ import io.github.chenxiex.calibrecloud.model.BackendKind
 import io.github.chenxiex.calibrecloud.model.FileVersion
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
+import io.github.chenxiex.calibrecloud.storage.api.PushJournal
+import io.github.chenxiex.calibrecloud.storage.api.PushOutcome
+import io.github.chenxiex.calibrecloud.storage.api.SourceFailure
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
+import io.github.chenxiex.calibrecloud.storage.api.WriteBlock
 import io.github.chenxiex.calibrecloud.storage.local.SnapshotValidator
+import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
+import java.security.MessageDigest
 import java.net.URLDecoder
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -72,7 +79,7 @@ class OneDriveSourceBackendTest {
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(code).message("fixture").body(data.toResponseBody()).apply {
                 headers.forEach { (name, value) -> header(name, value) }
             }.build()
-        private fun json(request: Request, value: Map<String, Any?>): Response {
+        fun json(request: Request, value: Map<String, Any?>): Response {
             val marker = UUID.randomUUID().toString()
             decoded[marker] = value
             return response(request, data = marker)
@@ -628,6 +635,167 @@ class OneDriveSourceBackendTest {
             }
         }
     }
+
+    @Test fun pushUploadsTheStagedFileOnlyIfTheBaseCTagStillMatches() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val staged = staged()
+        val bodies = mutableListOf<String>()
+        fixture.onRequest = { request ->
+            if (request.method != "PUT") null else {
+                bodies.add(Buffer().also { request.body!!.writeTo(it) }.readUtf8())
+                uploaded(fixture, request, staged)
+            }
+        }
+        val result = backend.replaceDatabase(location, staged, sha(staged), base)
+        assertEquals(FileVersion(BackendKind.ONEDRIVE, "content-2"), (result as OneDriveSourceResult.Available).value)
+        assertEquals(listOf("GET /v1.0/drives/drive/items/root:/metadata.db", "PUT /v1.0/drives/drive/items/db/content"),
+            fixture.requests.map { "${it.method} ${it.url.encodedPath}" })
+        val upload = fixture.requests.last()
+        assertEquals("content-1", upload.header("If-Match"))
+        assertEquals("Bearer old", upload.header("Authorization"))
+        assertEquals(listOf("staged database"), bodies)
+        assertEquals(0, fixture.contentReads)
+    }
+
+    @Test fun aChangedBaseIsAConflictWithoutUploading() = runTest {
+        val fixture = Fixture()
+        fixture.file("metadata.db", "db", "another writer", tag = "content-9")
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val staged = staged()
+        assertNull((backend.replaceDatabase(location, staged, sha(staged), base) as OneDriveSourceResult.Available).value)
+        assertEquals(listOf("GET"), fixture.requests.map { it.method })
+    }
+
+    @Test fun aRejectedPreconditionOrReplacedItemIsAConflict() = runTest {
+        for (code in listOf(412, 409, 404)) {
+            val fixture = Fixture()
+            val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+            fixture.onRequest = { request -> if (request.method == "PUT") fixture.response(request, code) else null }
+            val staged = staged()
+            assertNull("status $code", (backend.replaceDatabase(location, staged, sha(staged), base) as OneDriveSourceResult.Available).value)
+            assertEquals(listOf("GET", "PUT"), fixture.requests.map { it.method })
+        }
+    }
+
+    @Test fun anUnknownUploadResultIsTransientSoTheWholeRoundRunsAgain() = runTest {
+        val cases = listOf<Triple<String, (Fixture, Request, File) -> Response, Pair<StorageErrorKind, Long?>>>(
+            Triple("429", { f, r, _ -> f.response(r, 429, headers = mapOf("Retry-After" to "7")) }, StorageErrorKind.THROTTLED to 7_000L),
+            Triple("503", { f, r, _ -> f.response(r, 503) }, StorageErrorKind.THROTTLED to 30_000L),
+            Triple("interrupted", { _, _, _ -> throw IOException("connection reset") }, StorageErrorKind.NO_NETWORK to 30_000L),
+            Triple("no cTag", { f, r, file -> f.json(r, uploadedItem(f, file) - "cTag") }, StorageErrorKind.UNSUPPORTED_OPERATION to null),
+            Triple("size", { f, r, file -> f.json(r, uploadedItem(f, file) + ("size" to file.length() - 1)) }, StorageErrorKind.UNSUPPORTED_OPERATION to null),
+            Triple("item", { f, r, file -> f.json(r, uploadedItem(f, file) + ("id" to "other")) }, StorageErrorKind.UNSUPPORTED_OPERATION to null),
+            Triple("not json", { f, r, _ -> f.response(r, 200, "not json") }, StorageErrorKind.UNSUPPORTED_OPERATION to null),
+        )
+        for ((name, respond, expected) in cases) {
+            val fixture = Fixture()
+            val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+            val staged = staged()
+            fixture.onRequest = { request -> if (request.method == "PUT") respond(fixture, request, staged) else null }
+            val failure = backend.replaceDatabase(location, staged, sha(staged), base) as OneDriveSourceResult.Failed
+            assertEquals(name, expected.first, failure.error.kind)
+            assertTrue(name, failure.transient)
+            assertEquals(name, expected.second, failure.retryDelayMillis)
+            assertEquals(name, listOf("GET", "PUT"), fixture.requests.map { it.method })
+        }
+    }
+
+    @Test fun anExpiredTokenIsRefreshedOnceAndTheSameUploadSentAgain() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val staged = staged()
+        val bodies = mutableListOf<String>()
+        fixture.onRequest = { request ->
+            if (request.method != "PUT") null else {
+                bodies.add(Buffer().also { request.body!!.writeTo(it) }.readUtf8())
+                if (request.header("Authorization") == "Bearer old") fixture.response(request, 401) else uploaded(fixture, request, staged)
+            }
+        }
+        assertTrue(backend.replaceDatabase(location, staged, sha(staged), base) is OneDriveSourceResult.Available)
+        assertEquals(listOf("staged database", "staged database"), bodies)
+        assertEquals(listOf("content-1", "content-1"), fixture.requests.filter { it.method == "PUT" }.map { it.header("If-Match") })
+
+        val denied = Fixture()
+        val deniedBackend = backend(denied, StandardTestDispatcher(testScheduler))
+        denied.onRequest = { request -> if (request.method == "PUT") denied.response(request, 403) else null }
+        val failure = deniedBackend.replaceDatabase(location, staged, sha(staged), base) as OneDriveSourceResult.Failed
+        assertEquals(StorageErrorKind.AUTHORIZATION_EXPIRED, failure.error.kind)
+        assertFalse(failure.transient)
+    }
+
+    @Test fun nothingIsRequestedForAChangedStagedFileAnOversizedDatabaseOrAnotherAccount() = runTest {
+        val fixture = Fixture()
+        val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+        val staged = staged()
+        val digest = backend.replaceDatabase(location, staged, "0".repeat(64), base) as OneDriveSourceResult.Failed
+        assertEquals(StorageErrorKind.LOCAL_IO, digest.error.kind)
+        assertTrue(digest.transient)
+
+        val oversized = temporary.newFile().also { RandomAccessFile(it, "rw").use { file -> file.setLength(250L * 1024 * 1024 + 1) } }
+        val size = backend.replaceDatabase(location, oversized, "unused", base) as OneDriveSourceResult.Failed
+        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, size.error.kind)
+        assertFalse(size.transient)
+
+        fixture.subject = "another-subject"
+        assertEquals(StorageErrorKind.LOGIN_REQUIRED, failure(backend.replaceDatabase(location, staged, sha(staged), base)))
+        assertEquals(emptyList<Request>(), fixture.requests)
+    }
+
+    @Test fun writeCapabilityComparesTheSignedInAccountWithoutRequests() = runTest {
+        val fixture = Fixture()
+        val source = OneDriveLibrarySource(backend(fixture, StandardTestDispatcher(testScheduler)))
+        assertNull(source.writeCapability(location))
+        fixture.subject = "another-subject"
+        assertEquals(WriteBlock.AUTHORIZATION_REQUIRED, source.writeCapability(location))
+        fixture.subject = null
+        assertEquals(WriteBlock.AUTHORIZATION_REQUIRED, source.writeCapability(location))
+        assertEquals(emptyList<Request>(), fixture.requests)
+    }
+
+    /** Two rounds as the write handler runs them: the rejected push is followed by a new snapshot. */
+    @Test fun aConflictRoundFetchesTheLatestDatabaseBeforePushingAgain() = runTest {
+        val fixture = Fixture()
+        val source = OneDriveLibrarySource(backend(fixture, StandardTestDispatcher(testScheduler)))
+        val journal = object : PushJournal {
+            override suspend fun read(): String? = null
+            override suspend fun write(value: String?) = throw AssertionError("OneDrive keeps no journal")
+        }
+        val first = requireNotNull(source.acquireSnapshot(location, UUID.randomUUID(), null) {})
+        fixture.onRequest = { request ->
+            if (request.method != "PUT") null
+            else if (request.header("If-Match") == "content-1") {
+                // Another writer replaced metadata.db after this round's snapshot.
+                fixture.file("metadata.db", "db", "another writer", tag = "content-2")
+                fixture.response(request, 412)
+            } else fixture.json(request, uploadedItem(fixture, staged(), "content-3"))
+        }
+        val staged = staged()
+        assertEquals(PushOutcome.Conflict, source.pushDatabase(location, staged, sha(staged), first.version, journal))
+        fixture.requests.clear()
+        source.finishPendingPush(location, journal)
+        val second = requireNotNull(source.acquireSnapshot(location, UUID.randomUUID(), null) {})
+        assertEquals("another writer", second.file.readText())
+        assertEquals(PushOutcome.Pushed(FileVersion(BackendKind.ONEDRIVE, "content-3")),
+            source.pushDatabase(location, staged, sha(staged), second.version, journal))
+        assertEquals(listOf("GET metadata.db", "GET metadata.db-wal", "GET metadata.db-journal", "GET download",
+            "GET metadata.db", "PUT content"), fixture.requests.map { request ->
+                "${request.method} ${if (request.url.host == "download.example") "download" else request.url.pathSegments.last()}"
+            })
+        assertEquals("content-2", fixture.requests.last().header("If-Match"))
+
+        fixture.onRequest = { request -> if (request.method == "PUT") fixture.response(request, 500) else null }
+        val failure = try { source.pushDatabase(location, staged, sha(staged), second.version, journal); null } catch (error: SourceFailure) { error }
+        assertEquals(StorageErrorKind.THROTTLED, failure!!.error.kind)
+        assertTrue(failure.transient)
+    }
+
+    private val base = FileVersion(BackendKind.ONEDRIVE, "content-1")
+    private fun staged() = temporary.newFile().apply { writeText("staged database") }
+    private fun sha(file: File) = MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) }
+    private fun uploadedItem(fixture: Fixture, file: File, tag: String = "content-2") =
+        fixture.item("db", "metadata.db", "parent-of-db", false, tag = tag, size = file.length())
+    private fun uploaded(fixture: Fixture, request: Request, file: File) = fixture.json(request, uploadedItem(fixture, file))
 
     private fun assertPreserved(snapshot: OneDriveDatabaseSnapshot) {
         assertEquals("database", snapshot.file.readText())

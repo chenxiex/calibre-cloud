@@ -15,7 +15,8 @@ import java.util.UUID
  * lookup supplies the version, exact size and download URL of every later read, and a read is not
  * re-checked before publication (staleness until the next sync is permitted). A sync checks only
  * copies whose Calibre record changed, a missing path first resyncs once, operations need a network,
- * and a lost sign-in waits for the user to sign in again.
+ * and a lost sign-in waits for the user to sign in again. Read status is written back with one
+ * conditional upload ([OneDriveSourceBackend.replaceDatabase]); nothing needs finishing afterwards.
  */
 class OneDriveLibrarySource(private val source: OneDriveSourceBackend) : LibrarySource {
     override val backend = BackendKind.ONEDRIVE
@@ -57,11 +58,17 @@ class OneDriveLibrarySource(private val source: OneDriveSourceBackend) : Library
         control: suspend () -> Unit): SourceSnapshot? =
         source.acquireSnapshot(drive(location), candidateId, unchangedVersion, control).value()?.let { SourceSnapshot(it.file, it.version) }
 
-    /** Write-back arrives in a later step of phase 4; until then no library is writable. */
-    override suspend fun writeCapability(location: LibraryLocation) = WriteBlock.NOT_IMPLEMENTED
+    /**
+     * Writable while the library's account is signed in, compared locally without a request. A sign-in
+     * from before ID token subjects were stored cannot be compared and must sign in again.
+     */
+    override suspend fun writeCapability(location: LibraryLocation): WriteBlock? =
+        if (location is LibraryLocation.OneDrive && source.signedInAccount() == location.accountId) null else WriteBlock.AUTHORIZATION_REQUIRED
 
+    /** One upload either replaces metadata.db or nothing, so [journal] stays unused. */
     override suspend fun pushDatabase(location: LibraryLocation, staged: java.io.File, stagedSha256: String, base: FileVersion,
-        journal: PushJournal): PushOutcome = throw SourceFailure(StorageErrorKind.UNSUPPORTED_OPERATION)
+        journal: PushJournal): PushOutcome =
+        source.replaceDatabase(drive(location), staged, stagedSha256, base).value()?.let { PushOutcome.Pushed(it) } ?: PushOutcome.Conflict
 
     override suspend fun finishPendingPush(location: LibraryLocation, journal: PushJournal) {}
 

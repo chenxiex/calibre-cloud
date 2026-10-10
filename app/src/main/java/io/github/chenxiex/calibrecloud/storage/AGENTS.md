@@ -1,6 +1,6 @@
 # 存储开发约束
 
-本文件适用于 `storage/`；同时遵循 [Android 模块约束](../../../../../../../../AGENTS.md)。需求以 [spec.md](../../../../../../../../../spec.md) 的 R03–R07、R28、R31–R33 为准。当前已有持久下载清单与应用副本读取器，统一由应用依赖容器构造；[状态库约束](../state/AGENTS.md)定义候选位置、绑定与最小清单边界。本地只读 SAF 后端和候选快照任务已实现，[OneDrive 只读后端](onedrive/AGENTS.md) 已接入个人目录浏览、源内容与快照；完整元数据导入、书籍副本传输及导入后的已下载格式版本检查已实现。
+本文件适用于 `storage/`；同时遵循 [Android 模块约束](../../../../../../../../AGENTS.md)。需求以 [spec.md](../../../../../../../../../spec.md) 的 R03–R07、R28、R31–R33 为准。当前已有持久下载清单与应用副本读取器，统一由应用依赖容器构造；[状态库约束](../state/AGENTS.md)定义候选位置、绑定与最小清单边界。本地只读 SAF 后端和候选快照任务已实现，[OneDrive 后端](onedrive/AGENTS.md) 已接入个人目录浏览、源内容、快照与已读写回的条件上传；完整元数据导入、书籍副本传输及导入后的已下载格式版本检查已实现。
 
 ## 身份依赖
 
@@ -34,7 +34,7 @@
 
 按用户确认，只有以下两类按设计与具体后端绑定，不经统一接口：登录与目录授权本身（`auth/`、本地授权组件），以及选择书库根（OneDrive 目录浏览及其 `OneDriveCandidateTaskHandler`／`OneDriveCandidateService`、SAF 选择器）。选中根之后的同步、恢复与源访问都走统一接口。
 
-`CopyMaintenance` 仅声明精确副本移除和元数据清理，由 `CacheMaintenance` 实现。没有一般源上传／删除接口。唯一的源写入是已读写回：书籍与目标值保存在任务队列的变更列表中（见[任务约束](../tasks/AGENTS.md#已读写回任务)）。`writeCapability` 不联网，给出不可写原因 `WriteBlock`；`pushDatabase` 只在源仍为基底版本时替换 `metadata.db`，被拒返回 `PushOutcome.Conflict`，结果不明抛出可重试的 `SourceFailure`，不可暂停或取消；分步提交的后端在每步前把进度写入任务的 `PushJournal`，下一轮开始前由 `finishPendingPush` 收尾。无法确认归属的临时文件以 `LEFTOVER_FILES`（不重试）失败并留给用户处理。本地后端以三步重命名提交，见[本地约束](local/AGENTS.md#已读写回提交)；OneDrive 目前返回 `WriteBlock.NOT_IMPLEMENTED`、推送抛出 `UNSUPPORTED_OPERATION`，在第四阶段步骤 05 实现。
+`CopyMaintenance` 仅声明精确副本移除和元数据清理，由 `CacheMaintenance` 实现。没有一般源上传／删除接口。唯一的源写入是已读写回：书籍与目标值保存在任务队列的变更列表中（见[任务约束](../tasks/AGENTS.md#已读写回任务)）。`writeCapability` 不联网，给出不可写原因 `WriteBlock`；`pushDatabase` 只在源仍为基底版本时替换 `metadata.db`，被拒返回 `PushOutcome.Conflict`，结果不明抛出可重试的 `SourceFailure`，不可暂停或取消；分步提交的后端在每步前把进度写入任务的 `PushJournal`，下一轮开始前由 `finishPendingPush` 收尾。无法确认归属的临时文件以 `LEFTOVER_FILES`（不重试）失败并留给用户处理。本地后端以三步重命名提交，见[本地约束](local/AGENTS.md#已读写回提交)；OneDrive 以一次带 `If-Match` 的简单上传提交，见[OneDrive 约束](onedrive/AGENTS.md#已读写回提交)。
 
 文件工厂、书籍 provider 的提供范围、完整文件发布及只读授权规则见 [文件提供开发约束](../files/AGENTS.md)。
 

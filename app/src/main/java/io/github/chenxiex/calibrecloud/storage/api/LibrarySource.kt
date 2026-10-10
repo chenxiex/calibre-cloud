@@ -44,11 +44,11 @@ enum class Reauthorization { SIGN_IN, DIRECTORY_GRANT }
 
 /**
  * Why read status cannot be written back to a library (R15); shown where marking is disabled.
- * AUTHORIZATION_REQUIRED: the library must be granted again; READ_ONLY_GRANT: the grant lacks write
- * access; UNSUPPORTED_PROVIDER: the source cannot guarantee every operation the commit needs;
- * SOURCE_UNAVAILABLE: metadata.db cannot be reached now; NOT_IMPLEMENTED: the backend has no commit yet.
+ * AUTHORIZATION_REQUIRED: the library must be granted again, or its OneDrive account signed in again;
+ * READ_ONLY_GRANT: the grant lacks write access; UNSUPPORTED_PROVIDER: the source cannot guarantee every
+ * operation the commit needs; SOURCE_UNAVAILABLE: metadata.db cannot be reached now.
  */
-enum class WriteBlock { AUTHORIZATION_REQUIRED, READ_ONLY_GRANT, UNSUPPORTED_PROVIDER, SOURCE_UNAVAILABLE, NOT_IMPLEMENTED }
+enum class WriteBlock { AUTHORIZATION_REQUIRED, READ_ONLY_GRANT, UNSUPPORTED_PROVIDER, SOURCE_UNAVAILABLE }
 
 /** Result of a push whose version precondition was checked by the source. */
 sealed interface PushOutcome {

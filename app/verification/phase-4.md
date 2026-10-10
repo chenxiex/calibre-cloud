@@ -238,3 +238,54 @@ Gradle 结束后已卸载 debug 与测试包，设备上只保留正式应用（
 
 - 真实进程终止（`am kill`）后的重跑与界面路径在步骤 07 联验。
 - 用户共同验收尚未进行。
+
+## 步骤 05：OneDrive 带版本前提推送（2026-10-10）
+
+对应 R15 的 OneDrive 推送、AC04 的“推送被拒后重新获取最新数据库再写入、不覆盖他人修改”、AC09 的冲突分类与日志。规则见[OneDrive 约束](../src/main/java/io/github/chenxiex/calibrecloud/storage/onedrive/AGENTS.md#已读写回提交)。
+
+### 改动
+
+- `OneDriveSourceBackend.replaceDatabase`：核对暂存散列与 250 MB 简单上传上限，按路径取一次 `metadata.db`（cTag 已不等于基底即冲突、不上传），再以 `If-Match: <基底 cTag>` 对 item ID `PUT /content` 上传整个文件；412、409、404 为冲突，请求发出后的 IO 异常、429、5xx 与无法核对的 2xx 响应为可重试的结果不明；上传响应等待上限 120 秒。日志只有固定标签。
+- `OneDriveLibrarySource`：`writeCapability` 本地比较登录 subject 与书库账号（不一致或未登录为 `AUTHORIZATION_REQUIRED`），`pushDatabase` 委托上述方法，`finishPendingPush` 保持空操作。
+- `WriteBlock.NOT_IMPLEMENTED` 已无后端使用，删除。
+
+与计划的工程差异：取项目时 cTag 已变化直接判为冲突，不发送注定被拒的上传；取项目后 item 被替换（`PUT` 返回 404）也按冲突重跑一整轮，下一轮快照若找不到 `metadata.db` 再按源缺失失败。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :app:assembleRelease :app:lintRelease
+```
+
+结果成功，JVM **169 tests、0 failures、0 errors**；lint debug／release 均 0 error、5 warning（与步骤 04 相同）。`git diff --check` 无问题。
+
+`OneDriveSourceBackendTest` 新增 8 项（真实 OkHttp Request／Response fixture）：
+
+- 成功：请求序列恰为按路径取 `metadata.db` 与对 item ID 的 `PUT /content`，`If-Match` 为基底 cTag，上传字节等于暂存文件，不下载内容，返回新 cTag。
+- cTag 已变化：只取项目一次，不上传，返回冲突。412、409、404：两个请求后返回冲突。
+- 结果不明：429（`Retry-After: 7` → 7 秒）、503（默认 30 秒）、上传中 IO 中断、2xx 缺 cTag／大小不符／item 不同／无法解析，均为可重试失败。
+- 401 刷新令牌一次后以同一 `If-Match` 重发完整文件；403 为不重试的授权失效。
+- 暂存散列不符（可重试 `LOCAL_IO`）、超过 250 MB（不重试）、登录账号不同（`LOGIN_REQUIRED`）均不发任何请求。
+- `writeCapability`：账号一致为可写，不同或未登录为 `AUTHORIZATION_REQUIRED`，无请求。
+- `OneDriveLibrarySource` 两轮：第一轮 412 → `Conflict`，不写推送日志；第二轮重新取快照（取项目、两个日志名、下载）得到他人写入的数据库，再以新 cTag 上传成功；5xx 以可重试的 `SourceFailure` 交回处理器。
+
+### 按路径上传探测（PA6 debug 包，`library-a` 根目录）
+
+为评估能否省去推送前的取项目请求，用临时探针（未提交，已删除）在用户选择的 `library-a` 根目录以按路径寻址的 `PUT …/items/{根ID}:/<名称>:/content` 测试，只使用本次随机命名的探针文件，日志只记状态码：新建 201；带当前 cTag 的 `If-Match` 200 并更新；带过期 cTag 412 且内容不变；**对不存在的名称带 `If-Match` 返回 201 并新建了文件**。两个探针文件均核对 ID 与名称后删除（204），之后按路径查询为 404。结论：按路径上传在 `metadata.db` 缺失时会新建文件，不可用于写回，保留先按路径取 item ID 再按 ID 条件上传（每次推送 2 个请求）。
+
+### 真机 OneDrive 写入（PA6，`library-a`）
+
+用户授权写入 OneDrive 测试书库 `library-a`（3 本样本书）并同意冲突用例。`installDebug`／`installDebugAndroidTest` 后由用户登录、选择 `library-a` 并同步；agent 用 helper 按资源 ID 进入“更多”→“已读栏目”并选择 `阅读状态（#read_status）`（第一次运行时栏目未选，测试在任何写入前以断言停止）。
+
+- `-e oneDriveWrite true` 运行 `OneDriveReadStatusCommitDeviceTest#marksReadThenUnreadThroughTheQueue`：**OK**。经生产服务、队列与处理器对书 1 标已读、再标未读，两次均一轮完成（`write_snapshot`→`write_prepare`→`write_commit` `completed`），紧接同步完成，导入为目标值；下载的数据库中书 1 为 1、再为显式 0。
+- 另加 `-e oneDriveConflict true` 运行冲突用例：**OK**。测试侧在本轮首次 `PUT` 发出前经生产后端上传另一写入者的数据库（书 5 改值），真实 Graph 返回 **412**；处理器记录 `retry:version_conflict`，第 2 轮重新下载得到他人的数据库，书 4 写入后上传 200，紧接同步后导入同时含两处修改。请求序列（只记方法、端点类别与状态码）：快照（取项目 200、两个日志名 404、下载 200）→ 取项目 200 → `PUT` 412 → 快照 → 取项目 200 → `PUT` 200 → 同步快照。
+- 容器复核（`calibre_db_diff.py`）：标已读只改书 1 的 `custom_column_1` 新行（value 1）、`books.last_modified`、`metadata_dirtied` 与该表序号；标未读改为显式 0 的新行；冲突前后只差书 4（1→0，本应用）与书 5（0→1，另一写入者）的上述行，两处都保留。5 个数据库 `integrity_check` 均为 `ok`；写前与最终库 `calibredb check_library` 的数据库类检查（标题、作者、目录异常）均无条目（容器无书籍文件，不检查文件类）；`calibredb list` 读回最终库书 1、4 为 False，书 5 为 True（写前为 None、True、False）。
+- 用户在桌面 Calibre 同步后打开 `library-a` 确认通过。测试书库保持写后状态，未恢复原数据库；写前数据库保存在被忽略的 `app/build/verification/phase4-step05/db/marks-before.db`。已卸载 debug 与测试包（`Success`），设备上只保留正式应用（未触碰）。
+
+### 共同验收
+
+用户确认桌面 Calibre 核对通过并验收本步（2026-10-10）。
+
+### 未完成
+
+- 真实进程终止后的重跑、推送后断网与界面路径在步骤 07 联验。

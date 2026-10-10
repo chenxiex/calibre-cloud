@@ -1,6 +1,6 @@
-# OneDrive 只读后端
+# OneDrive 后端
 
-遵循上级存储约束和规格 R03–R06、R08–R11、R31–R35。生产运行时所有方法只由持久源任务处理器调用；UI、普通副本读取器不得直接发 Graph 文件请求。显式启用的只读集成测试可经生产后端检测真实服务能力，遵循下文验收边界。
+遵循上级存储约束和规格 R03–R06、R08–R11、R15、R31–R35。唯一的源写入是已读写回的条件上传（见下文）。生产运行时所有方法只由持久源任务处理器调用；UI、普通副本读取器不得直接发 Graph 文件请求。显式启用的只读集成测试可经生产后端检测真实服务能力，遵循下文验收边界。
 
 ## 请求开销（R08，Q52–Q55）
 
@@ -12,6 +12,7 @@
 | `open`／`openRange` | 0 个（使用 lookup 返回的下载地址）；没有下载地址时 1 个 `/content` |
 | `openCover` | 1 个按路径取项目并 `$expand=thumbnails` |
 | `acquireSnapshot` | 数据库 cTag 未变化时 1 个；变化时 3 个（数据库加两个日志名）及一遍内容读取 |
+| `replaceDatabase`（已读写回推送） | cTag 已不等于基底时 1 个；否则 2 个（按路径取项目加一次 `PUT` 上传） |
 | 账号核对 | 0 个；只有会话没有 subject 时回退 `discover` |
 
 同一任务内不重复请求同一项目，也不为消除两次同步之间的过期而复查；过期由下一次同步发现，按路径找不到文件时由任务层按 R11 同步一次后重试一次。
@@ -25,7 +26,15 @@
 - 下载重定向只接受 HTTPS，由单独无授权 client 处理，最多五跳。生产保持默认独立 contentClient；注入 contentClient 和 GraphJsonDecoder 仅用于可信网络测试。不得保存／打印响应体、token、预签名下载 URL，不能把它们作为 reader URI。
 - 封面按导入的精确图片相对路径一次取得该图片 item 及其 [thumbnails 集合](https://learn.microsoft.com/en-us/graph/api/driveitem-list-thumbnails?view=graph-rest-1.0)（`$expand=thumbnails`），同时返回图片 cTag 供任务记录版本，不得请求 EPUB／PDF 等格式的缩略图。优先选最小满足目标宽高的尺寸，否则选最大可用尺寸；没有安全可用缩略图或缩略图已失效时用同一响应的下载地址回退封面图片原内容，不再请求 Graph。缩略图 URL 仅用于当次无授权读取，不进入缓存标识或日志；授权／网络／限流失败仍交给任务调度器，不隐式吞掉。调用方负责流关闭、图像解码与应用私有缓存，验收回调只提供成功打开的缩略图宽高。
 - 单格式副本续传由任务重新 `lookup` 一次取得 cTag、长度和新下载地址，cTag 与断点证据一致才调用 `openRange`；只向实际内容 URL 发送 `Range` 与 `Accept-Encoding: identity`，不向 Graph `/content` 发送 Range、不携带 Graph 授权。仅接受匹配断点及总长的 206；200／416 关闭响应并返回无法范围读取，任务层完整重传。网络流中断交给队列重试，响应长度／范围异常归为损坏或冲突，不能拼接。下载 URL 不进入恢复记录。
-- 快照先按路径取 metadata.db；cTag 等于调用方给出的上次导入版本时返回 null，不读取内容。否则按文件名查询 `metadata.db-wal` 与 `metadata.db-journal`（404 为不存在），存在且非空或为目录即版本冲突；`-shm` 只伴随 WAL、超级日志 `-mj*` 只在有 `-journal` 时有效，不再列根目录匹配前缀。随后用下载地址完整读取一遍并 fsync，校验长度与注入的私有 SQLite validator，以读取前的 cTag 发布不可变 UUID 文件；不做读后复查和第二遍读取（Q55），失败仅删除本次 part。这些观察不保证任意源并发安全，写回另以条件提交保护。未实现一般上传、删除和条件写回。
+- 快照先按路径取 metadata.db；cTag 等于调用方给出的上次导入版本时返回 null，不读取内容。否则按文件名查询 `metadata.db-wal` 与 `metadata.db-journal`（404 为不存在），存在且非空或为目录即版本冲突；`-shm` 只伴随 WAL、超级日志 `-mj*` 只在有 `-journal` 时有效，不再列根目录匹配前缀。随后用下载地址完整读取一遍并 fsync，校验长度与注入的私有 SQLite validator，以读取前的 cTag 发布不可变 UUID 文件；不做读后复查和第二遍读取（Q55），失败仅删除本次 part。这些观察不保证任意源并发安全，写回另以条件提交保护。没有一般上传与删除。
+
+## 已读写回提交
+
+- `replaceDatabase` 实现 R15 的 OneDrive 推送：先按 `staged` 重算 SHA-256 并与暂存散列核对（不符为可重试的 `LOCAL_IO`，不发请求），超过简单上传上限 250 MB 时拒绝（`UNSUPPORTED_OPERATION`，不重试，不使用上传会话）；按路径取一次 `metadata.db` 得到 item ID 与当前 cTag，已不等于基底即冲突、不上传；否则 `PUT /drives/{d}/items/{id}/content` 携带 `If-Match: <基底 cTag>` 上传整个文件。不能省去取项目改为按路径上传：探测表明按路径 `PUT` 即使带 `If-Match`，目标不存在时也会新建文件（201），`metadata.db` 缺失时会凭空造出一个；按 item ID 上传则不会创建。
+- 412、409 及取项目后 item 被替换的 404 为 `PushOutcome.Conflict`；2xx 响应须是同一 item、文件、大小等于上传长度并带 cTag，新 cTag 即推送后的版本。请求发出后的 IO 异常、429、5xx 与无法核对的 2xx 响应均为结果不明，作为可重试失败交回处理器重跑一整轮；401 按通用规则刷新令牌一次后重发同一请求，403 为授权失效。上传的响应等待上限 120 秒，超时同样是结果不明。
+- 一次上传要么替换要么不替换，因此不使用 `PushJournal`，`finishPendingPush` 为空操作。`writeCapability` 不联网，只在本地比较当前登录 subject 与书库账号，不一致或未登录为 `AUTHORIZATION_REQUIRED`；没有保存 subject 的旧登录须重新登录后才可写。
+- 日志只记录 `upload_base_changed`、`upload_status_<code>`、`upload_response` 等固定标签，不记录令牌、URL、item ID 或数据库内容。
+- JVM `OneDriveSourceBackendTest` 断言推送的请求序列、`If-Match`、上传字节及各故障分类，`OneDriveLibrarySource` 层断言冲突后重新获取快照再上传的整轮请求序列。真实写入由 `OneDriveReadStatusCommitDeviceTest` 验证：只能在用户授权的专用 OneDrive 测试书库上以 `-e oneDriveWrite true` 显式启用；冲突用例由测试侧上传另一写入者的数据库，另需 `-e oneDriveConflict true`。结果见[第四阶段验证记录](../../../../../../../../../verification/phase-4.md)。
 
 JVM 测试使用真实 OkHttp Request／Response 的注入 fixture，逐项断言请求序列（路径编码、无 children、同一项目只取一次），覆盖本地身份比较、目录分页、父级边界、下载地址与凭据重定向、HTTP 失败及快照日志与未变化跳过。Android JSON 解码和真实 Graph／设备验收仍须使用平台测试与专用测试书库，证据放在 `app/verification/phase-2.md`。
 

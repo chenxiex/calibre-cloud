@@ -12,6 +12,7 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.FilterInputStream
+import java.security.MessageDigest
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.UUID
@@ -22,9 +23,12 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.Response
+import java.util.concurrent.TimeUnit
 
 sealed interface OneDriveSourceResult<out T> {
     data class Available<T>(val value: T) : OneDriveSourceResult<T>
@@ -65,7 +69,8 @@ class OneDriveSourceException(
 ) : IOException()
 
 /**
- * Read-only personal drive access, invoked exclusively by explicit source task handlers.
+ * Personal drive access, invoked exclusively by explicit source task handlers. The only write is
+ * [replaceDatabase] for read status write-back.
  * Identity is established by discover at login and directory selection; each later operation only
  * compares the signed-in subject with the stored account locally. Source files are addressed by
  * path below the stored root item, one Graph request per lookup; only the directory picker lists
@@ -87,6 +92,8 @@ class OneDriveSourceBackend(
     private val accountProvider: suspend () -> String? = { null },
 ) {
     private val graphClient = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+    /** Graph may take a while to answer after receiving a large upload; a timeout then is an unknown result. */
+    private val uploadClient = graphClient.newBuilder().readTimeout(UPLOAD_RESPONSE_TIMEOUT_SECONDS, TimeUnit.SECONDS).build()
     private val contentClient = contentClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
     // No app interceptors, authenticators or cookie jar can attach Graph credentials to a download.
     private val graphBase = "https://graph.microsoft.com/v1.0/".toHttpUrl()
@@ -305,6 +312,69 @@ class OneDriveSourceBackend(
         }
     }
 
+    /**
+     * Replaces metadata.db with [staged] only while it still has [base], the cTag the staged database
+     * was built from (R15). One path request gives the item ID and current cTag; a cTag that already
+     * differs is a conflict without uploading. Otherwise one simple upload of the whole file
+     * (`PUT /items/{id}/content`) carries `If-Match: <base cTag>`, so Graph replaces nothing unless the
+     * item still has that version. Returns the new cTag, or null for a conflict: 412, 409, or 404 for
+     * an item replaced after the lookup.
+     *
+     * [staged] is re-hashed against [stagedSha256] before any request. Files over the simple upload
+     * limit are refused. Once the upload is sent, an I/O failure, 429, 5xx or a response that does not
+     * describe the uploaded file has an unknown result and is transient; the caller then runs a whole
+     * round again from a new snapshot. Neither pausable nor cancellable; no upload session is used.
+     */
+    suspend fun replaceDatabase(location: LibraryLocation.OneDrive, staged: File, stagedSha256: String, base: FileVersion):
+        OneDriveSourceResult<FileVersion?> = operation {
+        require(base.backend == BackendKind.ONEDRIVE)
+        val length = localIo { staged.length() }
+        if (length <= 0 || length > SIMPLE_UPLOAD_LIMIT) unsupported("upload_size")
+        if (localIo { sha256(staged) } != stagedSha256) {
+            throw OneDriveSourceException(StorageErrorKind.LOCAL_IO, transient = true, reason = "staged_digest")
+        }
+        verifyIdentity(location)
+        val database = sourceFile(location, json(pathUrl(location, RelativeSourcePath("metadata.db"))))
+        if (database.version != base) {
+            diagnostic("upload_base_changed")
+            return@operation null
+        }
+        val body = staged.asRequestBody("application/octet-stream".toMediaType())
+        val response = graph(url("drives", location.driveId, "items", database.itemId, "content"), uploadClient) {
+            put(body).header("If-Match", base.token)
+        }
+        response.use {
+            if (it.code == 404 || it.code == 409 || it.code == 412) {
+                diagnostic("upload_status_${it.code}")
+                return@operation null
+            }
+            checkResponse(it)
+            val uploaded = try {
+                item(decode(it), location.driveId)
+            } catch (_: OneDriveSourceException) {
+                unknownUpload("upload_response")
+            }
+            if (uploaded.id != database.itemId || uploaded.directory || uploaded.sizeBytes != length) unknownUpload("upload_response")
+            FileVersion(BackendKind.ONEDRIVE, uploaded.cTag ?: unknownUpload("upload_ctag"))
+        }
+    }
+
+    private fun unknownUpload(reason: String): Nothing = throw OneDriveSourceException(StorageErrorKind.UNSUPPORTED_OPERATION,
+        transient = true, reason = reason)
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                digest.update(buffer, 0, count)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
     private suspend fun discoverInternal(): OneDriveIdentity {
         val drive = json(url("me", "drive").newBuilder().addQueryParameter("\$select", "id,driveType,owner").build())
         if (drive["driveType"] != "personal") unsupported("drive_type")
@@ -426,20 +496,25 @@ class OneDriveSourceBackend(
 
     private suspend fun json(target: HttpUrl): Map<String, Any?> = graph(target).use { response ->
         checkResponse(response)
+        decode(response)
+    }
+
+    private fun decode(response: Response): Map<String, Any?> {
         val body = response.body ?: unsupported()
         // Bound metadata responses; content streams are separately unbounded and never decoded here.
         val source = body.source()
         if (source.request(2_000_001) && source.buffer.size > 2_000_000) unsupported()
-        try { decoder.decode(source.readUtf8()) } catch (_: Exception) { unsupported() }
+        return try { decoder.decode(source.readUtf8()) } catch (_: Exception) { unsupported() }
     }
 
-    private suspend fun graph(target: HttpUrl): Response {
+    /** A 401 refreshes the token once and sends the request again; Graph applied nothing for it. */
+    private suspend fun graph(target: HttpUrl, client: OkHttpClient = graphClient, configure: Request.Builder.() -> Unit = {}): Response {
         safeGraphUrl(target.toString())
         for (attempt in 0..1) {
             currentCoroutineContext().ensureActive()
             val token = tokenProvider(attempt == 1)?.takeIf { it.isNotBlank() }
                 ?: throw OneDriveSourceException(StorageErrorKind.LOGIN_REQUIRED)
-            val response = graphClient.newCall(Request.Builder().url(target).header("Authorization", "Bearer $token").build()).execute()
+            val response = client.newCall(Request.Builder().url(target).apply(configure).header("Authorization", "Bearer $token").build()).execute()
             if (response.code != 401 || attempt == 1) return response
             response.close()
         }
@@ -546,6 +621,11 @@ class OneDriveSourceBackend(
     }
 
     private class LocalFailure : IOException()
+    private companion object {
+        /** Graph's simple upload limit; larger databases would need an upload session, which write-back does not use. */
+        const val SIMPLE_UPLOAD_LIMIT = 250L * 1024 * 1024
+        const val UPLOAD_RESPONSE_TIMEOUT_SECONDS = 120L
+    }
     private fun unsupported(reason: String = "unsupported_shape"): Nothing = throw OneDriveSourceException(StorageErrorKind.UNSUPPORTED_OPERATION, reason = reason)
     private fun conflict(): Nothing = throw OneDriveSourceException(StorageErrorKind.VERSION_CONFLICT)
     private fun Map<String, Any?>.string(key: String, reason: String = "string_$key"): String = (get(key) as? String)?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) } ?: unsupported(reason)
