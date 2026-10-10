@@ -108,8 +108,12 @@ class ApplicationDependencies(context: Context) {
             io.github.chenxiex.calibrecloud.tasks.copies.FormatCopyTaskHandler(state, metadata, taskQueue, librarySources,
                 applicationContext.filesDir, Dispatchers.IO, requestSync = { origin -> librarySync.request(origin) }),
             io.github.chenxiex.calibrecloud.tasks.covers.CoverTaskHandler(state, metadata, covers, librarySources, Dispatchers.IO,
-                taskQueue) { origin -> librarySync.request(origin) }), conditions = queueConditions::waiting)
+                taskQueue) { origin -> librarySync.request(origin) },
+            io.github.chenxiex.calibrecloud.tasks.readstatus.ReadStatusWriteTaskHandler(state, metadata, taskQueue, librarySources,
+                applicationContext.filesDir, Dispatchers.IO, requestSync = { origin -> librarySync.request(origin) })),
+            conditions = queueConditions::waiting)
     }
+    val readStatusService by lazy { io.github.chenxiex.calibrecloud.tasks.readstatus.ReadStatusService(state, metadata, librarySources, taskCoordinator) }
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO, state.copyAccess) }
     val bookCatalog by lazy { io.github.chenxiex.calibrecloud.files.StateBookCatalog(state, applicationContext.filesDir) }
     val lastOpened by lazy { io.github.chenxiex.calibrecloud.state.LastOpenedRepository(database, Dispatchers.IO) }

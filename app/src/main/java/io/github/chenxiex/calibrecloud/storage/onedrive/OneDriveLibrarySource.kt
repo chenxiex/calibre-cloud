@@ -57,6 +57,14 @@ class OneDriveLibrarySource(private val source: OneDriveSourceBackend) : Library
         control: suspend () -> Unit): SourceSnapshot? =
         source.acquireSnapshot(drive(location), candidateId, unchangedVersion, control).value()?.let { SourceSnapshot(it.file, it.version) }
 
+    /** Write-back arrives in a later step of phase 4; until then no library is writable. */
+    override suspend fun writeCapability(location: LibraryLocation) = WriteBlock.NOT_IMPLEMENTED
+
+    override suspend fun pushDatabase(location: LibraryLocation, staged: java.io.File, stagedSha256: String, base: FileVersion,
+        journal: PushJournal): PushOutcome = throw SourceFailure(StorageErrorKind.UNSUPPORTED_OPERATION)
+
+    override suspend fun finishPendingPush(location: LibraryLocation, journal: PushJournal) {}
+
     private fun drive(location: LibraryLocation) =
         location as? LibraryLocation.OneDrive ?: throw SourceFailure(StorageErrorKind.UNSUPPORTED_OPERATION)
 

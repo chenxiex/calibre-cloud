@@ -42,6 +42,27 @@ class SourceSnapshot(val file: File, val version: FileVersion)
 /** The user action that lets work blocked by an authorization failure continue. */
 enum class Reauthorization { SIGN_IN, DIRECTORY_GRANT }
 
+/** Why read status cannot be written back to a library (R15); shown where marking is disabled. */
+enum class WriteBlock { NOT_IMPLEMENTED }
+
+/** Result of a push whose version precondition was checked by the source. */
+sealed interface PushOutcome {
+    /** The source now holds the pushed database at [version]. */
+    data class Pushed(val version: FileVersion) : PushOutcome
+    /** The source no longer had the base version; nothing was replaced (R15). */
+    data object Conflict : PushOutcome
+}
+
+/**
+ * Private, durable record of one write task's push, kept across rounds and process death until the
+ * backend clears it. Only the backend interprets [read]'s value; [write] returns once it is on disk.
+ */
+interface PushJournal {
+    suspend fun read(): String?
+    /** null removes the record. */
+    suspend fun write(value: String?)
+}
+
 /**
  * Access to the activated libraries of one backend. Every backend implements the whole contract;
  * callers select an implementation by [LibraryLocation.backend] through [LibrarySources] and never
@@ -95,6 +116,25 @@ interface LibrarySource {
      */
     suspend fun acquireSnapshot(location: LibraryLocation, candidateId: UUID, unchangedVersion: FileVersion?,
         control: suspend () -> Unit): SourceSnapshot?
+
+    /** Why read status cannot be written to [location] now, or null when it can; no network request. */
+    suspend fun writeCapability(location: LibraryLocation): WriteBlock?
+
+    /**
+     * Replaces metadata.db with [staged] (lower-case hex SHA-256 [stagedSha256]) only while the source
+     * still has [base], the version the staged database was built from (R15). A backend that commits in
+     * several steps records its progress in [journal] before each one. Neither pausable nor cancellable.
+     * A failure whose result is unknown is thrown as a transient [SourceFailure]; the caller then runs a
+     * whole round again.
+     */
+    suspend fun pushDatabase(location: LibraryLocation, staged: File, stagedSha256: String, base: FileVersion,
+        journal: PushJournal): PushOutcome
+
+    /**
+     * Completes or rolls back a push that [journal] shows was interrupted, so the next round starts from
+     * a whole metadata.db, then clears the journal. Does nothing when there is none.
+     */
+    suspend fun finishPendingPush(location: LibraryLocation, journal: PushJournal)
 }
 
 fun interface LibrarySources {

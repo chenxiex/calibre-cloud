@@ -119,3 +119,60 @@ adb shell am instrument -w -r -e class io.github.chenxiex.calibrecloud.metadata.
 ### 未完成
 
 本步不涉及源访问、推送、冲突或进程中断；这些在步骤 03–07 验证。用户共同验收尚未进行。
+
+## 步骤 03：写回处理器、提交服务与统一源接口（2026-10-10）
+
+对应 R14（提交冻结、栏目切换后旧任务失败、逐书失效）、R15（每轮重新获取、整轮重试、无需修改不推送）、R16（推送后紧接同步）、R13（待写入状态在执行各阶段的推导）、R33（写回日志）与 AC04 中可用 fixture 后端覆盖的部分。后端推送尚未实现，本步没有真实源写入。
+
+### 改动
+
+- `LibrarySource` 增加 `writeCapability`（不联网，返回 `WriteBlock?`）、`pushDatabase`（基底版本前提，`PushOutcome.Pushed`／`Conflict`，其它失败抛 `SourceFailure`）与 `finishPendingPush`，以及后端私有的持久 `PushJournal`。本地与 OneDrive 返回 `WriteBlock.NOT_IMPLEMENTED`，推送抛出 `UNSUPPORTED_OPERATION`，收尾为空操作。
+- `tasks/readstatus/ReadStatusWriteTaskHandler`：三阶段执行、整轮重试与紧接同步，规则见[任务约束](../src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md#已读写回任务)；日志一行记录 task ID、阶段、轮次、书籍数、结果分类与耗时。
+- `tasks/readstatus/ReadStatusService`：从当前导入冻结书籍、取有效已读栏目、复核选择代号、源不可写时拒绝。
+- `MetadataRepository.readStatusPreference`：从 `library_preferences` 读取书库 UUID 与已读栏目（清元数据后仍保留）。
+- 应用容器注册处理器与服务；`CacheMaintenance` 的保留规则与清理撤销一并删除 `write-staging/<task>`。
+
+与计划的工程差异：
+
+- `pushDatabase`／`finishPendingPush` 不带 `control` 参数：提交与收尾都不可暂停或取消。checkpoint 参数改为后端解释的 `PushJournal`（任务私有文件），队列的 `RecoveryCheckpoint` 只记录本轮代次与基底版本。
+- 准备结果（暂存文件、散列、逐书失效）只在同一轮的阶段之间保存在内存，因为任何恢复都回到 `WRITE_SNAPSHOT`；暂存与基底文件放在处理器自己的 `write-staging/<task>/`。
+- 暂存的块边界控制经 `runBlocking` 调用挂起的 `checkControl()`，保持步骤 02 的同步接口不变。
+- 暂存失败的映射：`COLUMN_INVALID` → `InvalidColumn`；`IO` → 以 `LOCAL_IO` 重试一整轮；`NO_WRITABLE_BOOKS` → `SOURCE_MISSING` 失败（全部书籍失效，不推送、不同步）；`LIBRARY_CHANGED`、`INCOMPATIBLE` → `INCOMPATIBLE_DATABASE`；`CORRUPT` → `CORRUPT_CONTENT`；`INSUFFICIENT_SPACE` 同名失败。
+- 书库已不是当前书库时返回等待 `INACTIVE_LIBRARY`（与协调器的停放一致）；`NO_NETWORK` 与源 `VERSION_CONFLICT`（如本地快照读取期间源变化）同推送被拒一样重试一整轮。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+```
+
+结果 `BUILD SUCCESSFUL`（2m 3s），JVM **153 tests、0 failures、0 errors、0 skipped**；lint 0 error、5 warning（与步骤 02 相同，新文件无条目）。
+
+### 真机平台测试
+
+设备 PA6（无线调试），经 Gradle `connectedDebugAndroidTest` 安装 debug（`io.github.chenxiex.calibrecloud.debug`）与测试包并按 `AwakeTestRunner` 定向执行：
+
+```bash
+./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=io.github.chenxiex.calibrecloud.tasks.readstatus.ReadStatusWriteTaskHandlerTest,io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenanceTest
+```
+
+- 首次：`CacheMaintenanceTest` **19/19 通过**；`ReadStatusWriteTaskHandlerTest` 10 项中 1 项失败，原因在测试侧：书籍 UUID 被改动后，紧接的同步按既有导入规则为该书库分配了新的 LibraryId，测试在同步后才按新 ID 构造期望的 BookKey。改为在执行前取得 BookKey 后单独重跑 `ReadStatusWriteTaskHandlerTest`：**10/10 通过**。随后把紧接同步用例的插入任务由低优先级自动任务改为推送期间提交的高优先级请求（低优先级任务本来就排在同步之后，不能证明紧接），再次单独重跑：**10/10 通过**。
+
+`ReadStatusWriteTaskHandlerTest` 使用生产的处理器、服务、队列、协调器、暂存与书库同步处理器，真实平台 SQLite 与私有文件；源为内存中的 fixture（仓库 Calibre 9.14 样本加第二个布尔栏目 `#favorite`），推送时核对基底版本与暂存散列，可模拟其它写入者。覆盖：
+
+- 标已读（空值、否 → 是）后同步紧接写回执行：推送期间提交的高优先级用户请求序号在同步之前，仍排在同步之后；导入在同步后才显示已读，待写入在同步结束后为空，`write-staging` 无残留；再标未读写入显式 0 行。
+- 离线（条件注入等待网络）时任务等待、源与导入不变、显示待写入；恢复网络后完成。
+- 第一次推送前另一写入者修改 `#favorite`：推送被拒，第二轮取得最新数据库写入，两处修改都保留。
+- 推送一直被拒：共 4 轮后以 `VERSION_CONFLICT` 失败、源不变、待写入显示失败；手动重试恢复待写入并在一轮内完成。
+- 推送成功后以取消协程结束派发、重开状态库与协调器（协议恢复，不是真实进程终止）：重跑一轮发现已是目标值，不再推送，直接完成并同步。
+- 提交后切换已读栏目：旧任务在准备阶段以 `InvalidColumn` 失败，没有推送。
+- 一本书 UUID 变化：其余书写入，该书以 `BookIdentityChanged` 记入 `CompletedWithBookFailures`，仍提交同步。
+- 空间不足：准备阶段失败，没有推送，无残留文件。
+- 任务开始前三次点击（含同一本书改目标）并入一个任务，一次推送写入最后的目标。
+- 全部已是目标值：不推送，完成并同步。
+
+测试结束后 Gradle 已卸载 debug 与测试包，设备上只保留正式应用（未触碰）。
+
+### 未完成
+
+真实本地与 OneDrive 推送、三步重命名收尾、真实冲突与真实进程终止在步骤 04、05、07 验证；界面入口与待写入显示在步骤 06。用户共同验收尚未进行。

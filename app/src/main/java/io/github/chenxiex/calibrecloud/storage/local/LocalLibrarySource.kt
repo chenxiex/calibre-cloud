@@ -65,6 +65,14 @@ class LocalLibrarySource(
         return SourceSnapshot(snapshot.file, snapshot.version)
     }
 
+    /** Write-back arrives in a later step of phase 4; until then no library is writable. */
+    override suspend fun writeCapability(location: LibraryLocation) = WriteBlock.NOT_IMPLEMENTED
+
+    override suspend fun pushDatabase(location: LibraryLocation, staged: java.io.File, stagedSha256: String, base: FileVersion,
+        journal: PushJournal): PushOutcome = throw SourceFailure(StorageErrorKind.UNSUPPORTED_OPERATION)
+
+    override suspend fun finishPendingPush(location: LibraryLocation, journal: PushJournal) {}
+
     private suspend fun tree(location: LibraryLocation): String =
         (location as? LibraryLocation.Local)?.let { treeUri(it) } ?: throw SourceFailure(StorageErrorKind.AUTHORIZATION_EXPIRED)
 

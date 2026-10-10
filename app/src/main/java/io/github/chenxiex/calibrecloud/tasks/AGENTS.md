@@ -2,7 +2,7 @@
 
 本文件适用于 `tasks/`，同时遵循 [Android 模块约束](../../../../../../../../AGENTS.md)。需求以 [spec.md](../../../../../../../../../spec.md) 为准。
 
-本目录覆盖 R04–R06、R14、R16–R19、R31、R33–R34。请求契约已接入同一应用状态数据库的持久队列、提交／观察、单任务协调器与阶段控制／恢复。已注册各后端通用的书库同步、个人 OneDrive 目录浏览及单格式副本／已下载版本检查与按需封面处理器；提交及控制后通过 `QueueWorker` 驱动应用容器共享的 `TaskCoordinator.drain()`；任务页查询持久状态并请求后台唤醒。协议 fixture 与真实 SQLite 证据见 [第二阶段记录](../../../../../../../../verification/phase-2.md)。
+本目录覆盖 R04–R06、R14、R16–R19、R31、R33–R34。请求契约已接入同一应用状态数据库的持久队列、提交／观察、单任务协调器与阶段控制／恢复。已注册各后端通用的书库同步、个人 OneDrive 目录浏览、单格式副本／已下载版本检查、按需封面及已读写回处理器；提交及控制后通过 `QueueWorker` 驱动应用容器共享的 `TaskCoordinator.drain()`；任务页查询持久状态并请求后台唤醒。协议 fixture 与真实 SQLite 证据见 [第二阶段记录](../../../../../../../../verification/phase-2.md)。
 
 ## 提交对象与去重
 
@@ -29,12 +29,14 @@ R13–R16 的已读写回只使用以下机制（Q75–Q81）；不保存提交�
 - **紧接同步**：处理器在推送成功（或无需推送）后提交普通的书库同步，返回 `StageOutcome.Complete(followUp = syncId)`。协调器在完成事务中把它记入任务的 `follow_up_id` 及 `dispatch_next`；下一次选择时它可执行则必选，否则清除记录、按常规调度，等待条件的同步不阻塞其它任务。
 - **待写入状态**：`pendingReadStatus(library, column)` 一次查询返回当前栏目待写入的书籍，每本书取序号最新的一行：未结束写回中为 `Pending`；已完成写回在其紧接同步结束（任何结果）前为 `Pending`；失败、取消或作为单书失效为 `Failed`（取消时 `error` 为 null）。成功同步（含未变化确认）的事务调用 `dismissReadFailures` 隐藏该书库已结束写回的失败，行仍保留供重试；重试清除隐藏标记，再次标记以更新的行覆盖。该映射只供界面在展示层叠加及按钮判定，不进入 `LibraryIndex` 的筛选、搜索与排序。
 - 变更行随任务删除：已结束任务保留规则删除任务时一并删除，清理撤销（`revoke`）任务时同时删除。
+- **提交入口**：[ReadStatusService](readstatus/ReadStatusService.kt) 从当前导入冻结书籍、取当前有效的已读栏目，复核页面选择代号，源的 `writeCapability` 不可用时拒绝且不建任务；所有书使用同一个明确目标值。
+- **处理器**：[ReadStatusWriteTaskHandler](readstatus/ReadStatusWriteTaskHandler.kt) 的 `WRITE_SNAPSHOT` 先调用源的 `finishPendingPush` 收尾，再 `acquireSnapshot(unchangedVersion = null)` 并把快照移入私有 `write-staging/<task>/`，checkpoint 记录本轮代次与基底版本；`WRITE_PREPARE` 核对任务栏目仍是书库偏好中的已读栏目（切换栏目即 `InvalidColumn` 失败，书库 UUID 也取自偏好，因而清元数据后仍可执行），调用 `ReadStatusStaging`，逐书失效记入 `CompletedWithBookFailures`；`WRITE_COMMIT` 以基底版本为前提调用 `pushDatabase`。准备结果只在同一轮的阶段之间保存在内存：任何恢复都回到 `WRITE_SNAPSHOT` 并删除本轮文件，只保留源的推送日志 `push.json`（`PushJournal`，fsync 后原子替换）。该目录按任务 ID 随保留规则与清理撤销删除。
 
 `CompletedWithBookFailures` 保留逐书失效原因，失效书籍须属于任务书库；整体失败使用结构化存储原因、栏目失效或书籍身份变化，不保存异常全文、令牌或 URL。取消从不发生在推送阶段，因此已取消的写回没有推送。其他阶段的暂停、取消、继续和重试能力由实际处理器提供。未知进度总量用文字呈现，状态事件与有效缓存发布事件分别表达。
 
 ## 启动与实现状态
 
-[StartupSync](background/StartupSync.kt) 使用状态库默认关闭的全局设置和进程守卫。每个进程首次由用户打开主界面且已有稳定目录配置时，开启才提交一次低优先级同步；首次打开没有配置或开关关闭也消耗该进程机会。用户打开信号交给应用进程 scope，Activity 重建不能取消提交与唤醒；后台恢复启动、返回阅读器和普通前后台切换不触发新同步。手动同步与启动同步使用相同候选请求，按原有去重规则复用并提升。没有周期请求或假成功事件。`DurableTaskQueue` 实现提交与观察，`SubmissionResult` 区分新建、复用、提升与拒绝。未注册处理器的功能不能通过协调器提交，当前应用容器注册通用书库同步、OneDrive 目录浏览和完整副本／版本检查及按需封面处理器；不创建假源访问或假完成入口。
+[StartupSync](background/StartupSync.kt) 使用状态库默认关闭的全局设置和进程守卫。每个进程首次由用户打开主界面且已有稳定目录配置时，开启才提交一次低优先级同步；首次打开没有配置或开关关闭也消耗该进程机会。用户打开信号交给应用进程 scope，Activity 重建不能取消提交与唤醒；后台恢复启动、返回阅读器和普通前后台切换不触发新同步。手动同步与启动同步使用相同候选请求，按原有去重规则复用并提升。没有周期请求或假成功事件。`DurableTaskQueue` 实现提交与观察，`SubmissionResult` 区分新建、复用、提升与拒绝。未注册处理器的功能不能通过协调器提交，当前应用容器注册通用书库同步、OneDrive 目录浏览、完整副本／版本检查、按需封面及已读写回处理器；不创建假源访问或假完成入口。
 
 AC05 的持久调度、并发唤醒、控制、有限重试／退避及阶段恢复采用接口／平台测试；真实退后台、进程中断、设备重启、通知和生产源访问须按步骤 09 获取真机证据，实际完成范围以验证记录为准，不能用协议测试关闭这些验收。
 
@@ -107,7 +109,7 @@ AC05 的持久调度、并发唤醒、控制、有限重试／退避及阶段恢
 
 ## 已结束任务的保留
 
-已结束任务（完成、失败、取消）只保留调度序号最新的 `DurableTaskQueue.FINISHED_HISTORY`（50）条（R18、Q74）。`CacheMaintenance.recoverLocked` 在每次 `restorePending()`／`drain()` 前、没有其它清理 journal 时调用 `pruneFinished`：同一事务删除更早的任务行及其出边，并写入 `INPUTS` journal 列出这些任务的 `book-staging`、`cover-staging`、`snapshots`、`onedrive-browser` 私有文件，随后按 journal 删除，进程中断后下次恢复继续。以下任务不删除：
+已结束任务（完成、失败、取消）只保留调度序号最新的 `DurableTaskQueue.FINISHED_HISTORY`（50）条（R18、Q74）。`CacheMaintenance.recoverLocked` 在每次 `restorePending()`／`drain()` 前、没有其它清理 journal 时调用 `pruneFinished`：同一事务删除更早的任务行及其出边，并写入 `INPUTS` journal 列出这些任务的 `book-staging`、`cover-staging`、`snapshots`、`write-staging`、`onedrive-browser` 私有文件，随后按 journal 删除，进程中断后下次恢复继续。以下任务不删除：
 
 - 其 `TaskOwner` 仍持有：每种 `TaskRequest` 必须声明 `owner`，由编译器保证不会遗漏。`TaskOwner.Queue` 表示队列外无人持有；`TaskOwner.Selection` 表示创建它的选择（及可选的进行中添加）仍为当前时由其持有，例如向导按任务 ID 读取的目录结果。新增需要在队列外按任务 ID 读取结果的任务类型时，为它声明对应的 owner，而不是在清理处添加特例。
 - 仍是 `task_dependencies` 中任一边的前置任务，包括提交时的依赖和运行时添加的路径失效同步。任务之间的新引用一律使用依赖边，清理无需改动。

@@ -28,13 +28,13 @@
 
 ## 统一源接口
 
-已激活书库的全部源访问经 [LibrarySource](api/LibrarySource.kt)：按路径观察文件（`lookup`，返回版本、大小、可选内容散列与流）、发布前核对（`unchanged`）、封面（`openCover`）和元数据快照（`acquireSnapshot`，源未变时可返回 null），失败统一为 `SourceFailure`。每个后端实现完整契约（[本地](local/LocalLibrarySource.kt)、[OneDrive](onedrive/OneDriveLibrarySource.kt)）；规格按后端区分的行为由后端声明，调用方不判断后端类型：`requiresNetwork`、`resyncsMissingPath`（R11 路径失效先同步）、`checksCopy`（R11 导入后检查范围）、`reauthorization`（等待登录或目录授权）。节省请求的规则（如 OneDrive 一次查找供后续读取、发布前不复查）在操作内部实现；限流以 `THROTTLED` 及等待时间表达，由队列对所属书库统一生效，不需要额外接口。新增后端只需实现该接口并在应用容器的 `librarySources` 中注册。
+已激活书库的全部源访问经 [LibrarySource](api/LibrarySource.kt)：按路径观察文件（`lookup`，返回版本、大小、可选内容散列与流）、发布前核对（`unchanged`）、封面（`openCover`）、元数据快照（`acquireSnapshot`，源未变时可返回 null）以及已读写回的能力判断与推送（`writeCapability`、`pushDatabase`、`finishPendingPush`），失败统一为 `SourceFailure`。每个后端实现完整契约（[本地](local/LocalLibrarySource.kt)、[OneDrive](onedrive/OneDriveLibrarySource.kt)）；规格按后端区分的行为由后端声明，调用方不判断后端类型：`requiresNetwork`、`resyncsMissingPath`（R11 路径失效先同步）、`checksCopy`（R11 导入后检查范围）、`reauthorization`（等待登录或目录授权）。节省请求的规则（如 OneDrive 一次查找供后续读取、发布前不复查）在操作内部实现；限流以 `THROTTLED` 及等待时间表达，由队列对所属书库统一生效，不需要额外接口。新增后端只需实现该接口并在应用容器的 `librarySources` 中注册。
 
 书库位置由 [LocationKeys](api/LocationKeys.kt) 编码为不透明键：状态库只保存后端代码和该键，只比较相等，不解析其组成，新增后端不改 schema。同步任务所需的授权由各后端实现 [LibraryAuthorization](../tasks/api/LibraryAuthorization.kt)，见[任务约束](../tasks/AGENTS.md)。
 
 按用户确认，只有以下两类按设计与具体后端绑定，不经统一接口：登录与目录授权本身（`auth/`、本地授权组件），以及选择书库根（OneDrive 目录浏览及其 `OneDriveCandidateTaskHandler`／`OneDriveCandidateService`、SAF 选择器）。选中根之后的同步、恢复与源访问都走统一接口。
 
-`CopyMaintenance` 仅声明精确副本移除和元数据清理，由 `CacheMaintenance` 实现。没有一般源上传／删除接口。唯一的源写入是已读写回：书籍与目标值保存在任务队列的变更列表中（见[任务约束](../tasks/AGENTS.md#已读写回任务)），后端的推送接口在第四阶段后续步骤加入。
+`CopyMaintenance` 仅声明精确副本移除和元数据清理，由 `CacheMaintenance` 实现。没有一般源上传／删除接口。唯一的源写入是已读写回：书籍与目标值保存在任务队列的变更列表中（见[任务约束](../tasks/AGENTS.md#已读写回任务)）。`writeCapability` 不联网，给出不可写原因 `WriteBlock`；`pushDatabase` 只在源仍为基底版本时替换 `metadata.db`，被拒返回 `PushOutcome.Conflict`，结果不明抛出可重试的 `SourceFailure`，不可暂停或取消；分步提交的后端在每步前把进度写入任务的 `PushJournal`，下一轮开始前由 `finishPendingPush` 收尾。两个后端目前返回 `WriteBlock.NOT_IMPLEMENTED`、推送抛出 `UNSUPPORTED_OPERATION`，本地与 OneDrive 的提交分别在第四阶段步骤 04、05 实现。
 
 文件工厂、书籍 provider 的提供范围、完整文件发布及只读授权规则见 [文件提供开发约束](../files/AGENTS.md)。
 

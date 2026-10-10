@@ -25,6 +25,8 @@ enum class ReadColumnStatus { NOT_CONFIGURED, VALID, INVALID }
  */
 data class LibraryRevision(val identity: LibraryIdentity, val generation: UUID, val readColumn: CustomColumnId?)
 
+data class ReadStatusPreference(val libraryUuid: UUID?, val column: CustomColumnId?)
+
 data class ImportedLibrary(
     val identity: LibraryIdentity,
     val generation: UUID,
@@ -232,6 +234,19 @@ class MetadataRepository(
                     if (it.isNull(1)) null else CustomColumnId(it.getLong(1), it.getString(2)))
             }
         } finally { db.endTransaction() }
+    }
+
+    /**
+     * The source library UUID last imported for [libraryId] and its selected read column, kept with the
+     * library's preferences so a write also runs after its metadata cache was cleared (R12). Null when
+     * the library has none.
+     */
+    suspend fun readStatusPreference(libraryId: LibraryId): ReadStatusPreference? = withContext(io) {
+        database.readableDatabase.rawQuery("SELECT source_uuid, read_column_id, read_column_lookup FROM library_preferences WHERE library_id = ?",
+            arrayOf(libraryId.value.toString())).use {
+            if (!it.moveToFirst()) null else ReadStatusPreference(if (it.isNull(0)) null else UUID.fromString(it.getString(0)),
+                if (it.isNull(1)) null else CustomColumnId(it.getLong(1), it.getString(2)))
+        }
     }
 
     /** Compare-and-set prevents an old screen configuring another library or a newer import. */

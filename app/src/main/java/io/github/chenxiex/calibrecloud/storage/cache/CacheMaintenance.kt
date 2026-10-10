@@ -263,7 +263,7 @@ class CacheMaintenance(
      */
     private fun journalTaskInputs(db: SQLiteDatabase, tasks: List<TaskId>, revoke: Boolean) {
         val paths = tasks.flatMap { listOf("book-staging/${it.value}", "cover-staging/${it.value}",
-            "snapshots/local/${it.value}", "snapshots/onedrive/${it.value}",
+            "snapshots/local/${it.value}", "snapshots/onedrive/${it.value}", "write-staging/${it.value}",
             "onedrive-browser/${it.value}.json", "onedrive-browser/${it.value}.part") }
         val named = if (revoke) tasks.map { it.value.toString() } else emptyList()
         val payload = JSONObject().put("paths", JSONArray(paths)).put("libraries", JSONArray())
@@ -320,7 +320,7 @@ class CacheMaintenance(
         // Book generations are retired through the shared handle factory, never unlinked here.
         tasks.forEach { task ->
             add("book-staging/${task.value}"); add("cover-staging/${task.value}")
-            add("snapshots/local/${task.value}"); add("snapshots/onedrive/${task.value}")
+            add("snapshots/local/${task.value}"); add("snapshots/onedrive/${task.value}"); add("write-staging/${task.value}")
             if (plan.kind == CleanupKind.OTHER_LIBRARIES || plan.kind == CleanupKind.LIBRARY) add("onedrive-browser/${task.value}.json")
         }
         if (plan.kind == CleanupKind.OTHER_LIBRARIES || plan.kind == CleanupKind.LIBRARY) {
@@ -356,7 +356,7 @@ class CacheMaintenance(
 
     private fun privateFile(relative: String): File {
         val parts = relative.split('/')
-        require(parts.first() in setOf("metadata", "covers", "books", "book-staging", "cover-staging", "snapshots", "onedrive-browser"))
+        require(parts.first() in setOf("metadata", "covers", "books", "book-staging", "cover-staging", "snapshots", "write-staging", "onedrive-browser"))
         var file = filesDir
         parts.forEach { part ->
             require(part.isNotBlank() && part != "." && part != "..")
