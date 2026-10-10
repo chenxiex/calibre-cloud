@@ -69,3 +69,53 @@ adb shell am instrument -w -r -e class io.github.chenxiex.calibrecloud.tasks.Dur
 ### 未完成
 
 本步没有源访问，不涉及 AC04 的真实写入、冲突或 Calibre 一致性；这些在步骤 02–07 验证。用户共同验收尚未进行。
+
+## 步骤 02：暂存数据库生成与变更范围验证（2026-10-10）
+
+对应 R15 第 1–3 步（基底核对、只改目标值及必要维护、完整性与变更范围验证）与 AC04 的 Calibre 一致性部分。本步只有元数据模块的纯本地处理，不访问存储后端、不推送；约束见[元数据约束](../src/main/java/io/github/chenxiex/calibrecloud/metadata/AGENTS.md#已读写回暂存)。
+
+### 改动
+
+- `metadata/ReadStatusStaging.kt`：输入私有快照、期望书库 UUID、栏目、变更列表与注入时钟；输出逐书结果（`CHANGED`／`ALREADY_TARGET`／`MISSING`／`IDENTITY_CHANGED`）与暂存文件（SHA-256、长度），全部已满足时不产生文件。整体失败：`LIBRARY_CHANGED`、`COLUMN_INVALID`、`INCOMPATIBLE`、`CORRUPT`、`NO_WRITABLE_BOOKS`、`INSUFFICIENT_SPACE`、`IO`。
+- `verifyReadStatusChanges`：只读 `ATTACH` 原快照的变更范围验证（文件头不变字段、schema、`user_version`、`application_id`、非虚表逐表双向差集与行数），目标行的值类型、`last_modified` 与 `metadata_dirtied` 逐书核对。
+- `app/verification/tools/calibre_db_diff.py`：只读、immutable 打开两个数据库，按带存储类别的行多重集逐表比较，相同时退出码 0，不同为 1。
+
+与计划的工程差异：
+
+- 结构验证直接调用 `CalibreSnapshotParser.parse`（与同步相同的完整解析），另查 `books.last_modified`、`metadata_dirtied.book`、`custom_column_N(id,book,value)`。
+- 增加 `LIBRARY_CHANGED`（书库 UUID 与期望不符）和 `IO` 两个失败原因；变更范围不符按 `INCOMPATIBLE` 处理（例如源库有额外触发器改动其它表）。
+- 只接受回滚日志格式的数据库：WAL 头在打开时会被改写，超出写回范围。
+- 空间检查（快照两倍）放在暂存内，处理器在步骤 03 不再重复。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+```
+
+结果 `BUILD SUCCESSFUL`，JVM **153 tests、0 failures**；lint 首次多出 2 条 `UsableSpace` 警告，按 `FormatCopyTaskHandler` 的做法以 `@SuppressLint` 与 KDoc 理由处理后回到 0 error、5 warning（AGP 与依赖版本提示，与步骤 01 相同）。
+
+### 真机平台测试
+
+设备 PA6（无线调试）。`aapt2 dump badging` 核对 debug application ID 为 `io.github.chenxiex.calibrecloud.debug`，`adb install -r -t` 安装 debug 与测试 APK：
+
+```bash
+adb shell am instrument -w -r -e class io.github.chenxiex.calibrecloud.metadata.ReadStatusStagingTest,io.github.chenxiex.calibrecloud.metadata.CalibreSnapshotParserTest io.github.chenxiex.calibrecloud.debug.test/io.github.chenxiex.calibrecloud.AwakeTestRunner
+```
+
+- 首次：13 tests，1 failure。失败在测试侧：篡改用例 `UPDATE books SET has_cover=0` 的辅助连接未注册 `title_sort`（即探测记录的 `books_update_trg` 准备期依赖），生产代码未受影响。辅助函数注册恒等 `title_sort` 后重跑：**OK (13 tests)**（7.0 s）。
+- `ReadStatusStagingTest`（7 项）以仓库样本（Calibre 9.14，含 FTS5 虚表）加按 Calibre 自身 DDL 复制的第二个布尔栏目 `#favorite` 和含引号与中文的标题为 fixture，覆盖：标已读（空值→是、否→是、已是）；标未读（空值→显式 0、是→0），值存为 integer；同一列表混合目标；全部已满足时无文件、无 `.part`；UUID 变化与书籍删除逐书报告且不改写，全部失效为 `NO_WRITABLE_BOOKS`；栏目改名、标记删除、删除、改为 `int` 为 `COLUMN_INVALID`，书库 UUID 变化、截断文件、空间不足分别拒绝且无输出；快照字节不变；`last_modified` 仅目标书改为注入时间、`metadata_dirtied` 仅目标书、`sqlite_sequence` 仅该表加 2、第二个布尔栏目与标题不变；范围验证拒绝人为多改其它栏目、目标书其它列、非目标书 `last_modified`、多插脏记录、把值改成文本，以及与目标不符的值；零微秒时间戳格式。
+
+### Calibre 一致性复核
+
+测试把基底、标已读（书 1、5 改为是，书 4 已是）和标未读（书 1、4 改为否，书 5 已否）结果写到 debug 外部私有目录 `read-status-staging/`，`adb pull` 到容器 scratchpad 后：
+
+- `calibre_db_diff.py base.db mark-read.db`／`mark-unread.db`：只有目标书的 `books.last_modified`、`custom_column_1` 行替换（新 id 7、8）、`metadata_dirtied` 新增目标书、`sqlite_sequence.custom_column_1` 6→8。
+- 同一基底放入样本书库副本，用 `/opt/calibre/calibredb set_custom` 按相同顺序写入后，与本应用结果比较：唯一差异是两本书的 `last_modified` 时间值，以及 Calibre 打开书库的副作用 `preferences.last_expired_trash_at`；行 id、值和序号完全一致。
+- 本应用结果放入样本书库副本后 `calibredb check_library` 各类别均无条目（退出码 0），`calibredb list --fields title,*read_status,*favorite` 读回标已读为三本 True、标未读为三本 False，`#favorite` 保持 True／False／None。
+
+测试后已卸载 debug 与测试包（外部私有目录随之删除），设备上只保留正式应用（未触碰）。
+
+### 未完成
+
+本步不涉及源访问、推送、冲突或进程中断；这些在步骤 03–07 验证。用户共同验收尚未进行。

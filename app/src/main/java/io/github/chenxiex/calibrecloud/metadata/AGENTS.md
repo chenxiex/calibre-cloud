@@ -7,6 +7,13 @@
 - 布尔空值通过缺失值或 `Bool(null)` 表示；只有有效已配置栏目允许把空／否解释为未读。栏目不存在、改名或类型改变是配置问题，不能产生全库未读的推断。
 - 平台 fixture 按上述 9.14.0 布局创建，仅验证实际解析能力；构造的最小 fixture 不等于经过 Calibre 桌面程序打开的完整书库。仓库 `assets/calibre-sample/metadata.db` 另由用户通过桌面程序维护，实库测试在私有副本验证导入与布尔栏目配置；副本上的程序变更不作为桌面程序改名／删除／改类型的证据。样本覆盖范围与结果见 `app/verification/phase-2.md`。
 
+## 已读写回暂存
+
+- `ReadStatusStaging` 只在后端取得的最新私有快照的副本上生成待推送数据库，不访问存储后端、不读派生索引、不改动快照。先用 `CalibreSnapshotParser` 完整解析，再核对书库 UUID、栏目（ID 与 lookup 一致、`bool`、单值、未标记删除）和每本书的 ID／UUID；失效书籍逐书报告，不按数字 ID 改写其它书。
+- 修改范围以 Calibre 9.14 `set_custom` 实测差异为准（见 [第四阶段记录](../../../../../../../../verification/phase-4.md)）：替换 `custom_column_N` 行（显式 1／0）、`books.last_modified` 设为注入时钟的 UTC（Python `isoformat(' ')` 格式）、`metadata_dirtied` 插入该书；已是目标值的书不修改，全部已满足时不产生文件。`title_sort` 注册为被调用即失败，只为通过 `books_update_trg` 的语句准备。
+- 打开参数固定 `NO_LOCALIZED_COLLATORS`（不建 `android_metadata`）、`DELETE` 日志、空错误处理器；只接受回滚日志格式（文件头 18／19 字节为 1）。提交后以只读连接 `ATTACH` 原快照验证：文件头不变字段、`sqlite_master`、`user_version`、`application_id` 相同，非虚表（含 FTS 影子表）逐表以 `typeof` 加 BINARY 比较双向差集和行数，只允许上述行变化；再 `integrity_check`、确认无日志文件、fsync 并计算 SHA-256。表名取自快照自身的 `sqlite_master`，一律按标识符引用。任何失败删除 `.part`。
+- 容器复核工具 [calibre_db_diff.py](../../../../../../../../verification/tools/calibre_db_diff.py) 以 `python3 -I` 只读比较两个数据库。
+
 ## 发布与恢复
 
 - `MetadataRepository` 在独立 UUID 目录 fsync 完整快照，完成索引构建后以同一应用状态事务发布 library_bindings、metadata_imports 和 metadata_books。JSON 保留完整关联数据；关系表提供 book ID／UUID 唯一性与本地身份索引，后续查询不能为缺失缓存隐式读取源。
