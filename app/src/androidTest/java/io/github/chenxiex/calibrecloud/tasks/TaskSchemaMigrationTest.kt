@@ -206,6 +206,47 @@ class TaskSchemaMigrationTest {
         }
     }
 
+    @Test
+    fun versionTwelveUpgradeMovesTheAwaitedSyncIntoADependencyEdge() = runBlocking<Unit> {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "awaited-sync-migration-${UUID.randomUUID()}.db"
+        val identity = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.OneDrive("account", "drive", "root"), UUID.randomUUID())
+        try {
+            val previous = ApplicationStateDatabase(context, name).use { database ->
+                val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
+                assertTrue(state.bindValidated(state.select(identity.location).token, identity))
+                val queue = DurableTaskQueue(database, Dispatchers.IO)
+                val sync = (queue.submit(TaskSubmission(TaskRequest.MetadataSync(identity.id), TaskOrigin.USER_DOWNLOAD)) as SubmissionResult.Created).taskId
+                val cover = (queue.submit(TaskSubmission(TaskRequest.CoverLoad(BookKey(identity.id, 1, UUID.randomUUID())),
+                    TaskOrigin.USER_OPEN)) as SubmissionResult.Created).taskId
+                queue.update(cover) { it.copy(sourceSync = sync, missingPath = io.github.chenxiex.calibrecloud.model.RelativeSourcePath("a/cover.jpg")) }
+                val records = queue.list()
+                StateSchemaHistory.downgrade(database.writableDatabase, 12)
+                database.readableDatabase.rawQuery("SELECT source_sync FROM queued_tasks WHERE task_id = ?", arrayOf(cover.value.toString())).use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals(sync.value.toString(), it.getString(0))
+                }
+                Triple(records, cover, sync)
+            }
+            ApplicationStateDatabase(context, name).use { database ->
+                val queue = DurableTaskQueue(database, Dispatchers.IO)
+                assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
+                assertEquals(previous.first, queue.list())
+                assertEquals(previous.third, queue.get(previous.second)!!.sourceSync)
+                database.readableDatabase.rawQuery("SELECT COUNT(*) FROM queued_tasks WHERE source_sync IS NOT NULL", null).use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals(0, it.getInt(0))
+                }
+                // The cover waits on the unfinished sync, which therefore runs first.
+                assertEquals(previous.third, queue.claim(0, { emptySet() }, { true })!!.record.id)
+                assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.DEPENDENCY))), queue.get(previous.second)!!.record.state)
+                database.readableDatabase.rawQuery("PRAGMA foreign_key_check", null).use { assertEquals(0, it.count) }
+            }
+        } finally {
+            context.deleteDatabase(name)
+        }
+    }
+
     private class VersionOneDatabase(context: Context, name: String) : SQLiteOpenHelper(context, name, null, 1) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE library_bindings (library_id TEXT PRIMARY KEY NOT NULL, generation TEXT NOT NULL, backend TEXT NOT NULL CHECK(backend IN ('local', 'onedrive')), authority TEXT NOT NULL, root_id TEXT NOT NULL, account_id TEXT NOT NULL, drive_id TEXT NOT NULL, UNIQUE(backend, authority, root_id, account_id, drive_id, generation))")

@@ -112,6 +112,11 @@ class CacheMaintenanceTest {
     fun finishedHistoryKeepsTheNewestFiftyAndTheTasksOthersStillNeed() = runBlocking<Unit> {
         fun request(number: Long) = TaskRequest.FormatCopy(FormatResource(BookKey(book.libraryId, number, UUID.randomUUID()),
             BookFormat.parse("EPUB"), SourceFileLocator.Relative(BackendKind.LOCAL, RelativeSourcePath("author/book-$number/file.epub"))))
+        // The oldest of all is a listing the addition under way still reads by task ID.
+        val addition = requireNotNull(state.beginAddition(BackendKind.ONEDRIVE, UUID.randomUUID()).first.context)
+        val held = submit(TaskRequest.CandidateConfiguration(addition, "onedrive_browse"), TaskOrigin.MANUAL_SYNC)
+        queue.update(held) { it.copy(record = it.record.copy(state = TaskState.Finished(TaskResult.Completed), controls = DurableTaskQueue.noControls)) }
+        val heldListing = File(files, "onedrive-browser/${held.value}.json").apply { parentFile!!.mkdirs(); writeText("{}") }
         val finished = (1..60L).map { number ->
             submit(request(number), TaskOrigin.USER_DOWNLOAD).also { task ->
                 queue.update(task) { it.copy(record = it.record.copy(state = TaskState.Finished(TaskResult.Completed),
@@ -130,6 +135,8 @@ class CacheMaintenanceTest {
         (2..9).forEach { assertNull(queue.get(finished[it])) }
         (listOf(0, 1) + (10..59)).forEach { assertNotNull(queue.get(finished[it])) }
         assertNotNull(queue.get(dependent))
+        assertNotNull(queue.get(held))
+        assertTrue(heldListing.exists())
         assertEquals(1L, count("task_dependencies"))
         assertEquals(0L, count("cache_cleanup"))
         assertFalse(leftover.exists())
@@ -137,6 +144,13 @@ class CacheMaintenanceTest {
         assertFalse(listing.exists())
         database.close()
         reopen()
+        assertEquals(54, queue.list().size)
+
+        // A restarted addition releases the listing; the history limit then removes it with its file.
+        state.beginAddition(BackendKind.ONEDRIVE, UUID.randomUUID())
+        maintenance.recoverLocked()
+        assertNull(queue.get(held))
+        assertFalse(heldListing.exists())
         assertEquals(53, queue.list().size)
     }
 

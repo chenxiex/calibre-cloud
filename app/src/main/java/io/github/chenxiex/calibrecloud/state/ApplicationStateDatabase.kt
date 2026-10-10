@@ -25,6 +25,8 @@ import android.database.sqlite.SQLiteOpenHelper
  * Version 11 adds the format priority setting, EPUB first by default.
  * Version 12 keeps the list of configured libraries, each with its own access key, and the library
  * being added; the single local grant and candidate selections without a location are migrated away.
+ * Version 13 moves the stale-path sync a task waits on into task_dependencies; an upgraded database
+ * keeps the emptied queued_tasks.source_sync column, which SQLite on API 30 cannot drop.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  * Raising [VERSION] also requires its reversal in the androidTest StateSchemaHistory fixture.
@@ -32,7 +34,7 @@ import android.database.sqlite.SQLiteOpenHelper
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
     SQLiteOpenHelper(context.applicationContext, name, null, VERSION) {
     companion object {
-        const val VERSION = 12
+        const val VERSION = 13
     }
 
     private val privateFiles = context.applicationContext.filesDir
@@ -367,7 +369,6 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         add("downloaded_copies", "calibre_recorded", "INTEGER NOT NULL DEFAULT 0")
         add("downloaded_copies", "calibre_modified", "TEXT")
         add("downloaded_copies", "calibre_size", "INTEGER")
-        add("queued_tasks", "source_sync", "TEXT")
         add("queued_tasks", "missing_path", "TEXT")
         db.execSQL("CREATE TABLE IF NOT EXISTS source_throttle (scope TEXT PRIMARY KEY NOT NULL, until INTEGER NOT NULL)")
     }
@@ -391,5 +392,18 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         if (oldVersion <= 9) migrateLocationKeys(db)
         if (oldVersion <= 10) createFormatPriority(db)
         if (oldVersion <= 11) createLibraryList(db)
+        if (oldVersion <= 12) migrateSourceSyncs(db)
+    }
+
+    /** The edge code is frozen here; no earlier version removed an awaited sync, so each recorded one still exists. */
+    private fun migrateSourceSyncs(db: SQLiteDatabase) {
+        val present = db.rawQuery("PRAGMA table_info(queued_tasks)", null).use {
+            generateSequence { if (it.moveToNext()) it.getString(1) else null }.any { name -> name == "source_sync" }
+        }
+        if (!present) return
+        db.execSQL("""INSERT OR IGNORE INTO task_dependencies(task_id, prerequisite_id, requirement)
+            SELECT task_id, source_sync, 'awaited_sync' FROM queued_tasks
+            WHERE source_sync IS NOT NULL AND source_sync != task_id AND source_sync IN (SELECT task_id FROM queued_tasks)""")
+        db.execSQL("UPDATE queued_tasks SET source_sync = NULL")
     }
 }

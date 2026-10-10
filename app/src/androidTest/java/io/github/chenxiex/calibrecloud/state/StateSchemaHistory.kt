@@ -61,6 +61,13 @@ object StateSchemaHistory {
 
     /** Key: a version; value: turns that version's schema into the previous version's. */
     private val reversals: Map<Int, (SQLiteDatabase) -> Unit> = mapOf(
+        13 to { db ->
+            // Version 12 kept the awaited stale-path sync in its own column.
+            db.execSQL("ALTER TABLE queued_tasks ADD COLUMN source_sync TEXT")
+            db.execSQL("""UPDATE queued_tasks SET source_sync = (SELECT prerequisite_id FROM task_dependencies d
+                WHERE d.task_id = queued_tasks.task_id AND d.requirement = 'awaited_sync')""")
+            db.execSQL("DELETE FROM task_dependencies WHERE requirement = 'awaited_sync'")
+        },
         12 to { db ->
             // Version 11 kept one local grant, that of the selected local directory.
             db.execSQL("CREATE TABLE local_authorization (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), tree_uri TEXT NOT NULL)")

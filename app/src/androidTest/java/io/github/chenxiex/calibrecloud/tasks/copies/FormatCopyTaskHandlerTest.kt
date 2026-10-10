@@ -814,6 +814,8 @@ class FormatCopyTaskHandlerTest {
         assertEquals(listOf(TaskOrigin.DOWNLOADED_FORMAT_UPDATE), sync.origins)
         assertEquals(SourceAvailability.CONFIRMED_MISSING, state.find(copy)!!.sourceAvailability)
         assertTrue(queue.control(check, TaskControl.RETRY))
+        // Retry drops the edge to the old sync, so the task can request a new one.
+        assertNull(queue.get(check)!!.sourceSync)
         coordinator(source, sync).drain()
         assertEquals(2, sync.tasks.size)
     }

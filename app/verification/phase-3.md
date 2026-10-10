@@ -684,6 +684,12 @@ Q53／Q54 真实服务验证（2026-10-08）：用户先在应用下载《哈姆
 - 新增 `CacheMaintenanceTest.finishedHistoryKeepsTheNewestFiftyAndTheTasksOthersStillNeed`（真实 SQLite 与私有文件）：60 个已结束任务中最新 50 个保留，最旧的前置依赖与带 checkpoint 的任务保留，其余 8 个删除且其 `book-staging` 与 `onedrive-browser` 文件被删除，journal 清空，依赖边仍在，重开数据库后为 53 个任务。PA6 上与 `CacheMaintenanceTest`、`DurableTaskQueueTest`、`TaskScreenTest`、`CoverTaskHandlerTest` 同次 **70 tests、0 failures**。
 - 同一组构建命令：JVM **155 tests、0 failures**，两种 lint 各 0 errors、5 项既有版本提示；全量 `connectedDebugAndroidTest` **282 tests、0 failures**，19 项按设计跳过，7 分 35 秒。`git diff --check`、仓库 Markdown 链接与锚点检查通过。
 
+### 保留规则重构（任务 owner 与依赖边）
+
+- 工程重构，不改产品行为：每种 `TaskRequest` 必须声明 `owner`（`TaskOwner.Queue` 或 `TaskOwner.Selection`），清理按 owner 是否仍持有判断，不再按任务类型写特例；路径失效同步从 `queued_tasks.source_sync` 迁为 `task_dependencies` 中要求为 `awaited_sync` 的运行时边（schema v13），调度与清理统一读取依赖表；写回不再单独判断，改由通用的 `safeTerminal`；`CacheMaintenance` 两处任务私有文件 journal 合并为 `journalTaskInputs`。
+- 新增 `TaskSchemaMigrationTest.versionTwelveUpgradeMovesTheAwaitedSyncIntoADependencyEdge`（v12 列值迁为边，旧列清空，任务仍以依赖等待同步）；`finishedHistoryKeepsTheNewestFiftyAndTheTasksOthersStillNeed` 增加被进行中添加持有的目录结果：持有时保留其任务与文件，重新开始添加后被清理；`stillMissingAfterSyncFailsOnceAndOnlyThenMarksCopyUnavailable` 断言重试删除同步边。
+- JVM **155 tests、0 failures**；debug／release lint 各 0 errors、5 项既有版本提示；PA6 全量 `connectedDebugAndroidTest` **283 tests、0 failures**，19 项按设计跳过，9 分 57 秒。测试后设备上只有正式应用，debug 与测试包已卸载。
+
 ### 未完成
 
 - 任务历史清理在真机长期使用下的观感（任务页页数）未目视核对。

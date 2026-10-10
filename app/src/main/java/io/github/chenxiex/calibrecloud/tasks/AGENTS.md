@@ -63,7 +63,7 @@ AC05 的持久调度、并发唤醒、控制、有限重试／退避及阶段恢
 - 进入源提交前持久保存 Unknown 证据；处理器确定提交结果后立即调用 `recordCommit()`，确认写入不得退回未写入。安全失败的未提交写回仅在后来相关意图尚未开始时可重试；后来意图开始后旧任务失去重试能力，新的用户意图须重新入队，不能重放旧目标颠倒顺序。已确认写回从 WRITE_REFETCH 恢复，不重放提交；未知提交只能先到 RECOVERY_CHECK。已确认但未刷新、暂停或失败的流程保持当前书库的执行屏障，不能仅因 Finished 放行相关写回；切换书库停放旧库任务，不能阻塞新库的独立工作。
 - 恢复、继续及重试都先调用处理器 `recover()` 重新核验源版本与暂存。队列不会仅凭 Running 或曾存在暂存判成功。瞬时网络错误与服务端限流／暂时错误（`THROTTLED`）最多自动重试三次，指数退避与服务端等待取较长者，退避期分别显示等待网络与等待限流；离线等待和永久错误分别处理，下一次唤醒不忙循环。
 - 限流按书库生效（R08）：任一后端的 `THROTTLED` 重试时协调器把服务端 Retry-After（缺失时用本任务退避）记入 `source_throttle`，范围为任务所属书库（导入前的候选为其 scope 书库或选择代号），截止前同范围的其它源任务在选择事务中显示等待限流，并以截止时间作为后台唤醒时刻；其它书库不受影响。当前只有 OneDrive 报告限流。截止时间只延长不缩短，进程重启后仍遵守，过期行在选择时删除。
-- 按路径找不到源文件且源声明 `resyncsMissingPath`（R11，Q54，当前为 OneDrive）：副本、版本检查与封面处理器经 `staleSource` 提交一次当前书库的元数据同步（应用容器经 `StartupSync.request`），来源与优先级继承该任务的有效来源，并返回 `StageOutcome.AwaitSync`；协调器把同步任务 ID 与找不到的路径记入 `source_sync`／`missing_path`，任务等待依赖且不被本轮驱动延后，同步结束后按新导入重新执行一次（副本任务此时允许新路径）。新导入的路径未变时不再请求、直接失败；路径变化后仍找不到也失败；只有同步成功完成才把已下载副本标为源已不可用。每个任务只同步一次，用户重试清除记录。不循环，不以列目录搜索文件；其它源直接确认缺失。
+- 按路径找不到源文件且源声明 `resyncsMissingPath`（R11，Q54，当前为 OneDrive）：副本、版本检查与封面处理器经 `staleSource` 提交一次当前书库的元数据同步（应用容器经 `StartupSync.request`），来源与优先级继承该任务的有效来源，并返回 `StageOutcome.AwaitSync`；协调器把找不到的路径记入 `missing_path`，并为同步任务添加一条运行时依赖边（`task_dependencies` 中要求为 `awaited_sync`，同步以任何结果结束即满足；`QueueEntry.sourceSync` 由该边读出），任务等待依赖且不被本轮驱动延后，同步结束后按新导入重新执行一次（副本任务此时允许新路径）。新导入的路径未变时不再请求、直接失败；路径变化后仍找不到也失败；只有同步成功完成才把已下载副本标为源已不可用。每个任务只同步一次，用户重试删除该边及路径记录。不循环，不以列目录搜索文件；其它源直接确认缺失。
 - 需要重新登录（OneDrive `LOGIN_REQUIRED`）与本地目录授权撤销（本地 `AUTHORIZATION_EXPIRED`）由源的 `reauthorization` 声明，处理器经 `authorizationWait` 返回等待登录／等待目录授权，保留可复用暂存；OneDrive 403 等永久无权限仍判为失败。成功登录、目录重新授权及每次打开主界面调用 `BackgroundTasks.resumeAuthorizationWaits()`，由 [AuthorizationResume](background/AuthorizationResume.kt) 处理：书库任务随唤醒重新执行；候选任务绑定选择代号与授权，对应后端 `LibraryAuthorization.ready()` 后，仍属当前选择（或重选回同一已导入书库，本地目录重新授权即如此）时以等价新请求继续并取消旧请求，不会因此切换当前书库，已无法执行的旧候选取消。不能取消当前代号的候选，否则会撤销该代号。
 - `CandidateConfiguration` 只承接内部注册的配置源访问，使用选择代号、后端和不含凭据的授权会话 ID，不分配 LibraryId，不能带书籍或写回依赖。同步（`LIBRARY_SYNC`）的代号须为当前选择的代号；目录浏览的代号须为进行中添加（`library_addition`）的代号，浏览不改变当前选择，提交时也不记录 `scope_library_id`。两者都须与记录的授权会话一致；重新开始或放弃添加、换账号登录或重选书库都使旧代号失效。取消同步任务在控制事务中撤销当前选择的旧代号，取消浏览任务不影响添加；执行中的旧候选结束不能发出成功缓存事件。真正验证后的发布仍须调用状态库的代号校验事务，禁止先检查再无条件写入当前配置。
 - 状态事件在数据库提交后发出；观察者重新读取持久状态。`cachePublished` 只能在实际完整缓存发布之后使用；阶段完成、临时文件生成或源写入确认都不等于缓存发布。生产处理器须遵守后续传输／导入的原子发布契约。
@@ -107,7 +107,11 @@ AC05 的持久调度、并发唤醒、控制、有限重试／退避及阶段恢
 
 ## 已结束任务的保留
 
-已结束任务（完成、失败、取消）只保留调度序号最新的 `DurableTaskQueue.FINISHED_HISTORY`（50）条（R18、Q74）。`CacheMaintenance.recoverLocked` 在每次 `restorePending()`／`drain()` 前、没有其它清理 journal 时调用 `pruneFinished`：同一事务删除更早的任务行及其出边，并写入 `INPUTS` journal 列出这些任务的 `book-staging`、`cover-staging`、`snapshots`、`onedrive-browser` 私有文件，随后按 journal 删除，进程中断后下次恢复继续。仍为其它任务前置依赖或路径失效同步、保留 checkpoint（待 `stopped()` 回收）、写回未到安全终点、或属于当前选择／进行中添加的候选任务（向导仍读取其目录结果）不删除，也不计入删除名单。
+已结束任务（完成、失败、取消）只保留调度序号最新的 `DurableTaskQueue.FINISHED_HISTORY`（50）条（R18、Q74）。`CacheMaintenance.recoverLocked` 在每次 `restorePending()`／`drain()` 前、没有其它清理 journal 时调用 `pruneFinished`：同一事务删除更早的任务行及其出边，并写入 `INPUTS` journal 列出这些任务的 `book-staging`、`cover-staging`、`snapshots`、`onedrive-browser` 私有文件，随后按 journal 删除，进程中断后下次恢复继续。以下任务不删除：
+
+- 其 `TaskOwner` 仍持有：每种 `TaskRequest` 必须声明 `owner`，由编译器保证不会遗漏。`TaskOwner.Queue` 表示队列外无人持有；`TaskOwner.Selection` 表示创建它的选择（及可选的进行中添加）仍为当前时由其持有，例如向导按任务 ID 读取的目录结果。新增需要在队列外按任务 ID 读取结果的任务类型时，为它声明对应的 owner，而不是在清理处添加特例。
+- 仍是 `task_dependencies` 中任一边的前置任务，包括提交时的依赖和运行时添加的路径失效同步。任务之间的新引用一律使用依赖边，清理无需改动。
+- 自身状态未结束：保留 checkpoint（待 `stopped()` 回收）或源提交尚未到安全终点（`safeTerminal`）。
 
 ## 清理撤销与恢复
 

@@ -41,8 +41,25 @@ sealed interface SnapshotFreshness {
 /** Narrow selection-scoped context; authorizationId identifies an authorization session, never a token. */
 data class CandidateContext(val selectionToken: UUID, val backend: BackendKind, val authorizationId: UUID)
 
+/**
+ * Who decides when a finished task may be removed (R18, Q74). Every request type declares one, so a
+ * new kind of task cannot leave it out; something holding a task from outside the queue, such as a
+ * wizard reading its result by task ID, is expressed here and nowhere else.
+ */
+sealed interface TaskOwner {
+    /** No holder outside the queue: removed once older than the kept history and no task depends on it. */
+    data object Queue : TaskOwner
+
+    /**
+     * The selection that created the task holds it while it is current; with [includesAddition], so does
+     * the library addition under way with that token. Once both end, cleanup withdraws the task.
+     */
+    data class Selection(val context: CandidateContext, val includesAddition: Boolean) : TaskOwner
+}
+
 sealed interface TaskRequest {
     val libraryId: LibraryId?
+    val owner: TaskOwner
 
     /** Internal backend registration only; no book identity exists before successful validation. */
     data class CandidateConfiguration(
@@ -53,6 +70,8 @@ sealed interface TaskRequest {
         val directoryPage: Int = 0,
     ) : TaskRequest {
         override val libraryId: LibraryId? = null
+        // The wizard reads a root's listing by task ID; only the library's own sync excludes the addition.
+        override val owner: TaskOwner get() = TaskOwner.Selection(context, operation != LIBRARY_SYNC)
         init {
             require(operation.matches(Regex("[a-z][a-z0-9_]{0,63}")))
             require(directoryPage >= 0)
@@ -68,22 +87,27 @@ sealed interface TaskRequest {
     data class MetadataSync(
         override val libraryId: LibraryId,
         val freshness: SnapshotFreshness = SnapshotFreshness.CurrentSource,
-    ) : TaskRequest
+    ) : TaskRequest {
+        override val owner: TaskOwner get() = TaskOwner.Queue
+    }
 
     /** One book/format per schedulable child; expectedVersion is an opaque comparison premise. */
     data class FormatCopy(val resource: FormatResource, val expectedVersion: FileVersion? = null) : TaskRequest {
         override val libraryId: LibraryId get() = resource.book.libraryId
+        override val owner: TaskOwner get() = TaskOwner.Queue
         init { require(expectedVersion == null || expectedVersion.backend == resource.source.backend) }
     }
 
     /** Explicit single downloaded-format version check; never downloads an absent copy. */
     data class FormatCheck(val key: io.github.chenxiex.calibrecloud.model.CopyKey) : TaskRequest {
         override val libraryId: LibraryId get() = key.book.libraryId
+        override val owner: TaskOwner get() = TaskOwner.Queue
     }
 
     /** The missing covers of one shown page in display order, fixed at submission (R10). */
     data class CoverLoad(override val libraryId: LibraryId, val books: FrozenSet<BookKey>) : TaskRequest {
         constructor(book: BookKey) : this(book.libraryId, FrozenSet(listOf(book)))
+        override val owner: TaskOwner get() = TaskOwner.Queue
         init { require(books.isNotEmpty() && books.all { it.libraryId == libraryId }) }
     }
 
@@ -94,6 +118,7 @@ sealed interface TaskRequest {
         val column: CustomColumnId,
         val target: Boolean,
     ) : TaskRequest {
+        override val owner: TaskOwner get() = TaskOwner.Queue
         init {
             require(books.isNotEmpty() && books.all { it.libraryId == libraryId })
         }

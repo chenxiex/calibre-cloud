@@ -28,7 +28,10 @@ data class QueueEntry(
     val checkpoint: RecoveryCheckpoint? = null,
     val recoveryRequired: Boolean = false,
     val control: TaskControl? = null,
-    /** Metadata sync submitted for this task's stale OneDrive path; set at most once until user retry (R11). */
+    /**
+     * Metadata sync submitted for this task's stale OneDrive path; set at most once until user retry (R11).
+     * Stored as a dependency edge added at run time, satisfied once the sync finishes with any result.
+     */
     val sourceSync: TaskId? = null,
     /** The path that was not found; after the sync an unchanged path fails without another request. */
     val missingPath: RelativeSourcePath? = null,
@@ -78,7 +81,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                     if (it.moveToFirst()) it.getString(0) else null
                 } ?: return@transaction rejected()
                 if (request is TaskRequest.FormatCopy && backend != backendCode(request.resource.source.backend)) return@transaction rejected()
-            } else if (!activeCandidate(this, request)) return@transaction rejected()
+            } else if (!holds(this, request.owner)) return@transaction rejected()
             val dependencies = submission.dependencies.toMutableSet()
             if (request is TaskRequest.ReadStatusWrite) {
                 all.filter { it.record.submission.request is TaskRequest.ReadStatusWrite && !safeTerminal(it.record) }.forEach {
@@ -150,6 +153,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             val all = entries(this)
             if (all.any { it.record.state is TaskState.Running }) return@transaction null
             execSQL("DELETE FROM source_throttle WHERE until <= ?", arrayOf<Any>(now))
+            val edges = edges(this)
             val reserved = all.firstOrNull { it.record.submission.request is TaskRequest.ReadStatusWrite &&
                 it.record.commit != CommitState.NotCommitted && !safeTerminal(it.record) && active(this, it.record) }
             val eligible = mutableListOf<QueueEntry>()
@@ -170,11 +174,9 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 // A throttled library holds all of its source work until the server's deadline.
                 val throttled = throttleScope(this, record)?.let { throttleDeadline(this, it) }?.takeIf { it > now }
                 if (throttled != null) reasons.add(WaitingReason.THROTTLED)
-                if (entry.sourceSync != null && all.find { it.record.id == entry.sourceSync }?.record?.state.let {
-                        it != null && it !is TaskState.Finished }) reasons.add(WaitingReason.DEPENDENCY)
-                if (record.submission.dependencies.any { edge ->
-                        val parent = all.find { it.record.id == edge.taskId }?.record
-                        parent == null || !satisfies(parent, edge.requirement)
+                if (edges[record.id].orEmpty().any { (prerequisite, requirement) ->
+                        val parent = all.find { it.record.id == prerequisite }?.record
+                        parent == null || !satisfies(parent, requirement)
                     }) reasons.add(WaitingReason.DEPENDENCY)
                 val after = (record.submission.request as? TaskRequest.MetadataSync)?.freshness as? SnapshotFreshness.AfterWrite
                 if (reserved != null && record.id != reserved.record.id && after?.writeTaskId != reserved.record.id) reasons.add(WaitingReason.RECOVERY)
@@ -289,26 +291,21 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
 
     /**
      * Deletes, in the caller's transaction, finished tasks older than the newest [keep] (R18, Q74) and
-     * returns them; the caller reclaims their task-keyed private files. A finished task stays while a
-     * task depends on it or waits on it as its stale-path sync, while it keeps a checkpoint for
-     * cleanup, while a write has not reached a safe terminal state, and while it is a candidate of the
-     * current selection or the addition under way, whose listing the wizard still reads.
+     * returns them; the caller reclaims their task-keyed private files. A finished task stays while its
+     * [TaskOwner] still holds it, while another task depends on it, and while its own state is
+     * unsettled: a checkpoint awaiting cleanup or a source commit not yet safely resolved.
      */
     internal fun pruneFinished(db: SQLiteDatabase, keep: Int = FINISHED_HISTORY): List<TaskId> {
-        val all = entries(db)
         val prerequisites = db.rawQuery("SELECT DISTINCT prerequisite_id FROM task_dependencies", null).use {
             buildSet { while (it.moveToNext()) add(TaskId(UUID.fromString(it.getString(0)))) }
         }
-        val awaited = all.mapNotNull { it.sourceSync }.toSet()
-        val pruned = all.filter { it.record.state is TaskState.Finished }
+        val pruned = entries(db).filter { it.record.state is TaskState.Finished }
             .sortedByDescending { it.record.scheduling.sequence.value }
             .drop(keep)
             .filter { entry ->
                 val record = entry.record
-                val request = record.submission.request
-                record.id !in prerequisites && record.id !in awaited && entry.checkpoint == null &&
-                    (request !is TaskRequest.ReadStatusWrite || safeTerminal(record)) &&
-                    (request !is TaskRequest.CandidateConfiguration || !activeCandidate(db, request))
+                !holds(db, record.submission.request.owner) && record.id !in prerequisites &&
+                    entry.checkpoint == null && safeTerminal(record)
             }.map { it.record.id }
         pruned.forEach { id ->
             val args = arrayOf(id.value.toString())
@@ -366,23 +363,24 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     }
 
     /**
-     * A candidate request is active while its token is the current selection's or, for a directory
-     * listing of the library being added, the addition's; both under the same backend and authorization.
+     * Whether [owner] still holds its tasks. A selection holds them while its token is the current
+     * selection's or, with [TaskOwner.Selection.includesAddition], the addition's; both under the same
+     * backend and authorization. Such a task is also the only one that may run before its library exists.
      */
-    private fun activeCandidate(db: SQLiteDatabase, request: TaskRequest): Boolean {
-        val candidate = request as? TaskRequest.CandidateConfiguration ?: return false
+    private fun holds(db: SQLiteDatabase, owner: TaskOwner): Boolean {
+        val selection = owner as? TaskOwner.Selection ?: return false
+        val context = selection.context
         fun matches(table: String) = db.rawQuery("SELECT token, backend, authorization_id FROM $table WHERE singleton = 1", null).use {
-            it.moveToFirst() && it.getString(0) == candidate.context.selectionToken.toString() &&
-                it.getString(1) == backendCode(candidate.context.backend) &&
-                (it.isNull(2) || it.getString(2) == candidate.context.authorizationId.toString())
+            it.moveToFirst() && it.getString(0) == context.selectionToken.toString() &&
+                it.getString(1) == backendCode(context.backend) &&
+                (it.isNull(2) || it.getString(2) == context.authorizationId.toString())
         }
-        return matches("current_selection") ||
-            (candidate.operation != TaskRequest.CandidateConfiguration.LIBRARY_SYNC && matches("library_addition"))
+        return matches("current_selection") || (selection.includesAddition && matches("library_addition"))
     }
 
-    private fun active(db: SQLiteDatabase, record: TaskRecord): Boolean = when (val request = record.submission.request) {
-        is TaskRequest.CandidateConfiguration -> activeCandidate(db, request)
-        else -> db.rawQuery("SELECT library_id FROM current_selection WHERE singleton = 1", null).use {
+    private fun active(db: SQLiteDatabase, record: TaskRecord): Boolean = when (val owner = record.submission.request.owner) {
+        is TaskOwner.Selection -> holds(db, owner)
+        TaskOwner.Queue -> db.rawQuery("SELECT library_id FROM current_selection WHERE singleton = 1", null).use {
             it.moveToFirst() && it.getString(0) == record.libraryId?.value.toString()
         }
     }
@@ -419,7 +417,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     }
 
     private fun entry(db: SQLiteDatabase, id: TaskId): QueueEntry? = entries(db, "WHERE task_id = ?", arrayOf(id.value.toString())).singleOrNull()
-    private fun entries(db: SQLiteDatabase, where: String = "", args: Array<String>? = null): List<QueueEntry> = db.rawQuery("SELECT record, stage, attempts, retry_at, checkpoint, checkpoint_backend, checkpoint_version, recovery_required, control, source_sync, missing_path FROM queued_tasks $where ORDER BY rowid", args).use { c ->
+    private fun entries(db: SQLiteDatabase, where: String = "", args: Array<String>? = null): List<QueueEntry> = db.rawQuery("SELECT record, stage, attempts, retry_at, checkpoint, checkpoint_backend, checkpoint_version, recovery_required, control, (SELECT prerequisite_id FROM task_dependencies d WHERE d.task_id = queued_tasks.task_id AND d.requirement = '$AWAITED_SYNC'), missing_path FROM queued_tasks $where ORDER BY rowid", args).use { c ->
         buildList { while (c.moveToNext()) add(QueueEntry(TaskCodec.decode(c.getString(0)), TaskStage.entries.first { it.code == c.getString(1) },
             c.getInt(2), c.getLong(3), if (c.isNull(4)) null else RecoveryCheckpoint(UUID.fromString(c.getString(4)),
                 if (c.isNull(5)) null else FileVersion(BackendKind.entries.first { backendCode(it) == c.getString(5) }, c.getString(6))),
@@ -434,10 +432,21 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             put("attempts", entry.attempts); put("retry_at", entry.retryAt); put("recovery_required", if (entry.recoveryRequired) 1 else 0)
             put("checkpoint", entry.checkpoint?.generation?.toString()); put("checkpoint_backend", entry.checkpoint?.version?.backend?.let(::backendCode))
             put("checkpoint_version", entry.checkpoint?.version?.token); put("control", entry.control?.code)
-            put("source_sync", entry.sourceSync?.value?.toString()); put("missing_path", entry.missingPath?.value)
+            put("missing_path", entry.missingPath?.value)
         }
-        if (db.update("queued_tasks", values, "task_id = ?", arrayOf(entry.record.id.value.toString())) == 0) db.insertOrThrow("queued_tasks", null, values)
+        val args = arrayOf(entry.record.id.value.toString())
+        if (db.update("queued_tasks", values, "task_id = ?", args) == 0) db.insertOrThrow("queued_tasks", null, values)
+        db.delete("task_dependencies", "task_id = ? AND requirement = ?", args + AWAITED_SYNC)
+        entry.sourceSync?.let { sync -> db.execSQL("INSERT INTO task_dependencies VALUES(?, ?, ?)",
+            arrayOf(entry.record.id.value.toString(), sync.value.toString(), AWAITED_SYNC)) }
     }
+
+    /** Every edge in the queue by dependent task, submitted or added at run time, as (prerequisite, requirement code). */
+    private fun edges(db: SQLiteDatabase): Map<TaskId, List<Pair<TaskId, String>>> =
+        db.rawQuery("SELECT task_id, prerequisite_id, requirement FROM task_dependencies", null).use {
+            buildList { while (it.moveToNext()) add(TaskId(UUID.fromString(it.getString(0))) to
+                (TaskId(UUID.fromString(it.getString(1))) to it.getString(2))) }
+        }.groupBy({ it.first }, { it.second })
     private fun <T> transaction(action: SQLiteDatabase.() -> T): T {
         val db = database.writableDatabase
         db.beginTransaction()
@@ -590,10 +599,18 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             val result = (record.state as? TaskState.Finished)?.result ?: return false
             return record.commit == CommitState.NotCommitted || result == TaskResult.Completed || result is TaskResult.CompletedWithBookFailures
         }
-        private fun satisfies(record: TaskRecord, requirement: DependencyRequirement): Boolean = when (requirement) {
-            DependencyRequirement.SAFE_TERMINAL -> safeTerminal(record)
-            DependencyRequirement.SOURCE_COMMIT_CONFIRMED -> record.commit == CommitState.Confirmed
-            DependencyRequirement.SUCCESS -> (record.state as? TaskState.Finished)?.result.let { it == TaskResult.Completed || it is TaskResult.CompletedWithBookFailures }
+        /**
+         * Requirement code of the edge from a task to the stale-path sync it submitted while running (R11).
+         * It is not part of the submission: retry removes it, and any finished result satisfies it.
+         */
+        internal const val AWAITED_SYNC = "awaited_sync"
+
+        private fun satisfies(record: TaskRecord, requirement: String): Boolean = when (requirement) {
+            AWAITED_SYNC -> record.state is TaskState.Finished
+            DependencyRequirement.SAFE_TERMINAL.code -> safeTerminal(record)
+            DependencyRequirement.SOURCE_COMMIT_CONFIRMED.code -> record.commit == CommitState.Confirmed
+            DependencyRequirement.SUCCESS.code -> (record.state as? TaskState.Finished)?.result.let { it == TaskResult.Completed || it is TaskResult.CompletedWithBookFailures }
+            else -> false
         }
     }
 }
