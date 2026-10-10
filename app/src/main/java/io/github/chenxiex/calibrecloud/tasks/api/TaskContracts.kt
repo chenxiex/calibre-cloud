@@ -3,7 +3,6 @@ package io.github.chenxiex.calibrecloud.tasks.api
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import kotlinx.coroutines.flow.Flow
-import java.util.UUID
 
 /** Allocated transactionally by the persistent queue, not by wall-clock time. */
 data class QueueSequence(val value: Long) {
@@ -25,33 +24,20 @@ data class PriorityPromotion(val origin: TaskOrigin, val sequence: QueueSequence
 
 enum class TaskStage(val code: String) {
     CANDIDATE_ACCESS("candidate_access"),
-    METADATA_FETCH("metadata_fetch"), METADATA_IMPORT("metadata_import"),
     FORMAT_CHECK("format_check"),
     FORMAT_TRANSFER("format_transfer"), FORMAT_PUBLISH("format_publish"),
     COVER_TRANSFER("cover_transfer"), COVER_PUBLISH("cover_publish"),
     WRITE_SNAPSHOT("write_snapshot"), WRITE_PREPARE("write_prepare"), WRITE_COMMIT("write_commit"),
-    WRITE_REFETCH("write_refetch"), WRITE_IMPORT("write_import"), RECOVERY_CHECK("recovery_check"),
 }
 
 enum class WaitingReason(val code: String) {
     NETWORK("network"), THROTTLED("throttled"), LOGIN("login"), DIRECTORY_AUTHORIZATION("directory_authorization"),
-    DEPENDENCY("dependency"), INACTIVE_LIBRARY("inactive_library"), RECOVERY("recovery"),
+    DEPENDENCY("dependency"), INACTIVE_LIBRARY("inactive_library"),
 }
 
 /** Total null means unknown: UI renders text, never an animated indeterminate indicator. */
 data class TaskProgress(val completed: Long, val total: Long? = null) {
     init { require(completed >= 0 && (total == null || total >= completed)) }
-}
-
-/** Protection record is retained across ordinary cache cleanup. Unknown is never directly replayable. */
-sealed interface CommitState {
-    data object NotCommitted : CommitState
-    data object Confirmed : CommitState
-    data class Unknown(val recoveryRecordId: UUID) : CommitState
-}
-
-enum class RetryFrom(val code: String) {
-    FAILED_STAGE("failed_stage"), WRITE_REFETCH("write_refetch"), RECOVERY_CHECK("recovery_check"),
 }
 
 sealed interface TaskError {
@@ -60,29 +46,37 @@ sealed interface TaskError {
     data class BookIdentityChanged(val book: BookKey) : TaskError
 }
 
-data class StageFailure(val stage: TaskStage, val error: TaskError, val commit: CommitState) {
-    val retryFrom: RetryFrom get() = when (commit) {
-        CommitState.NotCommitted -> RetryFrom.FAILED_STAGE
-        CommitState.Confirmed -> RetryFrom.WRITE_REFETCH
-        is CommitState.Unknown -> RetryFrom.RECOVERY_CHECK
-    }
-}
+/** A retry starts again from the handler's recovery check, never by replaying a stale stage result. */
+data class StageFailure(val stage: TaskStage, val error: TaskError)
 
 data class BookFailure(val book: BookKey, val error: TaskError)
 
+/**
+ * A book's read status target still being written (R13, R27), derived from the queue's change lists.
+ * It is not a read status: pages show it in place of the read mark and count it for the mark choice
+ * (R26), while filtering, search and sorting keep using the import.
+ */
+sealed interface PendingRead {
+    val target: Boolean
+    /** In an unfinished write, or pushed and waiting for the sync that follows it to end. */
+    data class Pending(override val target: Boolean) : PendingRead
+    /** The write failed with [error], was cancelled ([error] null), or this book no longer matched. */
+    data class Failed(override val target: Boolean, val error: TaskError?) : PendingRead
+}
+
 sealed interface TaskResult {
-    /** For write workflows, completion means source commit AND successful re-import. */
+    /** A read status write completes once its push succeeded (R16); the sync that follows is its own task. */
     data object Completed : TaskResult
     /**
-     * A write: valid targets were committed and re-imported; invalid entries remain individually visible.
+     * A write: the valid changes were pushed; books that no longer match remain individually visible.
      * A cover batch: the other covers were loaded; these books keep their placeholder.
      */
     data class CompletedWithBookFailures(val failures: FrozenSet<BookFailure>) : TaskResult {
         init { require(failures.isNotEmpty()) }
     }
     data class Failed(val failure: StageFailure) : TaskResult
-    /** Cancelling confirmed writes never undoes source changes; refetch/recovery remains necessary. */
-    data class Cancelled(val commit: CommitState) : TaskResult
+    /** The source push stage cannot be cancelled, so a cancelled write never pushed anything. */
+    data object Cancelled : TaskResult
 }
 
 sealed interface TaskState {
@@ -105,7 +99,6 @@ data class TaskRecord(
     val promotion: PriorityPromotion? = null,
     val state: TaskState,
     val controls: TaskControls,
-    val commit: CommitState = CommitState.NotCommitted,
     /** A previously retained prefix could not be reused; survives process and stage changes. */
     val restartedTransfer: Boolean = false,
 ) {
@@ -117,20 +110,14 @@ data class TaskRecord(
         require(state !is TaskState.Running || state.stage != TaskStage.WRITE_COMMIT ||
             (!controls.canPause && !controls.canCancel))
         val result = (state as? TaskState.Finished)?.result
-        require(result !is TaskResult.Failed || result.failure.commit == commit)
-        require(result !is TaskResult.Cancelled || result.commit == commit)
-        val completed = result == TaskResult.Completed || result is TaskResult.CompletedWithBookFailures
-        require(!completed || commit !is CommitState.Unknown)
         if (result is TaskResult.CompletedWithBookFailures) {
-            val books = when (val request = submission.request) {
-                is TaskRequest.ReadStatusWrite -> request.books
-                is TaskRequest.CoverLoad -> request.books
-                else -> null
+            // A write's books are its change list, kept by the queue beside the record.
+            when (val request = submission.request) {
+                is TaskRequest.CoverLoad -> require(result.failures.all { it.book in request.books })
+                is TaskRequest.ReadStatusWrite -> require(result.failures.all { it.book.libraryId == request.libraryId })
+                else -> throw IllegalArgumentException("No book failures for this request")
             }
-            require(books != null && result.failures.all { it.book in books })
         }
-        require(!completed || submission.request !is TaskRequest.ReadStatusWrite ||
-            commit == CommitState.Confirmed)
         require(submission.dependencies.none { it.taskId == id })
         require(scheduling.priority == effectiveOrigin.priority)
         require(promotion == null || (originalOrigin.priority == TaskPriority.LOW && scheduling.sequence == promotion.sequence))
@@ -155,8 +142,7 @@ sealed interface TaskEvent {
  * Implementations must atomically persist requests, deduplication, dependencies and queue sequences;
  * only eligible tasks in the active library execute, one at a time without automatic preemption.
  * Waiting work cannot block unrelated eligible work; batches reselect between resource children.
- * Related writes preserve submission order and reserve write-refetch before unrelated selection.
- * An unknown commit blocks dependent writes until recovery establishes a safe boundary.
+ * Read status writes of a library run in submission order, each followed directly by its sync (R16).
  */
 interface TaskQueue {
     suspend fun submit(submission: TaskSubmission): SubmissionResult

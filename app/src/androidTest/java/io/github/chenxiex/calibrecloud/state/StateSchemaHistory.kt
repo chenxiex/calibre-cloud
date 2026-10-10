@@ -25,6 +25,11 @@ object StateSchemaHistory {
         attempts INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0, checkpoint TEXT,
         checkpoint_backend TEXT, checkpoint_version TEXT, recovery_required INTEGER NOT NULL DEFAULT 0, control TEXT,
         revoked INTEGER NOT NULL DEFAULT 0, scope_library_id TEXT)"""
+    private const val QUEUE_V13 = """CREATE TABLE queued_tasks (
+        task_id TEXT PRIMARY KEY NOT NULL, record TEXT NOT NULL, stage TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0, checkpoint TEXT,
+        checkpoint_backend TEXT, checkpoint_version TEXT, recovery_required INTEGER NOT NULL DEFAULT 0, control TEXT,
+        revoked INTEGER NOT NULL DEFAULT 0, scope_library_id TEXT, missing_path TEXT)"""
     private const val COPIES_V8 = """CREATE TABLE downloaded_copies (
         library_id TEXT NOT NULL REFERENCES library_bindings(library_id), source_id INTEGER NOT NULL CHECK(source_id > 0),
         source_uuid TEXT NOT NULL, format TEXT NOT NULL, file_generation TEXT NOT NULL, title TEXT NOT NULL,
@@ -61,6 +66,12 @@ object StateSchemaHistory {
 
     /** Key: a version; value: turns that version's schema into the previous version's. */
     private val reversals: Map<Int, (SQLiteDatabase) -> Unit> = mapOf(
+        14 to { db ->
+            // Version 13 kept no change lists, start marks, follow-up syncs or next selection.
+            db.execSQL("DROP TABLE read_status_changes")
+            db.execSQL("DROP TABLE dispatch_next")
+            rebuild(db, "queued_tasks", QUEUE_V13)
+        },
         13 to { db ->
             // Version 12 kept the awaited stale-path sync in its own column.
             db.execSQL("ALTER TABLE queued_tasks ADD COLUMN source_sync TEXT")

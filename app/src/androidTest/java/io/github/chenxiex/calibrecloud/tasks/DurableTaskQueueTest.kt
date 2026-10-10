@@ -132,65 +132,29 @@ class DurableTaskQueueTest {
     }
 
     @Test
-    fun sourceVersionsAndFrozenResourceSetsArePersistedWithoutMerging() = runBlocking<Unit> {
+    fun sourceVersionsArePersistedWithoutMerging() = runBlocking<Unit> {
         val resource = FormatResource(book(1), BookFormat.parse("EPUB"), SourceFileLocator.Local("fixture-book"))
         val first = created(TaskSubmission(TaskRequest.FormatCopy(resource, FileVersion(BackendKind.LOCAL, "one")), TaskOrigin.USER_DOWNLOAD))
         val second = created(TaskSubmission(TaskRequest.FormatCopy(resource, FileVersion(BackendKind.LOCAL, "two")), TaskOrigin.USER_DOWNLOAD))
         assertNotEquals(first, second)
-        val mutableBooks = mutableListOf(book(2))
-        val request = TaskRequest.ReadStatusWrite(identity.id, FrozenSet(mutableBooks), CustomColumnId(1, "#finished"), true)
-        val write = created(TaskSubmission(request, TaskOrigin.USER_READ_STATUS))
-        mutableBooks.add(book(3))
         database.close()
         reopen()
-        assertEquals(request, queue.get(write)!!.record.submission.request)
-        assertEquals(1, (queue.get(write)!!.record.submission.request as TaskRequest.ReadStatusWrite).books.size)
         assertEquals("one", (queue.get(first)!!.record.submission.request as TaskRequest.FormatCopy).expectedVersion!!.token)
     }
 
     @Test
-    fun crossLibraryAndIncorrectCommitDependenciesAreRejectedTransactionally() = runBlocking<Unit> {
+    fun crossLibraryDependenciesAndWritesWithoutChangeListsAreRejectedTransactionally() = runBlocking<Unit> {
         val parent = created(sync(TaskOrigin.MANUAL_SYNC))
         val before = queue.list()
-        val foreign = TaskSubmission(TaskRequest.MetadataSync(LibraryId(UUID.randomUUID())), TaskOrigin.MANUAL_SYNC,
+        val foreign = TaskSubmission(TaskRequest.CoverLoad(BookKey(LibraryId(UUID.randomUUID()), 1, UUID.randomUUID())), TaskOrigin.MANUAL_SYNC,
             FrozenSet(listOf(TaskDependency(parent, DependencyRequirement.SUCCESS))))
         assertTrue(queue.submit(foreign) is SubmissionResult.Rejected)
-        val wrongStage = cover(1, TaskOrigin.USER_DOWNLOAD).copy(dependencies = FrozenSet(listOf(TaskDependency(parent, DependencyRequirement.SOURCE_COMMIT_CONFIRMED))))
-        assertTrue(queue.submit(wrongStage) is SubmissionResult.Rejected)
+        val bare = TaskSubmission(TaskRequest.ReadStatusWrite(identity.id, column, UUID.randomUUID()), TaskOrigin.USER_READ_STATUS)
+        assertTrue(queue.submit(bare) is SubmissionResult.Rejected)
         assertEquals(before, queue.list())
         database.close()
         reopen()
         assertEquals(before, queue.list())
-    }
-
-    @Test
-    fun oppositeWriteTargetsSerializeAndUnknownCommitBlocksLaterIntent() = runBlocking<Unit> {
-        val first = created(write(true))
-        val second = created(write(false))
-        assertNotEquals(first, second)
-        assertTrue(TaskDependency(first, DependencyRequirement.SAFE_TERMINAL) in queue.get(second)!!.record.submission.dependencies)
-        val evidence = CommitState.Unknown(UUID.randomUUID())
-        queue.update(first, action = { entry -> entry.copy(record = entry.record.copy(commit = evidence,
-            state = TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.WRITE_COMMIT, TaskError.Source(StorageError(StorageErrorKind.VERSION_CONFLICT)), evidence))),
-            controls = TaskControls(false, false, false, true))) })
-        database.close()
-        reopen()
-        assertEquals(evidence, queue.get(first)!!.record.commit)
-        assertNull(queue.claim(0, { emptySet() }, { true }))
-        assertTrue(WaitingReason.DEPENDENCY in (queue.get(second)!!.record.state as TaskState.Waiting).reasons)
-    }
-
-    @Test
-    fun confirmedWriteReservesFreshRefreshAndDoesNotReusePrewriteSnapshot() = runBlocking<Unit> {
-        val oldSnapshot = created(sync(TaskOrigin.MANUAL_SYNC))
-        val write = created(write(true))
-        queue.update(write, action = { entry -> entry.copy(record = entry.record.copy(commit = CommitState.Confirmed,
-            state = TaskState.Waiting(FrozenSet(listOf(WaitingReason.DEPENDENCY)))), stage = TaskStage.WRITE_REFETCH) })
-        val refresh = created(TaskSubmission(TaskRequest.MetadataSync(identity.id, SnapshotFreshness.AfterWrite(write)), TaskOrigin.USER_READ_STATUS,
-            FrozenSet(listOf(TaskDependency(write, DependencyRequirement.SOURCE_COMMIT_CONFIRMED)))))
-        assertNotEquals(oldSnapshot, refresh)
-        assertEquals(refresh, queue.claim(0, { if (it.id == write) setOf(WaitingReason.DEPENDENCY) else emptySet() }, { true })!!.record.id)
-        assertTrue(WaitingReason.RECOVERY in (queue.get(oldSnapshot)!!.record.state as TaskState.Waiting).reasons)
     }
 
     @Test
@@ -294,7 +258,7 @@ class DurableTaskQueueTest {
             if (command == TaskControl.PAUSE) {
                 assertEquals(TaskState.Paused(TaskStage.COVER_TRANSFER), queue.get(task)!!.record.state)
                 assertTrue(queue.control(task, TaskControl.CANCEL))
-            } else assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(task)!!.record.state)
+            } else assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(task)!!.record.state)
         }
     }
 
@@ -402,71 +366,17 @@ class DurableTaskQueueTest {
     }
 
     @Test
-    fun confirmedWriteRefreshFailureRetriesWithoutSourceResubmissionAndCommitCannotPause() = runBlocking<Unit> {
-        val task = created(write(true))
-        val executed = mutableListOf<TaskStage>()
-        var failRefresh = true
-        val handler = FixtureHandler { entry, execution ->
-            executed.add(entry.stage)
-            if (entry.stage == TaskStage.WRITE_COMMIT) {
-                assertFalse(queue.control(task, TaskControl.PAUSE))
-                assertFalse(queue.control(task, TaskControl.CANCEL))
-                execution.recordCommit(CommitState.Confirmed)
-            }
-            if (entry.stage == TaskStage.WRITE_REFETCH && failRefresh) {
-                failRefresh = false
-                StageOutcome.Fail(TaskError.Source(StorageError(StorageErrorKind.NO_NETWORK)))
-            } else next(entry)
-        }
-        TaskCoordinator(queue, listOf(handler)).drain()
-        val failed = queue.get(task)!!.record
-        assertEquals(CommitState.Confirmed, failed.commit)
-        assertEquals(RetryFrom.WRITE_REFETCH, ((failed.state as TaskState.Finished).result as TaskResult.Failed).failure.retryFrom)
-        database.close()
-        reopen()
-        assertTrue(queue.control(task, TaskControl.RETRY))
-        TaskCoordinator(queue, listOf(handler)).drain()
-        assertEquals(1, executed.count { it == TaskStage.WRITE_COMMIT })
-        assertEquals(listOf(TaskStage.WRITE_REFETCH, TaskStage.WRITE_IMPORT), executed.takeLast(2))
-        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
-    }
-
-    @Test
-    fun unknownWriteRetryStartsRecoveryCheckAndCannotReenterCommitWithoutResolution() = runBlocking<Unit> {
-        val task = created(write(true))
-        val evidence = CommitState.Unknown(UUID.randomUUID())
-        queue.update(task, action = { entry -> entry.copy(stage = TaskStage.WRITE_COMMIT, record = entry.record.copy(commit = evidence,
-            state = TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.WRITE_COMMIT, TaskError.Source(StorageError(StorageErrorKind.LOCAL_IO)), evidence))),
-            controls = TaskControls(false, false, false, true))) })
-        database.close()
-        reopen()
-        assertTrue(queue.control(task, TaskControl.RETRY))
-        val executed = mutableListOf<TaskStage>()
-        val handler = FixtureHandler { entry, execution ->
-            executed.add(entry.stage)
-            if (entry.stage == TaskStage.RECOVERY_CHECK) {
-                execution.recordCommit(CommitState.Confirmed)
-                StageOutcome.Advance(TaskStage.WRITE_REFETCH)
-            } else next(entry)
-        }
-        TaskCoordinator(queue, listOf(handler)).drain()
-        assertEquals(listOf(TaskStage.RECOVERY_CHECK, TaskStage.WRITE_REFETCH, TaskStage.WRITE_IMPORT), executed)
-        assertEquals(CommitState.Confirmed, queue.get(task)!!.record.commit)
-        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(task)!!.record.state)
-    }
-
-    @Test
     fun cacheEventsRequireFinalStageAndFollowDurableCompletion() = runBlocking<Unit> {
         val events = mutableListOf<TaskEvent>()
         val observed = launch(start = CoroutineStart.UNDISPATCHED) { queue.events.collect { events.add(it) } }
-        val incomplete = created(sync(TaskOrigin.MANUAL_SYNC))
+        val incomplete = created(copy(1))
         TaskCoordinator(queue, listOf(FixtureHandler { _, _ -> StageOutcome.Complete(cachePublished = true) })).drain()
         yield()
         assertTrue(queue.get(incomplete)!!.record.state is TaskState.Finished)
         assertTrue(events.none { it is TaskEvent.CacheChanged })
-        val complete = created(sync(TaskOrigin.MANUAL_SYNC))
+        val complete = created(copy(2))
         TaskCoordinator(queue, listOf(FixtureHandler { entry, _ ->
-            if (entry.stage == TaskStage.METADATA_IMPORT) StageOutcome.Complete(cachePublished = true) else next(entry)
+            if (entry.stage == TaskStage.FORMAT_PUBLISH) StageOutcome.Complete(cachePublished = true) else next(entry)
         })).drain()
         yield()
         observed.cancelAndJoin()
@@ -480,15 +390,12 @@ class DurableTaskQueueTest {
     }
 
     @Test
-    fun previousLibraryCommitReservationDoesNotBlockNewLibrary() = runBlocking<Unit> {
-        val oldWrite = created(write(true))
-        queue.update(oldWrite) { entry -> entry.copy(record = entry.record.copy(commit = CommitState.Confirmed,
-            state = TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK)))), stage = TaskStage.WRITE_REFETCH) }
+    fun previousLibraryWriteDoesNotBlockNewLibrary() = runBlocking<Unit> {
+        val oldWrite = mark(1L to true)
         val replacement = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.Local("test.documents", "other-fixture-root"), UUID.randomUUID())
         assertTrue(state.bindValidated(state.select(replacement.location).token, replacement))
-        val newTask = created(TaskSubmission(TaskRequest.MetadataSync(replacement.id), TaskOrigin.MANUAL_SYNC))
+        val newTask = created(TaskSubmission(TaskRequest.CoverLoad(BookKey(replacement.id, 1, UUID.randomUUID())), TaskOrigin.USER_OPEN))
         assertEquals(newTask, queue.claim(0, { emptySet() }, { true })!!.record.id)
-        assertEquals(CommitState.Confirmed, queue.get(oldWrite)!!.record.commit)
         assertTrue(WaitingReason.INACTIVE_LIBRARY in (queue.get(oldWrite)!!.record.state as TaskState.Waiting).reasons)
     }
 
@@ -510,40 +417,191 @@ class DurableTaskQueueTest {
         release.complete(Unit)
         withTimeout(10_000) { running.join() }
         assertEquals(newer, state.current())
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(candidate)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(candidate)!!.record.state)
     }
 
     @Test
-    fun uncommittedWriteCannotRetryAfterLaterRelatedIntentStarts() = runBlocking<Unit> {
-        val old = created(write(true))
-        failBeforeCommit(old)
-        val newer = created(write(false))
-        assertEquals(newer, queue.claim(0, { emptySet() }, { true })!!.record.id)
-        assertFalse(queue.get(old)!!.record.controls.canRetry)
-        assertFalse(queue.control(old, TaskControl.RETRY))
+    fun readStatusClicksMergeUntilTheWriteStartsAndTheLastTargetWins() = runBlocking<Unit> {
+        val write = mark(1L to true, 2L to true)
+        assertEquals(SubmissionResult.Reused(write), submitMark(1L to false))
+        assertEquals(mapOf(book(1) to false, book(2) to true), queue.readStatusChanges(write))
         database.close()
         reopen()
-        assertFalse(queue.get(old)!!.record.controls.canRetry)
-        assertFalse(queue.control(old, TaskControl.RETRY))
-        val replacementIntent = created(write(true))
-        assertTrue(TaskDependency(newer, DependencyRequirement.SAFE_TERMINAL) in queue.get(replacementIntent)!!.record.submission.dependencies)
+        assertEquals(mapOf(book(1) to false, book(2) to true), queue.readStatusChanges(write))
+        assertEquals(TaskPriority.HIGH, queue.get(write)!!.record.scheduling.priority)
+        assertEquals(write, queue.claim(0, { emptySet() }, { true })!!.record.id)
+        // Once started, the list is fixed: a click goes to a new write after it.
+        val later = mark(2L to false)
+        assertNotEquals(write, later)
+        assertEquals(mapOf(book(1) to false, book(2) to true), queue.readStatusChanges(write))
+        assertEquals(mapOf(book(2) to false), queue.readStatusChanges(later))
+        assertEquals(setOf(TaskDependency(write, DependencyRequirement.FINISHED)), queue.get(later)!!.record.submission.dependencies.toSet())
+        // The newest row of a book is what pages show.
+        assertEquals(pendingOf(1L to PendingRead.Pending(false), 2L to PendingRead.Pending(false)), pending())
+        assertEquals(SubmissionResult.Reused(later), submitMark(3L to true))
     }
 
     @Test
-    fun uncommittedWriteRetryIsAllowedBeforeLaterRelatedIntentStarts() = runBlocking<Unit> {
-        val old = created(write(true))
-        failBeforeCommit(old)
-        created(write(false))
-        assertTrue(queue.get(old)!!.record.controls.canRetry)
-        assertTrue(queue.control(old, TaskControl.RETRY))
-        assertEquals(old, queue.claim(0, { emptySet() }, { true })!!.record.id)
+    fun anotherColumnStartsItsOwnWriteAfterTheUnstartedOne() = runBlocking<Unit> {
+        val read = mark(1L to true)
+        val other = CustomColumnId(2, "#other")
+        val second = mark(1L to false, to = other)
+        assertNotEquals(read, second)
+        assertEquals(setOf(TaskDependency(read, DependencyRequirement.FINISHED)), queue.get(second)!!.record.submission.dependencies.toSet())
+        assertEquals(SubmissionResult.Reused(read), submitMark(2L to true))
+        assertEquals(SubmissionResult.Reused(second), submitMark(2L to true, to = other))
+        assertEquals(pendingOf(1L to PendingRead.Pending(true), 2L to PendingRead.Pending(true)), pending())
+        // Writes run in submission order: the later one waits for the earlier to end, whatever its result.
+        assertEquals(read, queue.claim(0, { emptySet() }, { true })!!.record.id)
+        fail(read)
+        assertEquals(second, queue.claim(0, { emptySet() }, { true })!!.record.id)
     }
 
-    private suspend fun failBeforeCommit(id: TaskId) {
-        queue.update(id) { entry -> entry.copy(record = entry.record.copy(
-            state = TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.WRITE_PREPARE,
-                TaskError.Source(StorageError(StorageErrorKind.LOCAL_IO)), CommitState.NotCommitted))),
-            controls = TaskControls(false, false, false, true)), stage = TaskStage.WRITE_PREPARE) }
+    @Test
+    fun aClickRacingTheStartEitherJoinsTheListOrGoesToANewWrite() = runBlocking<Unit> {
+        repeat(5) { round ->
+            val first = (round * 100L) + 1
+            val write = mark(first to true)
+            val results = coroutineScope {
+                val claim = async(Dispatchers.Default) { queue.claim(0, { emptySet() }, { true }) }
+                val clicks = (first + 1..first + 20).map { number -> async(Dispatchers.Default) { number to submitMark(number to true) } }
+                assertEquals(write, claim.await()!!.record.id)
+                clicks.awaitAll()
+            }
+            val fixed = queue.readStatusChanges(write)
+            // Every click either joined the list it reports or went to the write after it.
+            results.forEach { (number, result) ->
+                val joined = result == SubmissionResult.Reused(write)
+                assertEquals(joined, book(number) in fixed)
+            }
+            assertNotEquals(SubmissionResult.Reused(write), submitMark(first + 50 to true))
+            assertEquals(fixed, queue.readStatusChanges(write))
+            queue.list().filter { it.record.state !is TaskState.Finished }.forEach { finish(it.record.id) }
+        }
+    }
+
+    @Test
+    fun theSyncAfterAWriteRunsNextWhenItCanAndOtherwiseDoesNotBlock() = runBlocking<Unit> {
+        for (online in listOf(true, false)) {
+            val write = mark(1L to true)
+            val earlier = created(cover(if (online) 2 else 3, TaskOrigin.USER_DOWNLOAD))
+            var sync: TaskId? = null
+            val executed = mutableListOf<TaskId>()
+            val handler = FixtureHandler { entry, _ ->
+                executed.add(entry.record.id)
+                if (entry.record.id == write) {
+                    // Nothing to change: the write completes after preparing and still submits its sync.
+                    if (entry.stage == TaskStage.WRITE_SNAPSHOT) next(entry) else {
+                        sync = created(cover(if (online) 4 else 5, TaskOrigin.USER_READ_STATUS))
+                        StageOutcome.Complete(followUp = sync)
+                    }
+                } else StageOutcome.Complete()
+            }
+            TaskCoordinator(queue, listOf(handler), conditions = { record ->
+                if (!online && record.id == sync) setOf(WaitingReason.NETWORK) else emptySet()
+            }).drain()
+            assertEquals(sync, queue.get(write)!!.followUp)
+            if (online) {
+                // The sync was submitted after the other user request but runs before it.
+                assertEquals(listOf(write, write, sync, earlier), executed)
+            } else {
+                assertEquals(listOf(write, write, earlier), executed)
+                assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))), queue.get(sync!!)!!.record.state)
+                database.readableDatabase.rawQuery("SELECT COUNT(*) FROM dispatch_next", null).use {
+                    assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0))
+                }
+                TaskCoordinator(queue, listOf(handler)).drain()
+                assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(sync!!)!!.record.state)
+            }
+        }
+    }
+
+    @Test
+    fun aRejectedPushRunsWholeRoundsUpToTheRetryLimitAndCannotBeInterrupted() = runBlocking<Unit> {
+        val write = mark(1L to true)
+        val executed = mutableListOf<TaskStage>()
+        val handler = FixtureHandler({ TaskStage.WRITE_SNAPSHOT }) { entry, _ ->
+            executed.add(entry.stage)
+            if (entry.stage == TaskStage.WRITE_COMMIT) {
+                assertFalse(queue.control(write, TaskControl.PAUSE))
+                assertFalse(queue.control(write, TaskControl.CANCEL))
+                StageOutcome.Retry(TaskError.Source(StorageError(StorageErrorKind.VERSION_CONFLICT)))
+            } else next(entry)
+        }
+        TaskCoordinator(queue, listOf(handler)).drain()
+        val round = listOf(TaskStage.WRITE_SNAPSHOT, TaskStage.WRITE_PREPARE, TaskStage.WRITE_COMMIT)
+        assertEquals(List(4) { round }.flatten(), executed)
+        val failure = ((queue.get(write)!!.record.state as TaskState.Finished).result as TaskResult.Failed).failure
+        assertEquals(StageFailure(TaskStage.WRITE_COMMIT, TaskError.Source(StorageError(StorageErrorKind.VERSION_CONFLICT))), failure)
+        assertEquals(pendingOf(1L to PendingRead.Failed(true, failure.error)), pending())
+        database.close()
+        reopen()
+        assertTrue(queue.control(write, TaskControl.RETRY))
+        assertEquals(pendingOf(1L to PendingRead.Pending(true)), pending())
+        executed.clear()
+        TaskCoordinator(queue, listOf(handler)).drain()
+        assertEquals(List(4) { round }.flatten(), executed)
+    }
+
+    @Test
+    fun pendingMarksFollowTheWriteAndTheSyncAfterIt() = runBlocking<Unit> {
+        val write = mark(1L to true, 2L to false)
+        mark(3L to true, to = CustomColumnId(2, "#other"))
+        assertEquals(pendingOf(1L to PendingRead.Pending(true), 2L to PendingRead.Pending(false)), pending())
+        assertEquals(write, queue.claim(0, { emptySet() }, { true })!!.record.id)
+        assertEquals(pendingOf(1L to PendingRead.Pending(true), 2L to PendingRead.Pending(false)), pending())
+        // Pushed, with book 2 no longer matching: it fails while book 1 waits for the sync.
+        val identityChanged = TaskError.BookIdentityChanged(book(2))
+        val sync = created(cover(9, TaskOrigin.USER_READ_STATUS))
+        queue.update(write, next = sync) { entry -> entry.copy(followUp = sync, record = entry.record.copy(
+            state = TaskState.Finished(TaskResult.CompletedWithBookFailures(FrozenSet(listOf(BookFailure(book(2), identityChanged))))),
+            controls = DurableTaskQueue.noControls)) }
+        assertEquals(pendingOf(1L to PendingRead.Pending(true), 2L to PendingRead.Failed(false, identityChanged)), pending())
+        // The sync ends with any result: the import decides what pages show; a successful one dismisses failures.
+        queue.update(sync) { entry -> entry.copy(record = entry.record.copy(state = TaskState.Finished(TaskResult.Failed(
+            StageFailure(TaskStage.COVER_TRANSFER, TaskError.Source(StorageError(StorageErrorKind.NO_NETWORK))))))) }
+        assertEquals(pendingOf(2L to PendingRead.Failed(false, identityChanged)), pending())
+        importSucceeded()
+        assertTrue(pending().isEmpty())
+
+        val failed = mark(4L to true, 5L to true)
+        fail(failed)
+        val conflict = TaskError.Source(StorageError(StorageErrorKind.VERSION_CONFLICT))
+        assertEquals(pendingOf(4L to PendingRead.Failed(true, conflict), 5L to PendingRead.Failed(true, conflict)), pending())
+        // Marking a book again replaces the failed intent for it, also for a retry of the old write.
+        val again = mark(4L to false)
+        assertEquals(pendingOf(4L to PendingRead.Pending(false), 5L to PendingRead.Failed(true, conflict)), pending())
+        assertEquals(mapOf(book(5) to true), queue.readStatusChanges(failed))
+        assertTrue(queue.control(again, TaskControl.CANCEL))
+        assertEquals(pendingOf(4L to PendingRead.Failed(false, null), 5L to PendingRead.Failed(true, conflict)), pending())
+        importSucceeded()
+        assertTrue(pending().isEmpty())
+        assertTrue(queue.control(failed, TaskControl.RETRY))
+        assertEquals(pendingOf(5L to PendingRead.Pending(true)), pending())
+        database.close()
+        reopen()
+        assertEquals(pendingOf(5L to PendingRead.Pending(true)), pending())
+    }
+
+    @Test
+    fun removingAFinishedWriteRemovesItsChangeList() = runBlocking<Unit> {
+        val write = mark(1L to true)
+        fail(write)
+        database.writableDatabase.let { db ->
+            db.beginTransaction()
+            try { assertEquals(listOf(write), queue.pruneFinished(db, keep = 0)); db.setTransactionSuccessful() } finally { db.endTransaction() }
+        }
+        assertNull(queue.get(write))
+        assertTrue(queue.readStatusChanges(write).isEmpty())
+        assertTrue(pending().isEmpty())
+        database.readableDatabase.rawQuery("SELECT COUNT(*) FROM read_status_changes", null).use {
+            assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0))
+        }
+    }
+
+    private fun importSucceeded() = database.writableDatabase.let { db ->
+        db.beginTransaction()
+        try { DurableTaskQueue.dismissReadFailures(db, identity.id); db.setTransactionSuccessful() } finally { db.endTransaction() }
     }
 
     @Test
@@ -625,20 +683,20 @@ class DurableTaskQueueTest {
         assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))), queue.get(high!!)!!.record.state)
     }
 
-    private class FixtureHandler(val body: suspend (QueueEntry, TaskExecution) -> StageOutcome) : TaskHandler {
+    /** [recoverTo] chooses the stage a recovery continues from; by default the saved one. */
+    private class FixtureHandler(val recoverTo: (QueueEntry) -> TaskStage = { it.stage },
+        val body: suspend (QueueEntry, TaskExecution) -> StageOutcome) : TaskHandler {
         override fun supports(request: TaskRequest) = true
         override fun controls(stage: TaskStage) = TaskControls(stage != TaskStage.WRITE_COMMIT, stage != TaskStage.WRITE_COMMIT, false, false)
-        override suspend fun recover(entry: QueueEntry, execution: TaskExecution) = RecoveryDecision(entry.stage, entry.checkpoint)
+        override suspend fun recover(entry: QueueEntry, execution: TaskExecution) = RecoveryDecision(recoverTo(entry), entry.checkpoint)
         override suspend fun execute(entry: QueueEntry, execution: TaskExecution) = body(entry, execution)
     }
 
     private fun next(entry: QueueEntry): StageOutcome = when (entry.stage) {
         TaskStage.COVER_TRANSFER -> StageOutcome.Advance(TaskStage.COVER_PUBLISH)
-        TaskStage.METADATA_FETCH -> StageOutcome.Advance(TaskStage.METADATA_IMPORT)
+        TaskStage.FORMAT_TRANSFER -> StageOutcome.Advance(TaskStage.FORMAT_PUBLISH)
         TaskStage.WRITE_SNAPSHOT -> StageOutcome.Advance(TaskStage.WRITE_PREPARE)
         TaskStage.WRITE_PREPARE -> StageOutcome.Advance(TaskStage.WRITE_COMMIT)
-        TaskStage.WRITE_COMMIT -> StageOutcome.Advance(TaskStage.WRITE_REFETCH)
-        TaskStage.WRITE_REFETCH -> StageOutcome.Advance(TaskStage.WRITE_IMPORT)
         else -> StageOutcome.Complete()
     }
 
@@ -649,9 +707,23 @@ class DurableTaskQueueTest {
     }
 
     private fun book(number: Long) = BookKey(identity.id, number, UUID.nameUUIDFromBytes("fixture-$number".toByteArray()))
-    private fun sync(origin: TaskOrigin) = TaskSubmission(TaskRequest.MetadataSync(identity.id), origin)
+    /** A stand-in for any deduplicated request, such as a sync; one fixed resource. */
+    private fun sync(origin: TaskOrigin) = TaskSubmission(TaskRequest.FormatCheck(CopyKey(book(99), BookFormat.parse("EPUB"))), origin)
     private fun cover(number: Long, origin: TaskOrigin) = TaskSubmission(TaskRequest.CoverLoad(book(number)), origin)
-    private fun write(target: Boolean) = TaskSubmission(TaskRequest.ReadStatusWrite(identity.id, FrozenSet(listOf(book(1))), CustomColumnId(1, "#finished"), target), TaskOrigin.USER_READ_STATUS)
+    private fun copy(number: Long) = TaskSubmission(TaskRequest.FormatCopy(FormatResource(book(number), BookFormat.parse("EPUB"),
+        SourceFileLocator.Local("fixture-$number"))), TaskOrigin.USER_DOWNLOAD)
+    private val column = CustomColumnId(1, "#finished")
+    /** One click marking the numbered books with their targets, in [to] (default: the read column). */
+    private suspend fun submitMark(vararg changes: Pair<Long, Boolean>, to: CustomColumnId = column) =
+        queue.submitReadStatus(identity.id, to, changes.associate { (number, target) -> book(number) to target }, TaskOrigin.USER_READ_STATUS)
+    private suspend fun mark(vararg changes: Pair<Long, Boolean>, to: CustomColumnId = column) =
+        (submitMark(*changes, to = to) as SubmissionResult.Created).taskId
+    private suspend fun pending() = queue.pendingReadStatus(identity.id, column)
+    private fun pendingOf(vararg shown: Pair<Long, PendingRead>) = shown.associate { (number, mark) -> book(number) to mark }
+    private suspend fun fail(id: TaskId, error: TaskError = TaskError.Source(StorageError(StorageErrorKind.VERSION_CONFLICT))) {
+        queue.update(id) { entry -> entry.copy(record = entry.record.copy(state = TaskState.Finished(TaskResult.Failed(
+            StageFailure(TaskStage.WRITE_COMMIT, error))), controls = TaskControls(false, false, false, true))) }
+    }
     private suspend fun created(submission: TaskSubmission) = (queue.submit(submission) as SubmissionResult.Created).taskId
     private suspend fun finish(id: TaskId) {
         queue.update(id, action = { entry -> entry.copy(record = entry.record.copy(state = TaskState.Finished(TaskResult.Completed), controls = TaskControls(false, false, false, false))) })

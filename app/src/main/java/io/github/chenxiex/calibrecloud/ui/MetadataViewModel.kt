@@ -74,7 +74,7 @@ class MetadataViewModel(
                     is TaskEvent.Changed -> event.record.submission.request
                     is TaskEvent.CacheChanged -> event.request
                 }
-                if (request is TaskRequest.CandidateConfiguration || request is TaskRequest.MetadataSync) restore()
+                if (request is TaskRequest.CandidateConfiguration) restore()
             }
         }
     }

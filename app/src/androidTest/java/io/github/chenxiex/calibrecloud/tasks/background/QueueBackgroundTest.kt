@@ -68,7 +68,8 @@ class QueueBackgroundTest {
 
         val unsupported = TaskCoordinator(queue, emptyList())
         assertTrue(unsupported.submit(cover(2, TaskOrigin.USER_DOWNLOAD)) is SubmissionResult.Rejected)
-        assertTrue(queue.submit(TaskSubmission(TaskRequest.MetadataSync(LibraryId(UUID.randomUUID())), TaskOrigin.MANUAL_SYNC)) is SubmissionResult.Rejected)
+        assertTrue(queue.submit(TaskSubmission(TaskRequest.CoverLoad(BookKey(LibraryId(UUID.randomUUID()), 1, UUID.randomUUID())),
+            TaskOrigin.USER_OPEN)) is SubmissionResult.Rejected)
         assertEquals(4, wakes.get())
         val supported = TaskCoordinator(queue, listOf(FixtureHandler { _, _ -> StageOutcome.Complete() }))
         supported.requestRun()

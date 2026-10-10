@@ -7,15 +7,21 @@ import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.withLock
-import java.util.UUID
 
 sealed interface StageOutcome {
     data class Advance(val stage: TaskStage) : StageOutcome
-    /** The handler has atomically published a complete cache; no half-file events are permitted. */
-    data class Complete(val result: TaskResult = TaskResult.Completed, val cachePublished: Boolean = false) : StageOutcome
+    /**
+     * [cachePublished]: the handler has atomically published a complete cache; no half-file events are permitted.
+     * [followUp]: a read status write's sync, submitted after its push; the next selection takes it first (R16).
+     */
+    data class Complete(val result: TaskResult = TaskResult.Completed, val cachePublished: Boolean = false,
+        val followUp: TaskId? = null) : StageOutcome
     data class Fail(val error: TaskError) : StageOutcome
     data class Wait(val reason: WaitingReason) : StageOutcome
-    /** Only transient transport failure or server throttling; permanent errors use Fail. */
+    /**
+     * Only transient transport failure, server throttling, or a read status write's rejected or uncertain
+     * push, which runs a whole round again (R15); permanent errors use Fail.
+     */
     data class Retry(val error: TaskError, val serverDelayMillis: Long? = null) : StageOutcome {
         init { require(serverDelayMillis == null || serverDelayMillis >= 0) }
     }
@@ -117,21 +123,12 @@ class TaskExecution internal constructor(private val queue: DurableTaskQueue, va
         queue.update(id) { entry -> entry.copy(record = entry.record.copy(restartedTransfer = true)) }
     }
 
-    /** Persist immediately after source outcome is established, before refetch or any next selection. */
-    suspend fun recordCommit(commit: CommitState) {
-        queue.update(id) { entry ->
-            require(entry.record.submission.request is TaskRequest.ReadStatusWrite)
-            require(entry.stage == TaskStage.WRITE_COMMIT || entry.stage == TaskStage.RECOVERY_CHECK)
-            require(entry.record.commit != CommitState.Confirmed || commit == CommitState.Confirmed)
-            entry.copy(record = entry.record.copy(commit = commit))
-        }
-    }
 }
 
 /**
  * All foreground/background wakeups share queue.executionLock. A full resource workflow retains
  * execution until complete/pause/wait/failure; the next resource is selected afresh. No preemption.
- * Unknown or confirmed-but-unrefreshed writes reserve dispatch, including across process recovery.
+ * A read status write's follow-up sync is the next selection when it can run (R16).
  * WorkManager wakes this same coordinator; its scheduling does not determine resource order.
  */
 class TaskCoordinator(
@@ -144,6 +141,14 @@ class TaskCoordinator(
         if (handlers.count { it.supports(submission.request) } != 1) return SubmissionResult.Rejected(
             TaskError.Source(StorageError(StorageErrorKind.UNSUPPORTED_OPERATION)))
         return queue.submit(submission)
+    }
+
+    /** Read status changes for [DurableTaskQueue.submitReadStatus], accepted only with a registered write handler. */
+    suspend fun submitReadStatus(libraryId: io.github.chenxiex.calibrecloud.model.LibraryId, column: io.github.chenxiex.calibrecloud.model.CustomColumnId,
+        changes: Map<io.github.chenxiex.calibrecloud.model.BookKey, Boolean>, origin: TaskOrigin): SubmissionResult {
+        if (handlers.count { it.supports(TaskRequest.ReadStatusWrite(libraryId, column, java.util.UUID(0, 0))) } != 1) return SubmissionResult.Rejected(
+            TaskError.Source(StorageError(StorageErrorKind.UNSUPPORTED_OPERATION)))
+        return queue.submitReadStatus(libraryId, column, changes, origin)
     }
 
     /** Private-state recovery only. Never waits for an active executor or touches source storage. */
@@ -194,7 +199,7 @@ class TaskCoordinator(
                 if (!queue.isActive(entry.record)) {
                     queue.update(entry.record.id) { current -> current.copy(recoveryRequired = true,
                         record = current.record.copy(state = if (current.record.submission.request is TaskRequest.CandidateConfiguration)
-                            TaskState.Finished(TaskResult.Cancelled(current.record.commit))
+                            TaskState.Finished(TaskResult.Cancelled)
                             else TaskState.Waiting(FrozenSet(listOf(WaitingReason.INACTIVE_LIBRARY))), controls = DurableTaskQueue.queuedControls)) }
                     return false
                 }
@@ -204,9 +209,7 @@ class TaskCoordinator(
                 require(stage != TaskStage.WRITE_COMMIT || (!controls.canPause && !controls.canCancel))
                 execution.checkControl()
                 entry = queue.update(entry.record.id) {
-                    it.copy(record = it.record.copy(state = TaskState.Running(stage), controls = controls,
-                        commit = if (stage == TaskStage.WRITE_COMMIT && it.record.commit == CommitState.NotCommitted)
-                            CommitState.Unknown(UUID.randomUUID()) else it.record.commit))
+                    it.copy(record = it.record.copy(state = TaskState.Running(stage), controls = controls))
                 }
                 execution.checkControl()
                 execution.yieldable = controls.canPause
@@ -221,15 +224,17 @@ class TaskCoordinator(
                 execution.checkControl()
                 if (entry.record.submission.request is TaskRequest.CandidateConfiguration && !queue.isActive(entry.record)) {
                     queue.update(entry.record.id) { current -> current.copy(record = current.record.copy(
-                        state = TaskState.Finished(TaskResult.Cancelled(current.record.commit)), controls = DurableTaskQueue.noControls)) }
+                        state = TaskState.Finished(TaskResult.Cancelled), controls = DurableTaskQueue.noControls)) }
                     return false
                 }
                 when (outcome) {
                     is StageOutcome.Advance -> {
                         val current = requireNotNull(queue.get(entry.record.id))
                         validateAdvance(current, outcome.stage)
+                        // A write's retries are whole rounds through all of its stages (R15), so advancing keeps its count.
+                        val write = entry.record.submission.request is TaskRequest.ReadStatusWrite
                         entry = queue.update(entry.record.id) {
-                            it.copy(stage = outcome.stage, attempts = 0, retryAt = 0,
+                            it.copy(stage = outcome.stage, attempts = if (write) it.attempts else 0, retryAt = 0,
                                 record = it.record.copy(state = TaskState.Running(outcome.stage), controls = DurableTaskQueue.noControls))
                         }
                     }
@@ -238,9 +243,10 @@ class TaskCoordinator(
                         require(isFinalStage(entry.record.submission.request, stage))
                         // Candidate import events require the atomically completed publication path above.
                         require(!outcome.cachePublished || entry.record.submission.request !is TaskRequest.CandidateConfiguration)
-                        queue.update(entry.record.id, cachePublished = outcome.cachePublished) { current ->
+                        require(outcome.followUp == null || entry.record.submission.request is TaskRequest.ReadStatusWrite)
+                        queue.update(entry.record.id, cachePublished = outcome.cachePublished, next = outcome.followUp) { current ->
                             current.copy(record = current.record.copy(state = TaskState.Finished(outcome.result), controls = DurableTaskQueue.noControls),
-                                checkpoint = null, control = null)
+                                checkpoint = null, control = null, followUp = outcome.followUp)
                         }
                         return false
                     }
@@ -259,10 +265,18 @@ class TaskCoordinator(
                     }
                     is StageOutcome.Retry -> {
                         val kind = (outcome.error as? TaskError.Source)?.error?.kind
-                        require(kind in setOf(StorageErrorKind.NO_NETWORK, StorageErrorKind.THROTTLED, StorageErrorKind.LOCAL_IO))
+                        val write = entry.record.submission.request is TaskRequest.ReadStatusWrite
+                        require(kind in setOf(StorageErrorKind.NO_NETWORK, StorageErrorKind.THROTTLED, StorageErrorKind.LOCAL_IO) ||
+                            (write && kind == StorageErrorKind.VERSION_CONFLICT))
                         val reason = if (kind == StorageErrorKind.THROTTLED) WaitingReason.THROTTLED else WaitingReason.NETWORK
                         val latest = requireNotNull(queue.get(entry.record.id))
                         if (latest.attempts >= MAX_RETRIES) { fail(entry.record.id, outcome.error); return false }
+                        // The source changed under a write: the next round fetches it again now, without a network wait.
+                        if (kind == StorageErrorKind.VERSION_CONFLICT) {
+                            queue.update(entry.record.id) { it.copy(attempts = it.attempts + 1, retryAt = 0, recoveryRequired = true,
+                                record = it.record.copy(state = TaskState.Queued, controls = DurableTaskQueue.queuedControls)) }
+                            return true
+                        }
                         val delay = maxOf(outcome.serverDelayMillis ?: 0, 1_000L shl latest.attempts)
                         val deadline = now().let { if (it > Long.MAX_VALUE - delay) Long.MAX_VALUE else it + delay }
                         if (kind == StorageErrorKind.THROTTLED) queue.throttle(entry.record.id, outcome.serverDelayMillis
@@ -284,10 +298,9 @@ class TaskCoordinator(
             handler.stopped(requireNotNull(queue.get(initial.record.id)))
             queue.update(initial.record.id) { entry ->
                 val state = if (control.command == TaskControl.PAUSE) TaskState.Paused(entry.stage)
-                    else TaskState.Finished(TaskResult.Cancelled(entry.record.commit))
+                    else TaskState.Finished(TaskResult.Cancelled)
                 entry.copy(control = null, recoveryRequired = true, record = entry.record.copy(state = state,
-                    controls = if (control.command == TaskControl.PAUSE) TaskControls(false, true, true, false)
-                        else TaskControls(false, false, false, entry.record.commit != CommitState.NotCommitted)))
+                    controls = if (control.command == TaskControl.PAUSE) TaskControls(false, true, true, false) else DurableTaskQueue.noControls))
             }
         } catch (cancelled: CancellationException) {
             // Running/checkpoint evidence remains durable for the next coordinator's recovery check.
@@ -299,42 +312,32 @@ class TaskCoordinator(
     }
 
     private suspend fun fail(id: TaskId, error: TaskError) = queue.update(id) { entry ->
-        entry.copy(record = entry.record.copy(state = TaskState.Finished(TaskResult.Failed(StageFailure(entry.stage, error, entry.record.commit))),
+        entry.copy(record = entry.record.copy(state = TaskState.Finished(TaskResult.Failed(StageFailure(entry.stage, error))),
             controls = TaskControls(false, false, false, true)), recoveryRequired = true, control = null)
     }
 
     private fun validateRecovery(entry: QueueEntry, decision: RecoveryDecision) {
-        val request = entry.record.submission.request
-        require(decision.stage in stages(request))
-        when (entry.record.commit) {
-            CommitState.Confirmed -> require(decision.stage == TaskStage.WRITE_REFETCH || decision.stage == TaskStage.WRITE_IMPORT)
-            is CommitState.Unknown -> require(decision.stage == TaskStage.RECOVERY_CHECK)
-            CommitState.NotCommitted -> require(decision.stage != TaskStage.RECOVERY_CHECK)
-        }
+        require(decision.stage in stages(entry.record.submission.request))
         if (decision.checkpoint != null) require(decision.checkpoint.version != null)
     }
 
     private fun validateAdvance(entry: QueueEntry, next: TaskStage) {
         val stages = stages(entry.record.submission.request)
-        if (entry.stage == TaskStage.RECOVERY_CHECK) {
-            require(next == if (entry.record.commit == CommitState.Confirmed) TaskStage.WRITE_REFETCH else TaskStage.WRITE_SNAPSHOT)
-            require(entry.record.commit !is CommitState.Unknown)
-        } else {
-            require(stages.indexOf(next) == stages.indexOf(entry.stage) + 1 && next != TaskStage.RECOVERY_CHECK)
-            if (entry.stage == TaskStage.WRITE_COMMIT) require(entry.record.commit == CommitState.Confirmed)
-        }
+        require(stages.indexOf(next) == stages.indexOf(entry.stage) + 1)
     }
-    /** A cover batch publishes each cover within its transfer stage; COVER_PUBLISH remains for tasks persisted before batches. */
-    private fun isFinalStage(request: TaskRequest, stage: TaskStage) = stage == stages(request).last { it != TaskStage.RECOVERY_CHECK } ||
-        (request is TaskRequest.CoverLoad && stage == TaskStage.COVER_TRANSFER)
+    /**
+     * A cover batch publishes each cover within its transfer stage; COVER_PUBLISH remains for tasks persisted before batches.
+     * A read status write with nothing to change completes after preparing, without a push (R15).
+     */
+    private fun isFinalStage(request: TaskRequest, stage: TaskStage) = stage == stages(request).last() ||
+        (request is TaskRequest.CoverLoad && stage == TaskStage.COVER_TRANSFER) ||
+        (request is TaskRequest.ReadStatusWrite && stage == TaskStage.WRITE_PREPARE)
     private fun stages(request: TaskRequest): List<TaskStage> = when (request) {
         is TaskRequest.CandidateConfiguration -> listOf(TaskStage.CANDIDATE_ACCESS)
-        is TaskRequest.MetadataSync -> listOf(TaskStage.METADATA_FETCH, TaskStage.METADATA_IMPORT)
         is TaskRequest.FormatCopy -> listOf(TaskStage.FORMAT_TRANSFER, TaskStage.FORMAT_PUBLISH)
         is TaskRequest.FormatCheck -> listOf(TaskStage.FORMAT_CHECK)
         is TaskRequest.CoverLoad -> listOf(TaskStage.COVER_TRANSFER, TaskStage.COVER_PUBLISH)
-        is TaskRequest.ReadStatusWrite -> listOf(TaskStage.WRITE_SNAPSHOT, TaskStage.WRITE_PREPARE, TaskStage.WRITE_COMMIT,
-            TaskStage.WRITE_REFETCH, TaskStage.WRITE_IMPORT, TaskStage.RECOVERY_CHECK)
+        is TaskRequest.ReadStatusWrite -> listOf(TaskStage.WRITE_SNAPSHOT, TaskStage.WRITE_PREPARE, TaskStage.WRITE_COMMIT)
     }
     companion object { private const val MAX_RETRIES = 3 }
 }

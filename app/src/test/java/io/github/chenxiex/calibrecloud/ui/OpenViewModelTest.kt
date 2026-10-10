@@ -15,7 +15,6 @@ import io.github.chenxiex.calibrecloud.storage.api.DownloadedCopy
 import io.github.chenxiex.calibrecloud.storage.api.SourceAvailability
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
-import io.github.chenxiex.calibrecloud.tasks.api.CommitState
 import io.github.chenxiex.calibrecloud.tasks.api.FrozenSet
 import io.github.chenxiex.calibrecloud.tasks.api.StageFailure
 import io.github.chenxiex.calibrecloud.tasks.api.TaskError
@@ -310,7 +309,7 @@ class OpenViewModelTest {
         model.open(first, "First")
         advanceUntilIdle()
         val failure = TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.FORMAT_TRANSFER,
-            TaskError.Source(StorageError(StorageErrorKind.LOGIN_REQUIRED)), CommitState.NotCommitted)))
+            TaskError.Source(StorageError(StorageErrorKind.LOGIN_REQUIRED)))))
         port.tasks.getValue(first).value = failure
         advanceUntilIdle()
         val failed = model.status as OpenStatus.Failed

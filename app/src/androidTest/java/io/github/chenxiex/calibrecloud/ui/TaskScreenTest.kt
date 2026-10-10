@@ -76,7 +76,7 @@ class TaskScreenTest {
         val running = record(1, TaskState.Running(TaskStage.FORMAT_TRANSFER, TaskProgress(512, 2048)))
             .copy(controls = TaskControls(true, true, false, false), restartedTransfer = true)
         show({ listOf(running) }) { _, command -> selected = command }
-        compose.onNodeWithText("元数据同步").assertIsDisplayed()
+        compose.onNodeWithText("检查更新").assertIsDisplayed()
         compose.onNodeWithTag("task_status").assertTextEquals("传输书籍副本 · 25% · 重新下载")
         compose.onNodeWithTag("task_user_mark", useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithTag("task_retry").assertDoesNotExist()
@@ -91,15 +91,15 @@ class TaskScreenTest {
     @Test
     fun finishedTasksLiveInTheirOwnTabWithACheckOrARetry() {
         var selected: TaskControl? = null
-        val failed = record(1, TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.METADATA_FETCH,
-            TaskError.Source(StorageError(StorageErrorKind.NO_NETWORK)), CommitState.NotCommitted))))
+        val failed = record(1, TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.FORMAT_CHECK,
+            TaskError.Source(StorageError(StorageErrorKind.NO_NETWORK))))))
             .copy(controls = TaskControls(false, false, false, true))
         val done = record(2, TaskState.Finished(TaskResult.Completed)).copy(controls = TaskControls(false, false, false, false))
         show({ listOf(record(3, TaskState.Queued), failed, done) }) { _, command -> selected = command }
         compose.onNodeWithText("排队 #1").assertIsDisplayed()
         compose.onNodeWithTag("task_tab_finished").performClick()
         compose.onNodeWithText("排队 #1").assertDoesNotExist()
-        compose.onNodeWithText("失败：获取元数据快照（网络不可用）").assertIsDisplayed()
+        compose.onNodeWithText("失败：检查格式版本（网络不可用）").assertIsDisplayed()
         compose.onNodeWithTag("task_done").assertIsDisplayed()
         // The latest submitted comes first among finished tasks.
         val doneTop = compose.onNodeWithTag("task_${done.id.value}").getBoundsInRoot().top
@@ -113,7 +113,7 @@ class TaskScreenTest {
     fun sourceFilterSeparatesUserRequestsFromAutomaticTasks() {
         val automatic = TaskRecord(
             TaskId(UUID.randomUUID()),
-            TaskSubmission(TaskRequest.MetadataSync(LibraryId(UUID.randomUUID())), TaskOrigin.STARTUP_SYNC),
+            TaskSubmission(check(), TaskOrigin.DOWNLOADED_FORMAT_UPDATE),
             SchedulingPosition(TaskPriority.LOW, QueueSequence(2)),
             state = TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))),
             controls = TaskControls(false, true, false, false),
@@ -155,7 +155,7 @@ class TaskScreenTest {
             TaskRecord(TaskId(UUID.randomUUID()), TaskSubmission(TaskRequest.CoverLoad(library,
                 FrozenSet(listOf(io.github.chenxiex.calibrecloud.model.BookKey(library, n.toLong(), UUID.randomUUID())))), TaskOrigin.VISIBLE_COVER),
                 SchedulingPosition(TaskPriority.LOW, QueueSequence(10L + n)),
-                state = TaskState.Finished(if (n == 3) TaskResult.Completed else TaskResult.Cancelled(CommitState.NotCommitted)),
+                state = TaskState.Finished(if (n == 3) TaskResult.Completed else TaskResult.Cancelled),
                 controls = TaskControls(false, false, false, false))
         }
         val sync = record(1, TaskState.Finished(TaskResult.Completed))
@@ -175,9 +175,11 @@ class TaskScreenTest {
 
     private fun record(sequence: Int, state: TaskState): TaskRecord = TaskRecord(
         TaskId(UUID.randomUUID()),
-        TaskSubmission(TaskRequest.MetadataSync(LibraryId(UUID.randomUUID())), TaskOrigin.MANUAL_SYNC),
+        TaskSubmission(check(), TaskOrigin.USER_DOWNLOAD),
         SchedulingPosition(TaskPriority.HIGH, QueueSequence(sequence.toLong())),
         state = state,
         controls = TaskControls(false, true, false, false),
     )
+
+    private fun check() = TaskRequest.FormatCheck(io.github.chenxiex.calibrecloud.model.CopyKey(io.github.chenxiex.calibrecloud.model.BookKey(LibraryId(UUID.randomUUID()), 1, UUID.randomUUID()), io.github.chenxiex.calibrecloud.model.BookFormat.parse("EPUB")))
 }

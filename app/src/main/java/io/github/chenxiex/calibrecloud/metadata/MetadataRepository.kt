@@ -147,6 +147,7 @@ class MetadataRepository(
                     }) }
                     db.update("current_selection", ContentValues().apply { put("library_id", key[0]) }, "singleton = 1", null)
                     DurableTaskQueue.enqueueDownloadedChecks(db, identity.id, parsed, checksCopy)
+                    DurableTaskQueue.dismissReadFailures(db, identity.id)
                     if (taskId != null) DurableTaskQueue.completePublication(db, taskId)
                     db.setTransactionSuccessful()
                     identity
@@ -200,6 +201,7 @@ class MetadataRepository(
                 val now = System.currentTimeMillis()
                 db.execSQL("UPDATE metadata_imports SET imported_at = ? WHERE library_id = ?", arrayOf<Any>(now, key[0]))
                 db.execSQL("UPDATE library_preferences SET last_imported_at = ? WHERE library_id = ?", arrayOf<Any>(now, key[0]))
+                DurableTaskQueue.dismissReadFailures(db, identity.id)
                 if (taskId != null) {
                     db.execSQL("UPDATE queued_tasks SET scope_library_id = ? WHERE task_id = ?", arrayOf(key[0], taskId.toString()))
                     DurableTaskQueue.completePublication(db, taskId)

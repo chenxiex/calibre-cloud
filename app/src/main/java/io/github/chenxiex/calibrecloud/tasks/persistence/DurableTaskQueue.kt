@@ -4,6 +4,8 @@ import io.github.chenxiex.calibrecloud.storage.api.LocationKeys
 import android.content.ContentValues
 import android.database.sqlite.SQLiteDatabase
 import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.model.BookKey
+import io.github.chenxiex.calibrecloud.model.CustomColumnId
 import io.github.chenxiex.calibrecloud.model.FileVersion
 import io.github.chenxiex.calibrecloud.model.LibraryId
 import io.github.chenxiex.calibrecloud.model.RelativeSourcePath
@@ -35,6 +37,10 @@ data class QueueEntry(
     val sourceSync: TaskId? = null,
     /** The path that was not found; after the sync an unchanged path fails without another request. */
     val missingPath: RelativeSourcePath? = null,
+    /** Set when the task is first claimed; a read status write's change list is fixed from then on (R14). */
+    val started: Boolean = false,
+    /** The sync a completed read status write submitted right after its push (R16). */
+    val followUp: TaskId? = null,
 )
 enum class TaskControl(val code: String) { PAUSE("pause"), CANCEL("cancel"), RESUME("resume"), RETRY("retry") }
 
@@ -82,24 +88,14 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 } ?: return@transaction rejected()
                 if (request is TaskRequest.FormatCopy && backend != backendCode(request.resource.source.backend)) return@transaction rejected()
             } else if (!holds(this, request.owner)) return@transaction rejected()
-            val dependencies = submission.dependencies.toMutableSet()
-            if (request is TaskRequest.ReadStatusWrite) {
-                all.filter { it.record.submission.request is TaskRequest.ReadStatusWrite && !safeTerminal(it.record) }.forEach {
-                    val previous = it.record.submission.request as TaskRequest.ReadStatusWrite
-                    if (previous.relatedWriteKeys().any { key -> key in request.relatedWriteKeys() } && previous != request) {
-                        dependencies.add(TaskDependency(it.record.id, DependencyRequirement.SAFE_TERMINAL))
-                    }
-                }
-            }
+            // A write's change list only enters through submitReadStatus.
+            if (request is TaskRequest.ReadStatusWrite) return@transaction rejected()
+            val dependencies = submission.dependencies
             if (dependencies.any { edge ->
                     val parent = byId[edge.taskId]?.record
-                    parent == null || parent.libraryId != request.libraryId ||
-                        request.libraryId == null ||
-                        (edge.requirement == DependencyRequirement.SOURCE_COMMIT_CONFIRMED &&
-                            (parent.submission.request !is TaskRequest.ReadStatusWrite ||
-                                (request as? TaskRequest.MetadataSync)?.freshness != SnapshotFreshness.AfterWrite(parent.id)))
+                    parent == null || parent.libraryId != request.libraryId || request.libraryId == null
                 }) return@transaction rejected()
-            val normalized = submission.copy(dependencies = FrozenSet(dependencies))
+            val normalized = submission
             val existing = all.find { it.record.state !is TaskState.Finished && it.record.submission.key == normalized.key }
             if (existing != null) {
                 if (existing.record.scheduling.priority == TaskPriority.LOW && submission.origin.priority == TaskPriority.HIGH) {
@@ -133,20 +129,129 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         result
     }
 
+    /**
+     * Adds a click's read status [changes] (book to explicit target) for [column] of [libraryId] (R14),
+     * in one transaction. The library's unfinished write to [column] that has not started takes them,
+     * the last target of a book winning, and is reused; otherwise a new write is created after every
+     * unfinished write of the library (FINISHED edges). Claiming marks a task started in its own
+     * transaction, so a change joins a list before that task runs or goes to a new one, never in between.
+     * The same books leave the library's failed or cancelled writes to [column]: the newer marking
+     * replaces that intent, so a retry of the old task cannot write it back.
+     */
+    suspend fun submitReadStatus(libraryId: LibraryId, column: CustomColumnId, changes: Map<BookKey, Boolean>,
+        origin: TaskOrigin): SubmissionResult = withContext(io) {
+        require(changes.isNotEmpty() && changes.keys.all { it.libraryId == libraryId })
+        val changed = mutableListOf<TaskRecord>()
+        val result = transaction {
+            if (cleanupBlocks(this, TaskRequest.ReadStatusWrite(libraryId, column, UUID(0, 0)))) return@transaction rejected()
+            val bound = rawQuery("SELECT 1 FROM library_bindings WHERE library_id = ?", arrayOf(libraryId.value.toString())).use { it.moveToFirst() }
+            if (!bound) return@transaction rejected()
+            val writes = entries(this).filter { it.record.submission.request is TaskRequest.ReadStatusWrite && it.record.libraryId == libraryId }
+            val unfinished = writes.filter { it.record.state !is TaskState.Finished && !isRevoked(this, it.record.id) }
+            val open = unfinished.firstOrNull { !it.started && (it.record.submission.request as TaskRequest.ReadStatusWrite).column == column }
+            val id = if (open != null) open.record.id.also { changed.add(open.record) } else {
+                val id = TaskId(UUID.randomUUID())
+                val dependencies = unfinished.map { TaskDependency(it.record.id, DependencyRequirement.FINISHED) }
+                val record = TaskRecord(id, TaskSubmission(TaskRequest.ReadStatusWrite(libraryId, column, UUID.randomUUID()), origin,
+                    FrozenSet(dependencies)), SchedulingPosition(origin.priority, sequence(this)), state = TaskState.Queued, controls = queuedControls)
+                save(this, QueueEntry(record, initialStage(record.submission.request)))
+                dependencies.forEach { edge -> execSQL("INSERT INTO task_dependencies VALUES(?, ?, ?)",
+                    arrayOf(id.value.toString(), edge.taskId.value.toString(), edge.requirement.code)) }
+                changed.add(record)
+                id
+            }
+            val replaced = writes.filter { entry ->
+                val result = (entry.record.state as? TaskState.Finished)?.result
+                (result is TaskResult.Failed || result == TaskResult.Cancelled) &&
+                    (entry.record.submission.request as TaskRequest.ReadStatusWrite).column == column
+            }
+            changes.forEach { (book, target) ->
+                val bookArgs = arrayOf(book.sourceId.toString(), book.sourceUuid.toString())
+                replaced.forEach { delete("read_status_changes", "task_id = ? AND book_id = ? AND book_uuid = ?",
+                    arrayOf(it.record.id.value.toString()) + bookArgs) }
+                execSQL("INSERT OR REPLACE INTO read_status_changes(task_id, book_id, book_uuid, target, dismissed) VALUES(?, ?, ?, ?, 0)",
+                    arrayOf<Any>(id.value.toString(), book.sourceId, book.sourceUuid.toString(), if (target) 1 else 0))
+            }
+            if (open != null) SubmissionResult.Reused(id) else SubmissionResult.Created(id)
+        }
+        changed.forEach { publish(it) }
+        if (result !is SubmissionResult.Rejected) {
+            requests.incrementAndGet()
+            onWake()
+        }
+        result
+    }
+
+    /** The change list of write [id], in no particular order. */
+    suspend fun readStatusChanges(id: TaskId): Map<BookKey, Boolean> = withContext(io) {
+        val db = database.readableDatabase
+        val library = entry(db, id)?.record?.libraryId ?: return@withContext emptyMap()
+        db.rawQuery("SELECT book_id, book_uuid, target FROM read_status_changes WHERE task_id = ?", arrayOf(id.value.toString())).use {
+            buildMap { while (it.moveToNext()) put(BookKey(library, it.getLong(0), UUID.fromString(it.getString(1))), it.getInt(2) != 0) }
+        }
+    }
+
+    /**
+     * Books of [libraryId] with a read status target for [column] still being written (R13, R27), in one
+     * query. A book's newest row decides: in an unfinished write it is pending; in a completed write it
+     * stays pending until the sync that followed ends, whatever its result; in a failed or cancelled
+     * write, or as a book failure, it is failed until the next successful sync dismisses it. A retry
+     * makes it pending again, and marking the book again adds a newer row.
+     */
+    suspend fun pendingReadStatus(libraryId: LibraryId, column: CustomColumnId): Map<BookKey, PendingRead> = withContext(io) {
+        val db = database.readableDatabase
+        db.beginTransactionNonExclusive()
+        try {
+            val records = mutableMapOf<String, TaskRecord?>()
+            fun record(id: String?) = id?.let { records.getOrPut(it) {
+                db.rawQuery("SELECT record FROM queued_tasks WHERE task_id = ?", arrayOf(it)).use { c ->
+                    if (c.moveToFirst()) TaskCodec.decode(c.getString(0)) else null
+                }
+            } }
+            val newest = mutableMapOf<BookKey, Pair<TaskRecord, PendingRead?>>()
+            db.rawQuery("""SELECT c.task_id, q.follow_up_id, c.book_id, c.book_uuid, c.target, c.dismissed
+                FROM read_status_changes c JOIN queued_tasks q ON q.task_id = c.task_id""", null).use { c ->
+                while (c.moveToNext()) {
+                    val write = record(c.getString(0)) ?: continue
+                    val request = write.submission.request as? TaskRequest.ReadStatusWrite ?: continue
+                    if (request.libraryId != libraryId || request.column != column) continue
+                    val book = BookKey(libraryId, c.getLong(2), UUID.fromString(c.getString(3)))
+                    val previous = newest[book]?.first
+                    if (previous != null && previous.scheduling.sequence.value > write.scheduling.sequence.value) continue
+                    val target = c.getInt(4) != 0
+                    val dismissed = c.getInt(5) != 0
+                    val following = record(if (c.isNull(1)) null else c.getString(1))?.let { it.state !is TaskState.Finished } == true
+                    val shown = when (val state = write.state) {
+                        !is TaskState.Finished -> PendingRead.Pending(target)
+                        else -> when (val result = state.result) {
+                            TaskResult.Completed -> if (following) PendingRead.Pending(target) else null
+                            is TaskResult.CompletedWithBookFailures -> result.failures.find { it.book == book }
+                                ?.let { if (dismissed) null else PendingRead.Failed(target, it.error) }
+                                ?: if (following) PendingRead.Pending(target) else null
+                            is TaskResult.Failed -> if (dismissed) null else PendingRead.Failed(target, result.failure.error)
+                            TaskResult.Cancelled -> if (dismissed) null else PendingRead.Failed(target, null)
+                        }
+                    }
+                    newest[book] = write to shown
+                }
+            }
+            newest.mapNotNull { (book, shown) -> shown.second?.let { book to it } }.toMap()
+        } finally { db.endTransaction() }
+    }
+
     /** Called once under the shared execution lock before dispatch; Running never implies success. */
     internal suspend fun recover() = mutateAll { entry ->
         if (entry.record.state is TaskState.Running) entry.copy(
             record = entry.record.copy(state = TaskState.Queued, controls = queuedControls),
             recoveryRequired = true,
-            stage = when (entry.record.commit) {
-                is CommitState.Unknown -> TaskStage.RECOVERY_CHECK
-                CommitState.Confirmed -> if (entry.record.submission.request is TaskRequest.ReadStatusWrite) TaskStage.WRITE_REFETCH else entry.stage
-                CommitState.NotCommitted -> entry.stage
-            },
         ) else entry
     }
 
-    /** Eligibility is evaluated before sorting, within the claim transaction. Unknown/confirmed writes reserve execution. */
+    /**
+     * Eligibility is evaluated before sorting, within the claim transaction. A task recorded as the
+     * next one, the sync right after a write (R16), is taken when eligible; either way the record is
+     * consumed by this selection.
+     */
     internal suspend fun claim(now: Long, conditions: (TaskRecord) -> Set<WaitingReason>, supported: (TaskRequest) -> Boolean, excluded: Set<TaskId> = emptySet()): QueueEntry? = withContext(io) {
         val changed = mutableListOf<TaskRecord>()
         val claimed = transaction {
@@ -154,8 +259,10 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             if (all.any { it.record.state is TaskState.Running }) return@transaction null
             execSQL("DELETE FROM source_throttle WHERE until <= ?", arrayOf<Any>(now))
             val edges = edges(this)
-            val reserved = all.firstOrNull { it.record.submission.request is TaskRequest.ReadStatusWrite &&
-                it.record.commit != CommitState.NotCommitted && !safeTerminal(it.record) && active(this, it.record) }
+            val next = rawQuery("SELECT task_id FROM dispatch_next WHERE singleton = 1", null).use {
+                if (it.moveToFirst()) TaskId(UUID.fromString(it.getString(0))) else null
+            }
+            if (next != null) execSQL("DELETE FROM dispatch_next")
             val eligible = mutableListOf<QueueEntry>()
             all.forEach { entry ->
                 val record = entry.record
@@ -178,8 +285,6 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                         val parent = all.find { it.record.id == prerequisite }?.record
                         parent == null || !satisfies(parent, requirement)
                     }) reasons.add(WaitingReason.DEPENDENCY)
-                val after = (record.submission.request as? TaskRequest.MetadataSync)?.freshness as? SnapshotFreshness.AfterWrite
-                if (reserved != null && record.id != reserved.record.id && after?.writeTaskId != reserved.record.id) reasons.add(WaitingReason.RECOVERY)
                 val retryAt = maxOf(entry.retryAt, throttled ?: 0)
                 if (reasons.isEmpty()) eligible.add(entry)
                 else if (record.state != TaskState.Waiting(FrozenSet(reasons)) || retryAt != entry.retryAt) {
@@ -188,16 +293,10 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                     save(this, waiting); if (waiting.record != record) changed.add(waiting.record)
                 }
             }
-            val next = eligible.minWithOrNull { a, b -> compareSchedulingPositions(a.record.scheduling, b.record.scheduling) } ?: return@transaction null
-            val running = next.copy(record = next.record.copy(state = TaskState.Running(next.stage), controls = TaskControls(false, false, false, false)))
+            val chosen = eligible.find { it.record.id == next }
+                ?: eligible.minWithOrNull { a, b -> compareSchedulingPositions(a.record.scheduling, b.record.scheduling) } ?: return@transaction null
+            val running = chosen.copy(started = true, record = chosen.record.copy(state = TaskState.Running(chosen.stage), controls = noControls))
             save(this, running); changed.add(running.record)
-            if (running.record.submission.request is TaskRequest.ReadStatusWrite) {
-                val current = entries(this)
-                current.filter { it.record.controls.canRetry && retrySuperseded(it, current) }.forEach { old ->
-                    val superseded = old.copy(record = old.record.copy(controls = old.record.controls.copy(canRetry = false)))
-                    save(this, superseded); changed.add(superseded.record)
-                }
-            }
             running
         }
         changed.forEach { publish(it) }
@@ -216,19 +315,17 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 TaskControl.RESUME -> r.controls.canResume
                 TaskControl.RETRY -> r.controls.canRetry
             }
-            if (!allowed || (command == TaskControl.RETRY && retrySuperseded(entry, entries(this)))) return@transaction false
+            if (!allowed) return@transaction false
             val updated = when {
                 r.state is TaskState.Running -> entry.copy(control = command)
-                command == TaskControl.CANCEL -> entry.copy(record = r.copy(state = TaskState.Finished(TaskResult.Cancelled(r.commit)), controls = TaskControls(false, false, false, r.commit != CommitState.NotCommitted)), control = null)
+                command == TaskControl.CANCEL -> entry.copy(record = r.copy(state = TaskState.Finished(TaskResult.Cancelled), controls = noControls), control = null)
                 else -> entry.copy(record = r.copy(state = TaskState.Queued, controls = queuedControls), control = null,
                     recoveryRequired = true, retryAt = 0, attempts = 0,
                     sourceSync = if (command == TaskControl.RETRY) null else entry.sourceSync,
-                    missingPath = if (command == TaskControl.RETRY) null else entry.missingPath, stage = when (r.commit) {
-                        is CommitState.Unknown -> TaskStage.RECOVERY_CHECK
-                        CommitState.Confirmed -> TaskStage.WRITE_REFETCH
-                        CommitState.NotCommitted -> entry.stage
-                    })
+                    missingPath = if (command == TaskControl.RETRY) null else entry.missingPath)
             }
+            // A retried write shows its books as pending again, even after an import dismissed the failure.
+            if (command == TaskControl.RETRY) execSQL("UPDATE read_status_changes SET dismissed = 0 WHERE task_id = ?", arrayOf(id.value.toString()))
             if (command == TaskControl.CANCEL && r.submission.request is TaskRequest.CandidateConfiguration) {
                 execSQL("UPDATE current_selection SET token = ? WHERE singleton = 1 AND token = ?", arrayOf(
                     UUID.randomUUID().toString(), r.submission.request.context.selectionToken.toString()))
@@ -282,7 +379,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 record.id != keep && record.submission.request is TaskRequest.CoverLoad && record.libraryId == libraryId &&
                     record.effectiveOrigin == TaskOrigin.VISIBLE_COVER && record.state !is TaskState.Finished && record.state !is TaskState.Running
             }.map { entry ->
-                entry.copy(record = entry.record.copy(state = TaskState.Finished(TaskResult.Cancelled(entry.record.commit)), controls = noControls),
+                entry.copy(record = entry.record.copy(state = TaskState.Finished(TaskResult.Cancelled), controls = noControls),
                     control = null, checkpoint = null).also { save(this, it) }.record
             }
         }
@@ -292,8 +389,8 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     /**
      * Deletes, in the caller's transaction, finished tasks older than the newest [keep] (R18, Q74) and
      * returns them; the caller reclaims their task-keyed private files. A finished task stays while its
-     * [TaskOwner] still holds it, while another task depends on it, and while its own state is
-     * unsettled: a checkpoint awaiting cleanup or a source commit not yet safely resolved.
+     * [TaskOwner] still holds it, while another task depends on it, and while a checkpoint awaits
+     * cleanup. A write's change list goes with it.
      */
     internal fun pruneFinished(db: SQLiteDatabase, keep: Int = FINISHED_HISTORY): List<TaskId> {
         val prerequisites = db.rawQuery("SELECT DISTINCT prerequisite_id FROM task_dependencies", null).use {
@@ -304,25 +401,30 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             .drop(keep)
             .filter { entry ->
                 val record = entry.record
-                !holds(db, record.submission.request.owner) && record.id !in prerequisites &&
-                    entry.checkpoint == null && safeTerminal(record)
+                !holds(db, record.submission.request.owner) && record.id !in prerequisites && entry.checkpoint == null
             }.map { it.record.id }
         pruned.forEach { id ->
             val args = arrayOf(id.value.toString())
+            db.delete("read_status_changes", "task_id = ?", args)
             db.delete("task_dependencies", "task_id = ?", args)
             db.delete("queued_tasks", "task_id = ?", args)
         }
         return pruned
     }
 
-    /** Internal handler boundary: persists before returning, preserving concurrent promotion/control. */
-    internal suspend fun update(id: TaskId, cachePublished: Boolean = false, action: (QueueEntry) -> QueueEntry): QueueEntry = withContext(io) {
+    /**
+     * Internal handler boundary: persists before returning, preserving concurrent promotion/control.
+     * With [next], the same transaction records the task the next selection takes first (R16).
+     */
+    internal suspend fun update(id: TaskId, cachePublished: Boolean = false, next: TaskId? = null,
+        action: (QueueEntry) -> QueueEntry): QueueEntry = withContext(io) {
         val updated = transaction {
             val old = requireNotNull(entry(this, id))
-            action(old).also { next ->
-                require(next.record.id == old.record.id && next.record.submission == old.record.submission)
-                require(next.record.scheduling == old.record.scheduling && next.record.promotion == old.record.promotion)
-                save(this, next)
+            action(old).also { changed ->
+                require(changed.record.id == old.record.id && changed.record.submission == old.record.submission)
+                require(changed.record.scheduling == old.record.scheduling && changed.record.promotion == old.record.promotion)
+                save(this, changed)
+                if (next != null) execSQL("INSERT OR REPLACE INTO dispatch_next(singleton, task_id) VALUES(1, ?)", arrayOf(next.value.toString()))
             }
         }
         publish(updated.record)
@@ -385,19 +487,6 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         }
     }
 
-    /** A safe failed intent cannot be replayed after a later overlapping intent has begun. */
-    private fun retrySuperseded(entry: QueueEntry, all: List<QueueEntry>): Boolean {
-        val write = entry.record.submission.request as? TaskRequest.ReadStatusWrite ?: return false
-        if (entry.record.commit != CommitState.NotCommitted) return false
-        val index = all.indexOfFirst { it.record.id == entry.record.id }
-        return all.drop(index + 1).any { later ->
-            val other = later.record.submission.request as? TaskRequest.ReadStatusWrite
-            other != null && write.relatedWriteKeys().any { it in other.relatedWriteKeys() } &&
-                (later.recoveryRequired || later.stage != initialStage(other) ||
-                    later.record.state is TaskState.Running || later.record.state is TaskState.Paused || later.record.state is TaskState.Finished)
-        }
-    }
-
     private fun promote(db: SQLiteDatabase, id: TaskId, origin: TaskOrigin, changed: MutableList<TaskRecord>, visited: MutableSet<TaskId>) {
         if (!visited.add(id)) return
         val entry = requireNotNull(entry(db, id))
@@ -417,13 +506,14 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     }
 
     private fun entry(db: SQLiteDatabase, id: TaskId): QueueEntry? = entries(db, "WHERE task_id = ?", arrayOf(id.value.toString())).singleOrNull()
-    private fun entries(db: SQLiteDatabase, where: String = "", args: Array<String>? = null): List<QueueEntry> = db.rawQuery("SELECT record, stage, attempts, retry_at, checkpoint, checkpoint_backend, checkpoint_version, recovery_required, control, (SELECT prerequisite_id FROM task_dependencies d WHERE d.task_id = queued_tasks.task_id AND d.requirement = '$AWAITED_SYNC'), missing_path FROM queued_tasks $where ORDER BY rowid", args).use { c ->
+    private fun entries(db: SQLiteDatabase, where: String = "", args: Array<String>? = null): List<QueueEntry> = db.rawQuery("SELECT record, stage, attempts, retry_at, checkpoint, checkpoint_backend, checkpoint_version, recovery_required, control, (SELECT prerequisite_id FROM task_dependencies d WHERE d.task_id = queued_tasks.task_id AND d.requirement = '$AWAITED_SYNC'), missing_path, started, follow_up_id FROM queued_tasks $where ORDER BY rowid", args).use { c ->
         buildList { while (c.moveToNext()) add(QueueEntry(TaskCodec.decode(c.getString(0)), TaskStage.entries.first { it.code == c.getString(1) },
             c.getInt(2), c.getLong(3), if (c.isNull(4)) null else RecoveryCheckpoint(UUID.fromString(c.getString(4)),
                 if (c.isNull(5)) null else FileVersion(BackendKind.entries.first { backendCode(it) == c.getString(5) }, c.getString(6))),
             c.getInt(7) != 0, if (c.isNull(8)) null else TaskControl.entries.first { it.code == c.getString(8) },
             if (c.isNull(9)) null else TaskId(UUID.fromString(c.getString(9))),
-            if (c.isNull(10)) null else RelativeSourcePath(c.getString(10)))) }
+            if (c.isNull(10)) null else RelativeSourcePath(c.getString(10)), c.getInt(11) != 0,
+            if (c.isNull(12)) null else TaskId(UUID.fromString(c.getString(12))))) }
     }
 
     private fun save(db: SQLiteDatabase, entry: QueueEntry) {
@@ -433,6 +523,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             put("checkpoint", entry.checkpoint?.generation?.toString()); put("checkpoint_backend", entry.checkpoint?.version?.backend?.let(::backendCode))
             put("checkpoint_version", entry.checkpoint?.version?.token); put("control", entry.control?.code)
             put("missing_path", entry.missingPath?.value)
+            put("started", if (entry.started) 1 else 0); put("follow_up_id", entry.followUp?.value?.toString())
         }
         val args = arrayOf(entry.record.id.value.toString())
         if (db.update("queued_tasks", values, "task_id = ?", args) == 0) db.insertOrThrow("queued_tasks", null, values)
@@ -481,9 +572,9 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 val kind = journal.optString("kind", "OTHER_LIBRARIES")
                 val inCandidate = kind == "METADATA" && candidate != null && candidate.context.selectionToken.toString() == journal.optString("token")
                 if (!inLibrary && !inCandidate) continue
-                if (kind == "METADATA" && (request is TaskRequest.ReadStatusWrite || (request is TaskRequest.MetadataSync && request.freshness is SnapshotFreshness.AfterWrite))) continue
+                if (kind == "METADATA" && request is TaskRequest.ReadStatusWrite) continue
                 if (kind == "METADATA") {
-                    if (request is TaskRequest.CoverLoad || request is TaskRequest.MetadataSync || candidate?.operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC) return@use true
+                    if (request is TaskRequest.CoverLoad || candidate?.operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC) return@use true
                 } else if (kind == "COPIES") {
                     val key = when (request) {
                         is TaskRequest.FormatCopy -> io.github.chenxiex.calibrecloud.model.CopyKey(request.resource.book, request.resource.format)
@@ -504,15 +595,34 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         internal fun isRevoked(db: SQLiteDatabase, id: TaskId): Boolean = db.rawQuery(
             "SELECT revoked FROM queued_tasks WHERE task_id = ?", arrayOf(id.value.toString())).use { it.moveToFirst() && it.getInt(0) != 0 }
 
-        /** Irrevocable cancellation gate, in the same transaction as cache record removal. */
+        /**
+         * Irrevocable cancellation gate, in the same transaction as cache record removal. A withdrawn
+         * write's change list goes with it: its library's state is being removed, so no mark remains.
+         */
         internal fun revoke(db: SQLiteDatabase, id: TaskId) {
             val args = arrayOf(id.value.toString())
             val record = db.rawQuery("SELECT record FROM queued_tasks WHERE task_id = ?", args).use { it.moveToFirst(); TaskCodec.decode(it.getString(0)) }
             val next = record.copy(state = if ((record.state as? TaskState.Finished)?.result == TaskResult.Completed) record.state
-                else TaskState.Finished(TaskResult.Cancelled(record.commit)), controls = noControls)
+                else TaskState.Finished(TaskResult.Cancelled), controls = noControls)
             db.update("queued_tasks", ContentValues().apply {
                 put("revoked", 1); put("control", "cancel"); put("record", TaskCodec.encode(next))
             }, "task_id = ?", args)
+            db.delete("read_status_changes", "task_id = ?", args)
+        }
+
+        /**
+         * Called in the transaction of a successful sync of [libraryId]: failure marks of its finished
+         * writes are no longer shown (R13). The change lists stay for a retry, which shows them again.
+         */
+        internal fun dismissReadFailures(db: SQLiteDatabase, libraryId: io.github.chenxiex.calibrecloud.model.LibraryId) {
+            val tasks = db.rawQuery("""SELECT task_id, record FROM queued_tasks
+                WHERE task_id IN (SELECT DISTINCT task_id FROM read_status_changes WHERE dismissed = 0)""", null).use { c ->
+                buildList { while (c.moveToNext()) {
+                    val record = TaskCodec.decode(c.getString(1))
+                    if (record.libraryId == libraryId && record.state is TaskState.Finished) add(c.getString(0))
+                } }
+            }
+            tasks.forEach { db.execSQL("UPDATE read_status_changes SET dismissed = 1 WHERE task_id = ?", arrayOf(it)) }
         }
 
         /**
@@ -589,15 +699,10 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         internal val noControls = TaskControls(false, false, false, false)
         fun initialStage(request: TaskRequest): TaskStage = when (request) {
             is TaskRequest.CandidateConfiguration -> TaskStage.CANDIDATE_ACCESS
-            is TaskRequest.MetadataSync -> TaskStage.METADATA_FETCH
             is TaskRequest.FormatCopy -> TaskStage.FORMAT_TRANSFER
             is TaskRequest.FormatCheck -> TaskStage.FORMAT_CHECK
             is TaskRequest.CoverLoad -> TaskStage.COVER_TRANSFER
             is TaskRequest.ReadStatusWrite -> TaskStage.WRITE_SNAPSHOT
-        }
-        fun safeTerminal(record: TaskRecord): Boolean {
-            val result = (record.state as? TaskState.Finished)?.result ?: return false
-            return record.commit == CommitState.NotCommitted || result == TaskResult.Completed || result is TaskResult.CompletedWithBookFailures
         }
         /**
          * Requirement code of the edge from a task to the stale-path sync it submitted while running (R11).
@@ -606,9 +711,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         internal const val AWAITED_SYNC = "awaited_sync"
 
         private fun satisfies(record: TaskRecord, requirement: String): Boolean = when (requirement) {
-            AWAITED_SYNC -> record.state is TaskState.Finished
-            DependencyRequirement.SAFE_TERMINAL.code -> safeTerminal(record)
-            DependencyRequirement.SOURCE_COMMIT_CONFIRMED.code -> record.commit == CommitState.Confirmed
+            AWAITED_SYNC, DependencyRequirement.FINISHED.code -> record.state is TaskState.Finished
             DependencyRequirement.SUCCESS.code -> (record.state as? TaskState.Finished)?.result.let { it == TaskResult.Completed || it is TaskResult.CompletedWithBookFailures }
             else -> false
         }

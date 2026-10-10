@@ -33,15 +33,15 @@ class QueueConditionsTest {
             assertTrue(state.bindValidated(state.select(cloud.location).token, cloud))
             var connected = false
             val conditions = QueueConditions(context, database, SourcePolicies.sources) { connected }
-            assertTrue(conditions.waiting(record(TaskRequest.MetadataSync(local.id))).isEmpty())
-            assertEquals(setOf(WaitingReason.NETWORK), conditions.waiting(record(TaskRequest.MetadataSync(cloud.id))))
+            assertTrue(conditions.waiting(record(check(local.id))).isEmpty())
+            assertEquals(setOf(WaitingReason.NETWORK), conditions.waiting(record(check(cloud.id))))
             for (backend in BackendKind.entries) {
                 val candidate = TaskRequest.CandidateConfiguration(CandidateContext(UUID.randomUUID(), backend, UUID.randomUUID()), "fixture")
                 assertEquals(if (backend == BackendKind.ONEDRIVE) setOf(WaitingReason.NETWORK) else emptySet<WaitingReason>(),
                     conditions.waiting(record(candidate)))
             }
             connected = true
-            assertTrue(conditions.waiting(record(TaskRequest.MetadataSync(cloud.id))).isEmpty())
+            assertTrue(conditions.waiting(record(check(cloud.id))).isEmpty())
         } finally {
             database.close()
             context.deleteDatabase(name)
@@ -99,4 +99,6 @@ class QueueConditionsTest {
     private fun record(request: TaskRequest) = TaskRecord(TaskId(UUID.randomUUID()), TaskSubmission(request, TaskOrigin.STARTUP_SYNC),
         SchedulingPosition(TaskPriority.LOW, QueueSequence(1)), state = TaskState.Queued,
         controls = TaskControls(false, true, false, false))
+
+    private fun check(library: LibraryId) = TaskRequest.FormatCheck(CopyKey(BookKey(library, 1, UUID.randomUUID()), BookFormat.parse("EPUB")))
 }

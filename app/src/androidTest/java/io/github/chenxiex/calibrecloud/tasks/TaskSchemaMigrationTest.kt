@@ -22,6 +22,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.UUID
@@ -85,7 +87,8 @@ class TaskSchemaMigrationTest {
                 db.execSQL("INSERT INTO downloaded_copies(library_id,source_id,source_uuid,format,file_generation,title,size_bytes,version_backend,version_token,source_availability) VALUES (?, 1, ?, 'EPUB', ?, 'Fixture title', 23, 'local', 'fixture-version', 'unconfirmed')",
                     arrayOf(identity.id.value.toString(), bookUuid.toString(), fileGeneration.toString()))
                 val queue = DurableTaskQueue(database, Dispatchers.IO)
-                val sync = (queue.submit(TaskSubmission(TaskRequest.MetadataSync(identity.id), TaskOrigin.STARTUP_SYNC)) as SubmissionResult.Created).taskId
+                val sync = (queue.submit(TaskSubmission(TaskRequest.CoverLoad(BookKey(identity.id, 3, UUID.randomUUID())),
+                    TaskOrigin.VISIBLE_COVER)) as SubmissionResult.Created).taskId
                 val book = BookKey(identity.id, 1, bookUuid)
                 queue.submit(TaskSubmission(TaskRequest.CoverLoad(book), TaskOrigin.USER_OPEN,
                     dependencies = FrozenSet(listOf(TaskDependency(sync, DependencyRequirement.SUCCESS)))))
@@ -216,7 +219,8 @@ class TaskSchemaMigrationTest {
                 val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
                 assertTrue(state.bindValidated(state.select(identity.location).token, identity))
                 val queue = DurableTaskQueue(database, Dispatchers.IO)
-                val sync = (queue.submit(TaskSubmission(TaskRequest.MetadataSync(identity.id), TaskOrigin.USER_DOWNLOAD)) as SubmissionResult.Created).taskId
+                val sync = (queue.submit(TaskSubmission(TaskRequest.CoverLoad(BookKey(identity.id, 2, UUID.randomUUID())),
+                    TaskOrigin.USER_DOWNLOAD)) as SubmissionResult.Created).taskId
                 val cover = (queue.submit(TaskSubmission(TaskRequest.CoverLoad(BookKey(identity.id, 1, UUID.randomUUID())),
                     TaskOrigin.USER_OPEN)) as SubmissionResult.Created).taskId
                 queue.update(cover) { it.copy(sourceSync = sync, missingPath = io.github.chenxiex.calibrecloud.model.RelativeSourcePath("a/cover.jpg")) }
@@ -240,6 +244,68 @@ class TaskSchemaMigrationTest {
                 // The cover waits on the unfinished sync, which therefore runs first.
                 assertEquals(previous.third, queue.claim(0, { emptySet() }, { true })!!.record.id)
                 assertEquals(TaskState.Waiting(FrozenSet(listOf(WaitingReason.DEPENDENCY))), queue.get(previous.second)!!.record.state)
+                database.readableDatabase.rawQuery("PRAGMA foreign_key_check", null).use { assertEquals(0, it.count) }
+            }
+        } finally {
+            context.deleteDatabase(name)
+        }
+    }
+
+    @Test
+    fun versionThirteenUpgradeRemovesRequestsOfTheReplacedWriteProtocolAndAddsChangeLists() = runBlocking<Unit> {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val name = "change-list-migration-${UUID.randomUUID()}.db"
+        val identity = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.Local("test.documents", "fixture-root"), UUID.randomUUID())
+        val book = BookKey(identity.id, 1, UUID.randomUUID())
+        val sync = UUID.randomUUID()
+        val write = UUID.randomUUID()
+        try {
+            val kept = ApplicationStateDatabase(context, name).use { database ->
+                val state = ApplicationStateRepository(database, PrivateBookFiles(context.filesDir), Dispatchers.IO)
+                assertTrue(state.bindValidated(state.select(identity.location).token, identity))
+                val queue = DurableTaskQueue(database, Dispatchers.IO)
+                val cover = (queue.submit(TaskSubmission(TaskRequest.CoverLoad(book), TaskOrigin.USER_OPEN)) as SubmissionResult.Created).taskId
+                val db = database.writableDatabase
+                StateSchemaHistory.downgrade(db, 13)
+                // Version 13 payloads of a metadata sync and of a write with commit evidence, which no handler ran.
+                val template = db.rawQuery("SELECT record FROM queued_tasks", null).use { it.moveToFirst(); it.getString(0) }
+                fun legacy(id: UUID, request: JSONObject, stage: String) {
+                    val record = JSONObject(template).put("id", id.toString())
+                        .put("commit", JSONObject().put("tag", "unknown").put("recovery", UUID.randomUUID().toString()))
+                    record.getJSONObject("submission").put("request", request)
+                    db.execSQL("INSERT INTO queued_tasks(task_id, record, stage) VALUES(?, ?, ?)", arrayOf(id.toString(), record.toString(), stage))
+                }
+                legacy(sync, JSONObject().put("tag", "metadata_sync").put("library", identity.id.value.toString())
+                    .put("freshness", JSONObject().put("tag", "current_source")), "metadata_fetch")
+                legacy(write, JSONObject().put("tag", "read_status_write").put("library", identity.id.value.toString())
+                    .put("books", JSONArray().put(JSONObject().put("library", identity.id.value.toString()).put("id", 1).put("uuid", book.sourceUuid.toString())))
+                    .put("column", JSONObject().put("id", 1).put("lookup", "#finished")).put("target", true), "recovery_check")
+                // The cover depends on the sync both as an edge and in its payload.
+                db.execSQL("INSERT INTO task_dependencies VALUES(?, ?, 'success')", arrayOf(cover.value.toString(), sync.toString()))
+                val coverRecord = db.rawQuery("SELECT record FROM queued_tasks WHERE task_id = ?", arrayOf(cover.value.toString())).use {
+                    it.moveToFirst(); JSONObject(it.getString(0))
+                }
+                coverRecord.getJSONObject("submission").put("dependencies",
+                    JSONArray().put(JSONObject().put("id", sync.toString()).put("requirement", "success")))
+                db.execSQL("UPDATE queued_tasks SET record = ? WHERE task_id = ?", arrayOf(coverRecord.toString(), cover.value.toString()))
+                cover
+            }
+            ApplicationStateDatabase(context, name).use { database ->
+                val queue = DurableTaskQueue(database, Dispatchers.IO)
+                assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
+                val remaining = queue.list().single()
+                assertEquals(kept, remaining.record.id)
+                assertTrue(remaining.record.submission.dependencies.isEmpty())
+                assertTrue(queue.get(TaskId(sync)) == null && queue.get(TaskId(write)) == null)
+                database.readableDatabase.rawQuery("SELECT COUNT(*) FROM task_dependencies", null).use {
+                    assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0))
+                }
+                // A user request promotes along payload dependencies, so none may point at a removed task.
+                queue.submit(TaskSubmission(TaskRequest.CoverLoad(book), TaskOrigin.USER_OPEN))
+                val column = io.github.chenxiex.calibrecloud.model.CustomColumnId(1, "#finished")
+                val created = queue.submitReadStatus(identity.id, column, mapOf(book to false), TaskOrigin.USER_READ_STATUS) as SubmissionResult.Created
+                assertEquals(mapOf(book to false), queue.readStatusChanges(created.taskId))
+                assertEquals(mapOf(book to PendingRead.Pending(false)), queue.pendingReadStatus(identity.id, column))
                 database.readableDatabase.rawQuery("PRAGMA foreign_key_check", null).use { assertEquals(0, it.count) }
             }
         } finally {

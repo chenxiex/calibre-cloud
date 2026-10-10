@@ -97,7 +97,7 @@ class LocalLibrarySyncTest {
         assertTrue(queue.control(task, TaskControl.CANCEL))
         documents.release.countDown()
         withTimeout(10_000) { driver.join() }
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(task)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(task)!!.record.state)
         assertTrue(documents.closes.get() > 0)
         assertTrue(File(snapshots, task.value.toString()).listFiles().orEmpty().isEmpty())
         assertTrue(queue.submit(submission(oldContext)) is SubmissionResult.Rejected)
@@ -121,7 +121,7 @@ class LocalLibrarySyncTest {
         withTimeout(10_000) { driver.join() }
         assertEquals(replacement, state.current())
         assertNull(replacement.identity)
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(task)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(task)!!.record.state)
         assertTrue(File(snapshots, task.value.toString()).listFiles().orEmpty().isEmpty())
         val newTask = submit()
         coordinator().drain()

@@ -217,8 +217,7 @@ private fun taskStatusLine(record: TaskRecord, position: Int?): String = buildLi
             is TaskResult.CompletedWithBookFailures -> add(pluralStringResource(
                 if (record.submission.request is TaskRequest.CoverLoad) R.plurals.task_partial_cover else R.plurals.task_partial,
                 result.failures.size, result.failures.size))
-            is TaskResult.Cancelled -> add(stringResource(if (result.commit == CommitState.NotCommitted)
-                R.string.task_cancelled else R.string.task_cancelled_committed))
+            TaskResult.Cancelled -> add(stringResource(R.string.task_cancelled))
             is TaskResult.Failed -> add(stringResource(R.string.task_failed, stringResource(stageResource(result.failure.stage)),
                 stringResource(taskErrorResource(result.failure.error))))
         }
@@ -251,7 +250,6 @@ internal fun taskTypeResource(request: TaskRequest): Int = when (request) {
         OneDriveCandidateTaskHandler.BROWSE -> R.string.task_type_directory
         else -> R.string.task_type_candidate
     }
-    is TaskRequest.MetadataSync -> R.string.task_type_metadata
     is TaskRequest.FormatCopy -> R.string.task_type_copy
     is TaskRequest.FormatCheck -> R.string.task_type_check
     is TaskRequest.CoverLoad -> R.string.task_type_cover
@@ -265,13 +263,10 @@ internal fun waitingResource(reason: WaitingReason): Int = when (reason) {
     WaitingReason.DIRECTORY_AUTHORIZATION -> R.string.task_wait_directory
     WaitingReason.DEPENDENCY -> R.string.task_wait_dependency
     WaitingReason.INACTIVE_LIBRARY -> R.string.task_wait_library
-    WaitingReason.RECOVERY -> R.string.task_wait_recovery
 }
 
 internal fun stageResource(stage: TaskStage): Int = when (stage) {
     TaskStage.CANDIDATE_ACCESS -> R.string.task_stage_candidate
-    TaskStage.METADATA_FETCH -> R.string.task_stage_fetch
-    TaskStage.METADATA_IMPORT -> R.string.task_stage_import
     TaskStage.FORMAT_CHECK -> R.string.task_stage_check
     TaskStage.FORMAT_TRANSFER -> R.string.task_stage_transfer
     TaskStage.FORMAT_PUBLISH -> R.string.task_stage_publish
@@ -280,9 +275,6 @@ internal fun stageResource(stage: TaskStage): Int = when (stage) {
     TaskStage.WRITE_SNAPSHOT -> R.string.task_stage_write_snapshot
     TaskStage.WRITE_PREPARE -> R.string.task_stage_write_prepare
     TaskStage.WRITE_COMMIT -> R.string.task_stage_write_commit
-    TaskStage.WRITE_REFETCH -> R.string.task_stage_write_refetch
-    TaskStage.WRITE_IMPORT -> R.string.task_stage_write_import
-    TaskStage.RECOVERY_CHECK -> R.string.task_stage_recovery
 }
 
 internal fun taskErrorResource(error: TaskError): Int = when (error) {

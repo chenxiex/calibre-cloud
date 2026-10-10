@@ -140,7 +140,7 @@ class CoverTaskHandlerTest {
         withTimeout(10_000) { driver.join() }
         // The current cover is still published; the replaced batch does not read the next one.
         assertImage(book, Color.RED, 64, 96)
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(older)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(older)!!.record.state)
         assertCompleted(newer)
         assertImage(second, Color.RED, 64, 96)
         assertEquals(listOf(FIRST_PATH, SECOND_PATH), source.paths)
@@ -210,7 +210,7 @@ class CoverTaskHandlerTest {
         val service = CoverService(state, metadata, coordinator(Source(image(64, 96, Color.RED))), queue)
         val older = (service.submit(listOf(book), state.current()!!.token) as SubmissionResult.Created).taskId
         val newer = (service.submit(listOf(second()), state.current()!!.token) as SubmissionResult.Created).taskId
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(older)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(older)!!.record.state)
         assertEquals(TaskState.Queued, queue.get(newer)!!.record.state)
     }
 
@@ -251,7 +251,7 @@ class CoverTaskHandlerTest {
                 assertEquals(2, source.opens.get())
                 // Start the cancellation case with a different, uncached complete identity.
                 book = activate("cancel", UUID.randomUUID())
-            } else assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(task)!!.record.state)
+            } else assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(task)!!.record.state)
         }
     }
 

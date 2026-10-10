@@ -32,12 +32,6 @@ enum class TaskOrigin(val code: String, val priority: TaskPriority) {
 
 enum class TaskPriority(val code: String) { HIGH("high"), LOW("low") }
 
-/** Only a freshness barrier after this particular write can satisfy its write-refetch requirement. */
-sealed interface SnapshotFreshness {
-    data object CurrentSource : SnapshotFreshness
-    data class AfterWrite(val writeTaskId: TaskId) : SnapshotFreshness
-}
-
 /** Narrow selection-scoped context; authorizationId identifies an authorization session, never a token. */
 data class CandidateContext(val selectionToken: UUID, val backend: BackendKind, val authorizationId: UUID)
 
@@ -84,13 +78,6 @@ sealed interface TaskRequest {
         }
     }
 
-    data class MetadataSync(
-        override val libraryId: LibraryId,
-        val freshness: SnapshotFreshness = SnapshotFreshness.CurrentSource,
-    ) : TaskRequest {
-        override val owner: TaskOwner get() = TaskOwner.Queue
-    }
-
     /** One book/format per schedulable child; expectedVersion is an opaque comparison premise. */
     data class FormatCopy(val resource: FormatResource, val expectedVersion: FileVersion? = null) : TaskRequest {
         override val libraryId: LibraryId get() = resource.book.libraryId
@@ -111,28 +98,26 @@ sealed interface TaskRequest {
         init { require(books.isNotEmpty() && books.all { it.libraryId == libraryId }) }
     }
 
-    /** Retrying applies target again only after commit/recovery checks, never a source-state toggle. */
+    /**
+     * Writes the read status changes the queue keeps for this task to [column] (R14). The change list
+     * (book to explicit target) lives beside the record: clicks merge into it until the task first
+     * starts, after which it is fixed. [batch] makes every write its own request, so equivalence never
+     * merges two writes; only [io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue.submitReadStatus] does.
+     */
     data class ReadStatusWrite(
         override val libraryId: LibraryId,
-        val books: FrozenSet<BookKey>,
         val column: CustomColumnId,
-        val target: Boolean,
+        val batch: UUID,
     ) : TaskRequest {
         override val owner: TaskOwner get() = TaskOwner.Queue
-        init {
-            require(books.isNotEmpty() && books.all { it.libraryId == libraryId })
-        }
     }
 }
 
-/** Related writes wait for the predecessor's entire safe workflow, including required refetch. */
 enum class DependencyRequirement(val code: String) {
-    /** Entire dependency workflow completed successfully, including any mandatory import. */
+    /** The prerequisite completed successfully. */
     SUCCESS("success"),
-    /** Confirmed commit only; allows refetch before the parent workflow has completed. */
-    SOURCE_COMMIT_CONFIRMED("source_commit_confirmed"),
-    /** No unresolved commit or mandatory refetch/recovery; Finished alone is insufficient. */
-    SAFE_TERMINAL("safe_terminal"),
+    /** The prerequisite ended with any result; a later read status write runs after an earlier one. */
+    FINISHED("finished"),
 }
 
 data class TaskDependency(val taskId: TaskId, val requirement: DependencyRequirement)
@@ -146,18 +131,4 @@ data class TaskSubmission(
     val dependencies: FrozenSet<TaskDependency> = FrozenSet(emptyList()),
 ) {
     val key: RequestKey get() = RequestKey(request, dependencies)
-
-    init {
-        val freshness = (request as? TaskRequest.MetadataSync)?.freshness
-        if (freshness is SnapshotFreshness.AfterWrite) {
-            require(origin == TaskOrigin.USER_READ_STATUS)
-            require(TaskDependency(freshness.writeTaskId, DependencyRequirement.SOURCE_COMMIT_CONFIRMED) in dependencies)
-        }
-    }
 }
-
-/** Separate from request equivalence: opposite targets on overlapping books still serialize. */
-data class RelatedWriteKey(val book: BookKey, val column: CustomColumnId)
-
-fun TaskRequest.ReadStatusWrite.relatedWriteKeys(): FrozenSet<RelatedWriteKey> =
-    FrozenSet(books.map { RelatedWriteKey(it, column) })

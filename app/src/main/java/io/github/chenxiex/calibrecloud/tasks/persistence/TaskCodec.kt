@@ -14,13 +14,11 @@ import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.BookFailure
 import io.github.chenxiex.calibrecloud.tasks.api.CandidateContext
-import io.github.chenxiex.calibrecloud.tasks.api.CommitState
 import io.github.chenxiex.calibrecloud.tasks.api.DependencyRequirement
 import io.github.chenxiex.calibrecloud.tasks.api.FrozenSet
 import io.github.chenxiex.calibrecloud.tasks.api.PriorityPromotion
 import io.github.chenxiex.calibrecloud.tasks.api.QueueSequence
 import io.github.chenxiex.calibrecloud.tasks.api.SchedulingPosition
-import io.github.chenxiex.calibrecloud.tasks.api.SnapshotFreshness
 import io.github.chenxiex.calibrecloud.tasks.api.StageFailure
 import io.github.chenxiex.calibrecloud.tasks.api.TaskControls
 import io.github.chenxiex.calibrecloud.tasks.api.TaskDependency
@@ -40,7 +38,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 
-/** Versioned private queue payload. Never log payloads: file tokens and locators are retained here. */
+/**
+ * Versioned private queue payload. Never log payloads: file tokens and locators are retained here.
+ * Payloads written before schema 14 may carry "commit" evidence of the removed write protocol; it is ignored.
+ */
 internal object TaskCodec {
     fun encode(record: TaskRecord): String = obj(
         "version" to 1,
@@ -54,7 +55,6 @@ internal object TaskCodec {
             "pause" to record.controls.canPause, "cancel" to record.controls.canCancel,
             "resume" to record.controls.canResume, "retry" to record.controls.canRetry,
         ),
-        "commit" to commit(record.commit),
         "restarted_transfer" to record.restartedTransfer,
     ).toString()
 
@@ -77,7 +77,6 @@ internal object TaskCodec {
                 controls.getBoolean("pause"), controls.getBoolean("cancel"),
                 controls.getBoolean("resume"), controls.getBoolean("retry"),
             ),
-            commit = readCommit(json.getJSONObject("commit")),
             restartedTransfer = json.optBoolean("restarted_transfer", false),
         )
     }
@@ -105,13 +104,6 @@ internal object TaskCodec {
             "backend" to backendCode(value.context.backend), "authorization" to value.context.authorizationId.toString(),
             "operation" to value.operation, "directory_item" to value.directoryItemId, "directory_page" to value.directoryPage,
         )
-        is TaskRequest.MetadataSync -> obj(
-            "tag" to "metadata_sync", "library" to value.libraryId.value.toString(),
-            "freshness" to when (val freshness = value.freshness) {
-                SnapshotFreshness.CurrentSource -> obj("tag" to "current_source")
-                is SnapshotFreshness.AfterWrite -> obj("tag" to "after_write", "task" to freshness.writeTaskId.value.toString())
-            },
-        )
         is TaskRequest.FormatCopy -> obj(
             "tag" to "format_copy", "book" to book(value.resource.book),
             "format" to value.resource.format.value, "source" to locator(value.resource.source),
@@ -123,9 +115,8 @@ internal object TaskCodec {
             "books" to JSONArray(value.books.map(::book)))
         is TaskRequest.ReadStatusWrite -> obj(
             "tag" to "read_status_write", "library" to value.libraryId.value.toString(),
-            "books" to sortedArray(value.books.map(::book)),
             "column" to obj("id" to value.column.sourceId, "lookup" to value.column.lookupName),
-            "target" to value.target,
+            "batch" to value.batch.toString(),
         )
     }
 
@@ -138,16 +129,6 @@ internal object TaskCodec {
             json.getString("operation").let { if (it in LEGACY_SYNC) TaskRequest.CandidateConfiguration.LIBRARY_SYNC else it },
             if (json.has("directory_item") && !json.isNull("directory_item")) json.getString("directory_item") else null,
             json.optInt("directory_page", 0),
-        )
-        "metadata_sync" -> TaskRequest.MetadataSync(
-            libraryId(json.getString("library")),
-            json.getJSONObject("freshness").let {
-                when (it.getString("tag")) {
-                    "current_source" -> SnapshotFreshness.CurrentSource
-                    "after_write" -> SnapshotFreshness.AfterWrite(taskId(it.getString("task")))
-                    else -> invalidTag()
-                }
-            },
         )
         "format_copy" -> TaskRequest.FormatCopy(
             FormatResource(
@@ -162,9 +143,8 @@ internal object TaskCodec {
             else TaskRequest.CoverLoad(libraryId(json.getString("library")), FrozenSet(json.getJSONArray("books").objects().map(::readBook)))
         "read_status_write" -> TaskRequest.ReadStatusWrite(
             libraryId(json.getString("library")),
-            FrozenSet(json.getJSONArray("books").objects().map(::readBook)),
             json.getJSONObject("column").let { CustomColumnId(it.getLong("id"), it.getString("lookup")) },
-            json.getBoolean("target"),
+            UUID.fromString(json.getString("batch")),
         )
         else -> invalidTag()
     }
@@ -197,19 +177,6 @@ internal object TaskCodec {
     /** Per-backend sync operations stored before they became [TaskRequest.CandidateConfiguration.LIBRARY_SYNC]. */
     private val LEGACY_SYNC = setOf("local_snapshot", "onedrive_snapshot")
 
-    private fun commit(value: CommitState): JSONObject = when (value) {
-        CommitState.NotCommitted -> obj("tag" to "not_committed")
-        CommitState.Confirmed -> obj("tag" to "confirmed")
-        is CommitState.Unknown -> obj("tag" to "unknown", "recovery" to value.recoveryRecordId.toString())
-    }
-
-    private fun readCommit(json: JSONObject): CommitState = when (json.getString("tag")) {
-        "not_committed" -> CommitState.NotCommitted
-        "confirmed" -> CommitState.Confirmed
-        "unknown" -> CommitState.Unknown(UUID.fromString(json.getString("recovery")))
-        else -> invalidTag()
-    }
-
     private fun state(value: TaskState): JSONObject = when (value) {
         TaskState.Queued -> obj("tag" to "queued")
         is TaskState.Waiting -> obj("tag" to "waiting", "reasons" to JSONArray(value.reasons.map { it.code }.sorted()))
@@ -239,11 +206,8 @@ internal object TaskCodec {
         is TaskResult.CompletedWithBookFailures -> obj("tag" to "completed_with_book_failures", "failures" to sortedArray(
             value.failures.map { obj("book" to book(it.book), "error" to error(it.error)) },
         ))
-        is TaskResult.Failed -> obj(
-            "tag" to "failed", "stage" to value.failure.stage.code,
-            "error" to error(value.failure.error), "commit" to commit(value.failure.commit),
-        )
-        is TaskResult.Cancelled -> obj("tag" to "cancelled", "commit" to commit(value.commit))
+        is TaskResult.Failed -> obj("tag" to "failed", "stage" to value.failure.stage.code, "error" to error(value.failure.error))
+        TaskResult.Cancelled -> obj("tag" to "cancelled")
     }
 
     private fun readResult(json: JSONObject): TaskResult = when (json.getString("tag")) {
@@ -251,10 +215,8 @@ internal object TaskCodec {
         "completed_with_book_failures" -> TaskResult.CompletedWithBookFailures(FrozenSet(
             json.getJSONArray("failures").objects().map { BookFailure(readBook(it.getJSONObject("book")), readError(it.getJSONObject("error"))) },
         ))
-        "failed" -> TaskResult.Failed(StageFailure(
-            stage(json.getString("stage")), readError(json.getJSONObject("error")), readCommit(json.getJSONObject("commit")),
-        ))
-        "cancelled" -> TaskResult.Cancelled(readCommit(json.getJSONObject("commit")))
+        "failed" -> TaskResult.Failed(StageFailure(stage(json.getString("stage")), readError(json.getJSONObject("error"))))
+        "cancelled" -> TaskResult.Cancelled
         else -> invalidTag()
     }
 

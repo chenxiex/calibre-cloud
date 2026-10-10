@@ -1,8 +1,6 @@
 package io.github.chenxiex.calibrecloud.storage.api
 
-import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.model.CopyKey
-import io.github.chenxiex.calibrecloud.model.CustomColumnId
 import io.github.chenxiex.calibrecloud.model.FileVersion
 import io.github.chenxiex.calibrecloud.model.LibraryId
 import java.io.Closeable
@@ -78,6 +76,3 @@ interface CopyMaintenance {
     suspend fun removeCopy(key: CopyKey): StorageOperationResult
     suspend fun clearMetadata(libraryId: LibraryId): StorageOperationResult
 }
-
-/** Sole business write intent. Safe prepare/commit and write-refetch protocols remain unimplemented. */
-data class ReadStatusIntent(val book: BookKey, val column: CustomColumnId, val target: Boolean)

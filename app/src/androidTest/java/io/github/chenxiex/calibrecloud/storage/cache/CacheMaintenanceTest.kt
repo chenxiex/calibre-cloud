@@ -243,7 +243,7 @@ class CacheMaintenanceTest {
     }
 
     @Test
-    fun clearingMetadataKeepsCompleteCopiesSelectionAndUnresolvedWriteEvidence() = runBlocking<Unit> {
+    fun clearingMetadataKeepsCompleteCopiesSelectionAndReadStatusWrites() = runBlocking<Unit> {
         val copy = publish(book, "EPUB")
         val pendingPdf = pendingCopy(CopyKey(book, BookFormat.parse("PDF")))
         val pendingPdfFile = renamedCopy(pendingPdf, CopyKey(book, BookFormat.parse("PDF")))
@@ -255,9 +255,8 @@ class CacheMaintenanceTest {
         val snapshot = File(files, "metadata/${imported.generation}/metadata.db")
         assertTrue(snapshot.isFile)
         val cover = cover(book)
-        val sync = submit(TaskRequest.MetadataSync(book.libraryId), TaskOrigin.MANUAL_SYNC)
         val image = submit(TaskRequest.CoverLoad(book), TaskOrigin.VISIBLE_COVER)
-        val write = protectedWrite(book)
+        val write = pendingWrite(book)
         val protected = File(files, "write-recovery/${UUID.randomUUID()}/backup.db").apply {
             parentFile!!.mkdirs(); writeText("protected recovery backup")
         }
@@ -268,9 +267,9 @@ class CacheMaintenanceTest {
         assertEquals(0L, count("cover_cache"))
         assertFalse(snapshot.exists())
         assertFalse(cover.exists())
-        assertCancelled(sync)
         assertCancelled(image)
         assertEquals(writeEntry, queue.get(write))
+        assertEquals(mapOf(book to true), queue.readStatusChanges(write))
         assertEquals("protected recovery backup", protected.readText())
         assertEquals(selected, state.current())
         assertEquals(pendingPdfEntry, queue.get(pendingPdf))
@@ -290,13 +289,12 @@ class CacheMaintenanceTest {
     }
 
     @Test
-    fun otherLibraryCleanupUsesPrivateIdentityAndKeepsCurrentLibraryAndProtection() = runBlocking<Unit> {
+    fun otherLibraryCleanupUsesPrivateIdentityKeepsCurrentLibraryAndWithdrawsOldWrites() = runBlocking<Unit> {
         val old = book
         val oldCopy = publish(old, "EPUB")
         val oldCover = cover(old)
         val oldTask = pendingCopy(oldCopy.key)
-        val write = protectedWrite(old)
-        val writeEntry = queue.get(write)
+        val write = pendingWrite(old)
         val protected = File(files, "write-recovery/${UUID.randomUUID()}/backup.db").apply {
             parentFile!!.mkdirs(); writeText("old library protection")
         }
@@ -317,7 +315,7 @@ class CacheMaintenanceTest {
         assertTrue(currentCover.isFile)
         assertEquals(currentImport, metadata.currentImport())
         assertEquals(selected, state.current())
-        assertEquals(writeEntry, queue.get(write))
+        assertWithdrawn(write)
         assertEquals("old library protection", protected.readText())
     }
 
@@ -558,11 +556,11 @@ class CacheMaintenanceTest {
     }
 
     @Test
-    fun deletingTheCurrentLibraryLeavesNoCurrentLibraryAndKeepsProtectedWrites() = runBlocking<Unit> {
+    fun deletingTheCurrentLibraryLeavesNoCurrentLibraryAndWithdrawsItsWrites() = runBlocking<Unit> {
         val deleted = listedLibrary("current")
         val copy = publish(deleted, "EPUB")
-        val protectedTask = protectedWrite(deleted)
-        val protectedEntry = queue.get(protectedTask)
+        val write = pendingWrite(deleted)
+        val writeEntry = queue.get(write)
         val location = requireNotNull(state.current()!!.location)
         val stale = requireNotNull(maintenance.previewLibrary(location))
         assertTrue(stale.deletesCurrent)
@@ -570,12 +568,13 @@ class CacheMaintenanceTest {
         state.switchTo(location)
         assertFalse(maintenance.execute(stale))
         assertEquals(copy, state.find(copy.key))
+        assertEquals(writeEntry, queue.get(write))
 
         assertTrue(maintenance.execute(requireNotNull(maintenance.previewLibrary(location))))
         assertNull(state.current())
         assertTrue(state.libraries().isEmpty())
         assertNull(state.find(copy.key))
-        assertEquals(protectedEntry, queue.get(protectedTask))
+        assertWithdrawn(write)
         // Other-library cleanup still works with no current library.
         assertNotNull(maintenance.previewOtherLibraries())
         assertNull(maintenance.previewMetadata())
@@ -612,11 +611,10 @@ class CacheMaintenanceTest {
     }
 
     @Test
-    fun otherLibraryCleanupWithoutCurrentLibraryIncludesAllOldBindingsAndKeepsProtection() = runBlocking<Unit> {
+    fun otherLibraryCleanupWithoutCurrentLibraryIncludesAllOldBindingsAndWithdrawsTheirWrites() = runBlocking<Unit> {
         val first = book
         val firstCopy = publish(first, "EPUB")
-        val protectedTask = protectedWrite(first)
-        val protectedEntry = queue.get(protectedTask)
+        val write = pendingWrite(first)
         val second = activate("second")
         val secondCopy = publish(second, "PDF")
         val protected = File(files, "write-recovery/${UUID.randomUUID()}/backup.db").apply {
@@ -637,7 +635,7 @@ class CacheMaintenanceTest {
         assertFalse(copyFile(secondCopy).exists())
         assertEquals(0L, count("metadata_imports"))
         assertEquals(0L, count("metadata_books"))
-        assertEquals(protectedEntry, queue.get(protectedTask))
+        assertWithdrawn(write)
         assertEquals("unresolved source recovery", protected.readText())
     }
 
@@ -648,8 +646,7 @@ class CacheMaintenanceTest {
             val firstCopy = publish(first, "EPUB")
             val second = activate("journal-second-${backend.name.lowercase()}")
             val secondCopy = publish(second, "PDF")
-            val protectedTask = protectedWrite(first)
-            val protectedEntry = queue.get(protectedTask)
+            val write = pendingWrite(first)
             val protected = File(files, "write-recovery/${UUID.randomUUID()}/backup.db").apply {
                 parentFile!!.mkdirs(); writeText("protected ${backend.name}")
             }
@@ -677,7 +674,7 @@ class CacheMaintenanceTest {
             database.readableDatabase.rawQuery("SELECT revoked FROM queued_tasks WHERE task_id = ?",
                 arrayOf(task.value.toString())).use { assertTrue(it.moveToFirst()); assertEquals(0, it.getInt(0)) }
             assertEquals(selected, state.current())
-            assertEquals(protectedEntry, queue.get(protectedTask))
+            assertWithdrawn(write)
             assertEquals("protected ${backend.name}", protected.readText())
             assertNull(state.find(firstCopy.key))
             assertNull(state.find(secondCopy.key))
@@ -742,13 +739,18 @@ class CacheMaintenanceTest {
         }
     }
 
-    private suspend fun protectedWrite(key: BookKey): TaskId {
-        val task = submit(TaskRequest.ReadStatusWrite(key.libraryId, FrozenSet(listOf(key)), CustomColumnId(1, "#finished"), true),
-            TaskOrigin.USER_READ_STATUS)
-        queue.update(task) { it.copy(stage = TaskStage.RECOVERY_CHECK,
-            record = it.record.copy(commit = CommitState.Unknown(UUID.randomUUID()),
-                state = TaskState.Waiting(FrozenSet(listOf(WaitingReason.RECOVERY))))) }
+    /** A read status write waiting for the network, with its change list. */
+    private suspend fun pendingWrite(key: BookKey): TaskId {
+        val task = (queue.submitReadStatus(key.libraryId, CustomColumnId(1, "#finished"), mapOf(key to true),
+            TaskOrigin.USER_READ_STATUS) as SubmissionResult.Created).taskId
+        queue.update(task) { it.copy(record = it.record.copy(state = TaskState.Waiting(FrozenSet(listOf(WaitingReason.NETWORK))))) }
         return task
+    }
+
+    /** Cancelled with its change list gone, so its library leaves no pending mark behind. */
+    private suspend fun assertWithdrawn(write: TaskId) {
+        assertCancelled(write)
+        assertTrue(queue.readStatusChanges(write).isEmpty())
     }
 
     private fun cover(key: BookKey): File {
@@ -765,7 +767,7 @@ class CacheMaintenanceTest {
         (queue.submit(TaskSubmission(request, origin)) as SubmissionResult.Created).taskId
 
     private suspend fun assertCancelled(task: TaskId) {
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(task)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(task)!!.record.state)
         assertNull(queue.get(task)!!.checkpoint)
     }
 

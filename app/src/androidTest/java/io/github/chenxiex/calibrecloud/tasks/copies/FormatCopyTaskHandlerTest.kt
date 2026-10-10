@@ -386,7 +386,7 @@ class FormatCopyTaskHandlerTest {
         val task = pauseTransfer(source)
         assertTrue(queue.control(task, TaskControl.CANCEL))
         coordinator(source).drain()
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(task)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(task)!!.record.state)
         assertTrue(File(context.filesDir, "book-staging/${task.value}").listFiles().orEmpty().isEmpty())
         assertEquals(old, state.find(key()))
         assertArrayEquals(original.bytes, readBytes())
@@ -428,7 +428,7 @@ class FormatCopyTaskHandlerTest {
         assertTrue(queue.control(task, TaskControl.CANCEL))
         replacement.release.countDown()
         withTimeout(10_000) { driver.join() }
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(task)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(task)!!.record.state)
         assertEquals(old, state.find(key()))
         assertArrayEquals(first.bytes, readBytes())
         assertTrue(replacement.closes.get() > 0)

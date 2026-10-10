@@ -7,6 +7,8 @@ import android.database.sqlite.SQLiteDatabase
 import io.github.chenxiex.calibrecloud.model.LibraryLocation
 import io.github.chenxiex.calibrecloud.storage.api.LocationKeys
 import android.database.sqlite.SQLiteOpenHelper
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Private application state only; never opens, migrates or repairs a Calibre database.
@@ -27,6 +29,9 @@ import android.database.sqlite.SQLiteOpenHelper
  * being added; the single local grant and candidate selections without a location are migrated away.
  * Version 13 moves the stale-path sync a task waits on into task_dependencies; an upgraded database
  * keeps the emptied queued_tasks.source_sync column, which SQLite on API 30 cannot drop.
+ * Version 14 replaces the write-back commit protocol: read status changes are kept per write task,
+ * queued_tasks records whether a task has started and the sync that followed a write, and
+ * dispatch_next names the task the next selection must take. Payloads keep their ignored commit field.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  * Raising [VERSION] also requires its reversal in the androidTest StateSchemaHistory fixture.
@@ -34,7 +39,7 @@ import android.database.sqlite.SQLiteOpenHelper
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
     SQLiteOpenHelper(context.applicationContext, name, null, VERSION) {
     companion object {
-        const val VERSION = 13
+        const val VERSION = 14
     }
 
     private val privateFiles = context.applicationContext.filesDir
@@ -57,6 +62,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createRequestCosts(db)
         createFormatPriority(db)
         createLibraryList(db)
+        createReadStatusChanges(db)
     }
 
     /**
@@ -393,6 +399,60 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         if (oldVersion <= 10) createFormatPriority(db)
         if (oldVersion <= 11) createLibraryList(db)
         if (oldVersion <= 12) migrateSourceSyncs(db)
+        if (oldVersion <= 13) {
+            removeLegacyWrites(db)
+            createReadStatusChanges(db)
+        }
+    }
+
+    /**
+     * A write's change list (R14): book to explicit target, fixed once the task has started. Rows stay
+     * until the task is removed so a page can show a pending or failed mark; dismissed hides a failure
+     * after a later import without losing the list a retry writes. follow_up_id is the sync submitted
+     * right after a write; dispatch_next holds at most one task that the next selection takes first.
+     */
+    private fun createReadStatusChanges(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE queued_tasks ADD COLUMN started INTEGER NOT NULL DEFAULT 0")
+        db.execSQL("ALTER TABLE queued_tasks ADD COLUMN follow_up_id TEXT")
+        db.execSQL("""
+            CREATE TABLE read_status_changes (
+                task_id TEXT NOT NULL REFERENCES queued_tasks(task_id),
+                book_id INTEGER NOT NULL CHECK(book_id > 0),
+                book_uuid TEXT NOT NULL,
+                target INTEGER NOT NULL CHECK(target IN (0, 1)),
+                dismissed INTEGER NOT NULL DEFAULT 0 CHECK(dismissed IN (0, 1)),
+                PRIMARY KEY(task_id, book_id, book_uuid)
+            )
+        """.trimIndent())
+        db.execSQL("CREATE TABLE dispatch_next (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), task_id TEXT NOT NULL)")
+    }
+
+    /**
+     * Removes requests of the replaced protocol: metadata syncs and writes without a change list. No
+     * handler ever ran either, so no source was written. Their edges go too, and so do the references
+     * other payloads keep to them, since a promotion follows those references.
+     */
+    private fun removeLegacyWrites(db: SQLiteDatabase) {
+        val rows = db.rawQuery("SELECT task_id, record FROM queued_tasks", null).use { c ->
+            buildList { while (c.moveToNext()) add(c.getString(0) to JSONObject(c.getString(1))) }
+        }
+        val legacy = rows.filter { (_, record) ->
+            val request = record.getJSONObject("submission").getJSONObject("request")
+            val tag = request.getString("tag")
+            tag == "metadata_sync" || (tag == "read_status_write" && !request.has("batch"))
+        }.map { it.first }.toSet()
+        if (legacy.isEmpty()) return
+        legacy.forEach { id ->
+            db.delete("task_dependencies", "task_id = ? OR prerequisite_id = ?", arrayOf(id, id))
+            db.delete("queued_tasks", "task_id = ?", arrayOf(id))
+        }
+        rows.filter { it.first !in legacy }.forEach { (id, record) ->
+            val dependencies = record.getJSONObject("submission").getJSONArray("dependencies")
+            val kept = JSONArray((0 until dependencies.length()).map(dependencies::getJSONObject).filter { it.getString("id") !in legacy })
+            if (kept.length() == dependencies.length()) return@forEach
+            record.getJSONObject("submission").put("dependencies", kept)
+            db.update("queued_tasks", ContentValues().apply { put("record", record.toString()) }, "task_id = ?", arrayOf(id))
+        }
     }
 
     /** The edge code is frozen here; no earlier version removed an awaited sync, so each recorded one still exists. */

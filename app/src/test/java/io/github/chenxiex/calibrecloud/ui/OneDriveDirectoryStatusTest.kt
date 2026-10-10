@@ -3,7 +3,6 @@ package io.github.chenxiex.calibrecloud.ui
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
-import io.github.chenxiex.calibrecloud.tasks.api.CommitState
 import io.github.chenxiex.calibrecloud.tasks.api.FrozenSet
 import io.github.chenxiex.calibrecloud.tasks.api.StageFailure
 import io.github.chenxiex.calibrecloud.tasks.api.TaskError
@@ -21,14 +20,12 @@ class OneDriveDirectoryStatusTest {
         val failed = TaskState.Finished(TaskResult.Failed(StageFailure(
             TaskStage.CANDIDATE_ACCESS,
             TaskError.Source(StorageError(StorageErrorKind.LOCAL_IO)),
-            CommitState.NotCommitted,
         )))
         assertEquals(R.string.onedrive_task_io, directoryStatusResource(failed, OneDriveCandidateTaskHandler.BROWSE, false, false))
         // A network wait continues automatically; only a finished failure asks for a retry.
         val offline = TaskState.Finished(TaskResult.Failed(StageFailure(
             TaskStage.CANDIDATE_ACCESS,
             TaskError.Source(StorageError(StorageErrorKind.NO_NETWORK)),
-            CommitState.NotCommitted,
         )))
         assertEquals(R.string.onedrive_task_network_failed, browseStatus(offline))
     }

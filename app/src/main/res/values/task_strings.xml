@@ -25,7 +25,6 @@
     <string name="task_expand">展开</string>
     <string name="task_collapse">收起</string>
     <string name="task_cancelled">已取消</string>
-    <string name="task_cancelled_committed">已取消 · 源变更已提交</string>
     <string name="task_failed">失败：%1$s（%2$s）</string>
     <string name="task_status_separator">\u0020·\u0020</string>
     <string name="task_pause">暂停</string>
@@ -46,10 +45,7 @@
     <string name="task_wait_directory">等待目录授权</string>
     <string name="task_wait_dependency">等待必要依赖完成</string>
     <string name="task_wait_library">等待当前书库激活</string>
-    <string name="task_wait_recovery">等待源提交恢复确认</string>
     <string name="task_stage_candidate">验证书库访问</string>
-    <string name="task_stage_fetch">获取元数据快照</string>
-    <string name="task_stage_import">导入元数据</string>
     <string name="task_stage_check">检查格式版本</string>
     <string name="task_stage_transfer">传输书籍副本</string>
     <string name="task_stage_publish">发布完整书籍副本</string>
@@ -58,9 +54,6 @@
     <string name="task_stage_write_snapshot">获取写回快照</string>
     <string name="task_stage_write_prepare">准备写回</string>
     <string name="task_stage_write_commit">提交源变更</string>
-    <string name="task_stage_write_refetch">重新获取写后元数据</string>
-    <string name="task_stage_write_import">导入写后元数据</string>
-    <string name="task_stage_recovery">复查恢复状态</string>
     <string name="task_error_network">网络不可用</string>
     <string name="task_error_throttled">服务端限流</string>
     <string name="task_error_login">需要重新登录</string>

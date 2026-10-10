@@ -290,19 +290,11 @@ class CacheMaintenance(
                     is TaskRequest.FormatCheck -> matches(request.key, plan)
                     else -> false
                 }
+                // Read status writes are kept: they fetch the latest source database themselves (R12).
                 CleanupKind.METADATA -> request is TaskRequest.CoverLoad ||
-                    (request is TaskRequest.MetadataSync && request.freshness == SnapshotFreshness.CurrentSource) ||
                     (candidate != null && candidate.operation in setOf("local_snapshot", "onedrive_snapshot"))
-                CleanupKind.OTHER_LIBRARIES, CleanupKind.LIBRARY -> when {
-                    request is TaskRequest.ReadStatusWrite -> record.commit == CommitState.NotCommitted
-                    request is TaskRequest.MetadataSync && request.freshness is SnapshotFreshness.AfterWrite -> {
-                        val parent = request.freshness.writeTaskId
-                        db.rawQuery("SELECT record FROM queued_tasks WHERE task_id = ?", arrayOf(parent.value.toString())).use { source ->
-                            !source.moveToFirst() || TaskCodec.decode(source.getString(0)).commit == CommitState.NotCommitted
-                        }
-                    }
-                    else -> true
-                }
+                // Revoking also drops a write's change list, so no pending mark outlives its library.
+                CleanupKind.OTHER_LIBRARIES, CleanupKind.LIBRARY -> true
             }
             if (match) add(record.id)
         } }

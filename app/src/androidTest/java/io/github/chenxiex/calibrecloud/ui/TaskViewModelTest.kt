@@ -52,7 +52,7 @@ class TaskViewModelTest {
         val identity = LibraryIdentity(LibraryId(UUID.randomUUID()),
             LibraryLocation.Local("test.documents", "fixture-root"), UUID.randomUUID())
         assertTrue(state.bindValidated(state.select(identity.location).token, identity))
-        queue.submit(TaskSubmission(TaskRequest.MetadataSync(identity.id), TaskOrigin.MANUAL_SYNC))
+        queue.submit(TaskSubmission(TaskRequest.FormatCheck(io.github.chenxiex.calibrecloud.model.CopyKey(io.github.chenxiex.calibrecloud.model.BookKey(identity.id, 1, UUID.randomUUID()), io.github.chenxiex.calibrecloud.model.BookFormat.parse("EPUB"))), TaskOrigin.USER_DOWNLOAD))
         // Without a composition, every idle wait blocks for the rule's two-second root timeout.
         compose.setContent {}
         compose.runOnIdle {

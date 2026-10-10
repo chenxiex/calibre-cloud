@@ -66,7 +66,7 @@ class AuthorizationResumeTest {
         val reselected = state.select(location)
         assertEquals(identity, reselected.identity)
         resume()
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(waiting)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(waiting)!!.record.state)
         val replacement = queue.list().map { it.record }.single { it.id != waiting }
         assertEquals(reselected.token, (replacement.submission.request as TaskRequest.CandidateConfiguration).context.selectionToken)
         assertEquals(TaskOrigin.MANUAL_SYNC, replacement.originalOrigin)
@@ -80,7 +80,7 @@ class AuthorizationResumeTest {
         val waiting = waitingSync()
         val other = state.select(LibraryLocation.Local("test.documents", "other"))
         resume()
-        assertEquals(TaskState.Finished(TaskResult.Cancelled(CommitState.NotCommitted)), queue.get(waiting)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Cancelled), queue.get(waiting)!!.record.state)
         assertEquals(1, queue.list().size)
         assertEquals(other.token, state.current()!!.token)
     }

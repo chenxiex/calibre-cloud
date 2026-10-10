@@ -13,7 +13,7 @@
 
 - [身份模型约束](src/main/java/io/github/chenxiex/calibrecloud/model/AGENTS.md)：书库、书籍、格式、后端定位和逻辑路径校验。
 - [存储约束](src/main/java/io/github/chenxiex/calibrecloud/storage/AGENTS.md)：完整记录查询、普通读取、句柄生命周期和显式操作边界。
-- [任务约束](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)：固定请求、来源优先级、依赖、新鲜度及提交／刷新证据。
+- [任务约束](src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)：固定请求、来源优先级、依赖、已读写回的变更列表与紧接同步。
 - [文件提供约束](src/main/java/io/github/chenxiex/calibrecloud/files/AGENTS.md)：私有文件代次、书籍 provider 的 URI 与临时只读授权。
 - [图书馆查询约束](src/main/java/io/github/chenxiex/calibrecloud/library/AGENTS.md)：本地索引、搜索、筛选、分类、排序与默认格式。
 - [界面约束](src/main/java/io/github/chenxiex/calibrecloud/ui/AGENTS.md)：分页容器、无动画、测试标签与图书馆页面状态。
@@ -35,7 +35,7 @@
 - 检查实际 APK 的最低系统、包标识、可调试状态及导出组件；OAuth 配置缺失时核对回调禁用。release 签名只从被忽略的 `local.properties` 的 `release.*` 四项读取，未配置时生成未签名产物；密钥库和密码不得写入仓库或日志，agent 不生成、移动或替换用户的发布密钥库；除非用户明确要求，不在真机安装或覆盖正式包，验证与测试始终只用 debug 包。
 - 设备测试的 runner 是 androidTest 中的 `io.github.chenxiex.calibrecloud.AwakeTestRunner`，手动 `am instrument` 也要指定它。它在整轮测试期间持有 partial wake lock：PA6 亮屏时若无 wake lock 也会挂起 CPU，每分钟只醒约 7 秒，测试进程会随之冻结。
 - ADB 安装前先从 APK 核对 debug application ID，只使用测试书库副本；记录结果后卸载 debug 与测试包，不覆盖正式应用或访问正式数据。
-- 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md)、[第二阶段记录](verification/phase-2.md) 与 [第三阶段记录](verification/phase-3.md)。构建及模拟平台／服务响应不能替代对应阶段的真实设备／上游验证；在目标真机自动执行的测试或 ADB 操作按其实际覆盖范围计为真机证据。
+- 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md)、[第二阶段记录](verification/phase-2.md)、[第三阶段记录](verification/phase-3.md) 与 [第四阶段记录](verification/phase-4.md)。构建及模拟平台／服务响应不能替代对应阶段的真实设备／上游验证；在目标真机自动执行的测试或 ADB 操作按其实际覆盖范围计为真机证据。
 
 ## 测试设计与共同验收
 
