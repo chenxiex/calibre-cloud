@@ -222,12 +222,15 @@ internal fun SelectionMark(
 
 internal val SELECTION_MARK_SIZE = 20.dp
 
-/** A small framed label on a cover or in a row, such as "已读" or a missing source. */
+/**
+ * A small framed label on a cover or in a row, such as a missing source or a read status still being
+ * written; a [filled] label is white on black, such as the synced "已读".
+ */
 @Composable
-internal fun TagLabel(text: String, modifier: Modifier = Modifier) {
+internal fun TagLabel(text: String, modifier: Modifier = Modifier, filled: Boolean = false) {
     Text(
-        text, modifier.background(PAPER, PILL_SHAPE).border(BORDER, INK, PILL_SHAPE).padding(horizontal = 6.dp),
-        style = MaterialTheme.typography.labelSmall, maxLines = 1,
+        text, modifier.background(if (filled) INK else PAPER, PILL_SHAPE).border(BORDER, INK, PILL_SHAPE).padding(horizontal = 6.dp),
+        color = if (filled) PAPER else INK, style = MaterialTheme.typography.labelSmall, maxLines = 1,
     )
 }
 

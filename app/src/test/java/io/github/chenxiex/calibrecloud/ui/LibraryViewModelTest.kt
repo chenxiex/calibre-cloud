@@ -8,6 +8,7 @@ import io.github.chenxiex.calibrecloud.library.FolderKey
 import io.github.chenxiex.calibrecloud.library.DownloadFilter
 import io.github.chenxiex.calibrecloud.library.LibraryFilters
 import io.github.chenxiex.calibrecloud.library.ReadFilter
+import io.github.chenxiex.calibrecloud.library.ReadMarkAction
 import io.github.chenxiex.calibrecloud.library.ReadMarkBlock
 import io.github.chenxiex.calibrecloud.library.SearchScope
 import io.github.chenxiex.calibrecloud.library.LibraryImports
@@ -49,6 +50,12 @@ import io.github.chenxiex.calibrecloud.tasks.api.TaskRequest
 import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
 import io.github.chenxiex.calibrecloud.tasks.api.TaskSubmission
+import io.github.chenxiex.calibrecloud.tasks.api.PendingRead
+import io.github.chenxiex.calibrecloud.tasks.api.StageFailure
+import io.github.chenxiex.calibrecloud.tasks.api.TaskError
+import io.github.chenxiex.calibrecloud.tasks.api.TaskStage
+import io.github.chenxiex.calibrecloud.metadata.ImportedColumn
+import io.github.chenxiex.calibrecloud.metadata.ImportedColumnValue
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -119,9 +126,21 @@ class LibraryViewModelTest {
 
     private val history = FakeHistory()
 
-    /** Records submissions; [accept] and [removes] decide their outcome. */
+    /** Records submissions; [accept], [removes] and [markAccept] decide their outcome. */
     private class FakeBatch : LibraryBatch {
-        override val readWriteAvailable = false
+        var writeBlocked: ReadMarkBlock? = null
+        val pending = mutableMapOf<BookKey, PendingRead>()
+        var markAccept = true
+        val marks = mutableListOf<Pair<Set<BookKey>, Boolean>>()
+        val dismissed = mutableListOf<Set<BookKey>>()
+        override suspend fun writeBlock() = writeBlocked
+        override suspend fun pendingReads() = pending.toMap()
+        override suspend fun markRead(books: Set<BookKey>, target: Boolean, selectionToken: UUID) =
+            markAccept.also { if (it) marks += books to target }
+        override suspend fun dismissReadFailures(books: Set<BookKey>) {
+            dismissed += books
+            books.forEach { if (pending[it] is PendingRead.Failed) pending.remove(it) }
+        }
         var accept = true
         var removes = true
         val downloads = mutableListOf<CopyKey>()
@@ -557,5 +576,146 @@ class LibraryViewModelTest {
         model.prepareRemoval(); advanceUntilIdle()
         assertEquals(setOf(key(3)) to null, batch.previews.last())
         assertNull(model.removal!!.formats)
+    }
+
+    private val readColumn = CustomColumnId(1, "#read")
+
+    /** Books 1.. with the given read values (null for an empty value) under a valid read column. */
+    private fun readLibrary(vararg reads: Boolean?) = LibraryIndex(ImportedLibrary(identity, UUID.randomUUID(), 1, ParsedLibrary(null,
+        reads.mapIndexed { i, read ->
+            val n = i + 1
+            ImportedBook(n.toLong(), UUID(0, n.toLong()), "Book %03d".format(n), listOf("Author"), "2026-01-01T00:%02d:00+00:00".format(n),
+                null, null, null, emptyList(), "", emptyList(), RelativeSourcePath("p$n"), true,
+                read?.let { mapOf(1L to ImportedColumnValue.Bool(it)) }.orEmpty())
+        }, listOf(ImportedColumn(readColumn, "Read", "bool", false, true))), readColumn, ReadColumnStatus.VALID))
+
+    private fun writeEvent(state: TaskState) = TaskEvent.Changed(TaskRecord(TaskId(UUID.randomUUID()),
+        TaskSubmission(TaskRequest.ReadStatusWrite(libraryId, readColumn, UUID.randomUUID()), TaskOrigin.USER_READ_STATUS),
+        SchedulingPosition(TaskPriority.HIGH, QueueSequence(1)), state = state, controls = TaskControls(false, false, false, false)))
+
+    @Test
+    fun theMarkCountsPendingTargetsAndSubmitsTheChosenTargetWithoutChangingThePage() = runTest(dispatcher) {
+        imported = readLibrary(true, false, null)
+        val model = model().also { it.onMeasured(10); advanceUntilIdle() }
+        model.toggleBook(key(1)); advanceUntilIdle()
+        assertEquals(ReadMarkAction.MARK_UNREAD, model.readMark?.action)
+        assertNull(model.readMark?.blocked)
+        // A book just marked unread offers "mark read" again; a failed write keeps the import's state.
+        batch.pending[key(1)] = PendingRead.Pending(false)
+        model.toggleBook(key(2)); model.toggleBook(key(2)); advanceUntilIdle()
+        assertEquals(ReadMarkAction.MARK_READ, model.readMark?.action)
+        batch.pending[key(1)] = PendingRead.Failed(false, TaskError.InvalidColumn)
+        model.toggleBook(key(2)); model.toggleBook(key(2)); advanceUntilIdle()
+        assertEquals(ReadMarkAction.MARK_UNREAD, model.readMark?.action)
+        // Unread and empty books just marked read offer "mark unread".
+        batch.pending.clear()
+        model.finishSelection()
+        batch.pending[key(2)] = PendingRead.Pending(true)
+        batch.pending[key(3)] = PendingRead.Pending(true)
+        model.toggleBook(key(2)); model.toggleBook(key(3)); advanceUntilIdle()
+        assertEquals(ReadMarkAction.MARK_UNREAD, model.readMark?.action)
+        batch.pending.clear()
+        model.toggleBook(key(1)); advanceUntilIdle()
+        assertEquals(ReadMarkAction.MARK_READ, model.readMark?.action)
+
+        val before = (model.content as LibraryContent.Books).rows
+        model.markSelection(ReadMarkAction.MARK_READ); advanceUntilIdle()
+        assertEquals(listOf(setOf(key(1), key(2), key(3)) to true), batch.marks)
+        assertNull(model.selected)
+        assertNull(model.notice)
+        // The page keeps the import; only the pending marks show the click.
+        assertEquals(before, (model.content as LibraryContent.Books).rows)
+        // Filters still use the import only.
+        batch.pending[key(2)] = PendingRead.Pending(true)
+        model.updateFilters { it.copy(read = ReadFilter.READ) }; advanceUntilIdle()
+        assertEquals(listOf(key(1)), (model.content as LibraryContent.Books).rows.map { it.key })
+        assertEquals(PendingRead.Pending(true), model.pendingReads[key(2)])
+    }
+
+    /**
+     * The sync after a write publishes the new import and ends in one transaction; its pending target must
+     * not disappear while the page still shows the older import, which would flash the stale state (R13).
+     */
+    @Test
+    fun theEndOfTheSyncAfterAWriteNeverShowsTheOlderImportWithoutItsPendingTarget() = runTest(dispatcher) {
+        // An earlier write's sync imported book 1 as read; the newer write to unread is pushed and its sync runs.
+        imported = readLibrary(true)
+        batch.pending[key(1)] = PendingRead.Pending(false)
+        val events = MutableSharedFlow<TaskEvent>()
+        val service = LibraryQueryService(FakeImports { imported }, { copies }, dispatcher)
+        val model = LibraryViewModel({ selection }, service, FakeCovers(), events, history, batch, { priority })
+        model.setVisible(true); model.onMeasured(10); advanceUntilIdle()
+        assertEquals(PendingRead.Pending(false), model.pendingReads[key(1)])
+        fun shownState() = (model.content as LibraryContent.Books).rows.single().read to model.pendingReads[key(1)]
+
+        // The sync ends: the new import (unread) and the end of the pending target become visible together.
+        imported = readLibrary(false)
+        batch.pending.clear()
+        val sync = TaskRecord(TaskId(UUID.randomUUID()), TaskSubmission(TaskRequest.CandidateConfiguration(
+            CandidateContext(token, BackendKind.LOCAL, UUID.randomUUID()), TaskRequest.CandidateConfiguration.LIBRARY_SYNC),
+            TaskOrigin.USER_READ_STATUS), SchedulingPosition(TaskPriority.HIGH, QueueSequence(2)),
+            state = TaskState.Finished(TaskResult.Completed), controls = TaskControls(false, false, false, false))
+        events.emit(TaskEvent.Changed(sync)); advanceUntilIdle()
+        assertTrue("stale import shown without its pending target: ${shownState()}", shownState() != (true to null))
+        events.emit(TaskEvent.CacheChanged(sync.id, sync.submission.request)); advanceUntilIdle()
+        assertEquals(false to null, shownState())
+
+        // A write's event read after the sync committed must not end the target over the older page either.
+        imported = readLibrary(true)
+        batch.pending[key(1)] = PendingRead.Pending(false)
+        model.refresh(); advanceUntilIdle()
+        assertEquals(true to PendingRead.Pending(false), shownState())
+        imported = readLibrary(false)
+        batch.pending.clear()
+        events.emit(writeEvent(TaskState.Finished(TaskResult.Completed))); advanceUntilIdle()
+        assertEquals(false to null, shownState())
+    }
+
+    @Test
+    fun aBlockedOrRefusedMarkKeepsTheSelectionAndNotifiesWhy() = runTest(dispatcher) {
+        imported = readLibrary(true, false)
+        val model = model().also { it.onMeasured(10); advanceUntilIdle() }
+        batch.writeBlocked = ReadMarkBlock.WRITE_READ_ONLY
+        model.toggleBook(key(1)); advanceUntilIdle()
+        assertEquals(ReadMarkBlock.WRITE_READ_ONLY, model.readMark?.blocked)
+        model.markSelection(ReadMarkAction.MARK_UNREAD); advanceUntilIdle()
+        assertEquals(BatchNotice.ReadMarkRejected(ReadMarkBlock.WRITE_READ_ONLY, BackendKind.LOCAL), model.notice)
+        assertTrue(batch.marks.isEmpty())
+        assertNotNull(model.selected)
+        batch.writeBlocked = null
+        batch.markAccept = false
+        model.markSelection(ReadMarkAction.MARK_UNREAD); advanceUntilIdle()
+        assertEquals(BatchNotice.ReadMarkRejected(null), model.notice)
+        assertNotNull(model.selected)
+    }
+
+    @Test
+    fun writeEventsRefreshPendingMarksNotifyNewFailuresOnceAndLeavingThePageDismissesThem() = runTest(dispatcher) {
+        imported = readLibrary(true, false)
+        val events = MutableSharedFlow<TaskEvent>()
+        val service = LibraryQueryService(FakeImports { imported }, { copies }, dispatcher)
+        val model = LibraryViewModel({ selection }, service, FakeCovers(), events, history, batch, { priority })
+        model.setVisible(true); model.onMeasured(10); advanceUntilIdle()
+        assertTrue(model.pendingReads.isEmpty())
+        batch.pending[key(2)] = PendingRead.Pending(true)
+        events.emit(writeEvent(TaskState.Queued)); advanceUntilIdle()
+        assertEquals(mapOf(key(2) to PendingRead.Pending(true)), model.pendingReads)
+        assertNull(model.readFailure)
+        batch.pending[key(2)] = PendingRead.Failed(true, TaskError.InvalidColumn)
+        events.emit(writeEvent(TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.WRITE_PREPARE, TaskError.InvalidColumn)))))
+        advanceUntilIdle()
+        val notice = requireNotNull(model.readFailure)
+        assertEquals(ReadFailureNotice(1, TaskError.InvalidColumn), notice)
+        model.readFailureHandled(notice)
+        // The same failure seen again is not notified twice.
+        events.emit(writeEvent(TaskState.Queued)); advanceUntilIdle()
+        assertNull(model.readFailure)
+        model.setVisible(false); advanceUntilIdle()
+        assertEquals(listOf(setOf(key(2))), batch.dismissed)
+        assertTrue(model.pendingReads.isEmpty())
+        // A failure while another tab is shown is still notified.
+        batch.pending[key(1)] = PendingRead.Failed(false, null)
+        events.emit(writeEvent(TaskState.Finished(TaskResult.Cancelled))); advanceUntilIdle()
+        assertEquals(ReadFailureNotice(1, null), model.readFailure)
     }
 }

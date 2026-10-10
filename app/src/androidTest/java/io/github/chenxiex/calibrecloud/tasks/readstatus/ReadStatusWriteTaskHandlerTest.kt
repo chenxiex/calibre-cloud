@@ -24,7 +24,21 @@ import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import io.github.chenxiex.calibrecloud.tasks.sync.LibrarySyncTaskHandler
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import io.github.chenxiex.calibrecloud.library.LibraryQueryService
+import io.github.chenxiex.calibrecloud.library.MetadataLibraryImports
+import io.github.chenxiex.calibrecloud.library.ReadMarkAction
+import io.github.chenxiex.calibrecloud.library.StateLibraryCopies
+import io.github.chenxiex.calibrecloud.state.SearchHistoryStore
+import io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance
+import io.github.chenxiex.calibrecloud.tasks.copies.CopyService
+import io.github.chenxiex.calibrecloud.ui.LibraryContent
+import io.github.chenxiex.calibrecloud.ui.LibraryCovers
+import io.github.chenxiex.calibrecloud.ui.LibraryViewModel
+import io.github.chenxiex.calibrecloud.ui.QueueLibraryBatch
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -226,6 +240,59 @@ class ReadStatusWriteTaskHandlerTest {
         assertEquals(TaskState.Finished(TaskResult.Completed), entry.record.state)
         assertEquals(0, source.pushes)
         assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(entry.followUp!!)!!.record.state)
+    }
+
+    /**
+     * R13, R16, R26 through the production library page model and batch: marking from a selection keeps the
+     * imported state on the page, shows the pending target, and only the sync after the push changes it.
+     */
+    @Test fun aMarkFromTheLibraryPageShowsThePendingTargetUntilTheSyncAfterThePush() = runBlocking<Unit> {
+        val coordinator = coordinator()
+        val sources = LibrarySources { source }
+        val batch = QueueLibraryBatch(CopyService(state, metadata, coordinator, queue), coordinator,
+            CacheMaintenance(database, state, queue, root, Dispatchers.IO), state, metadata, sources, queue,
+            ReadStatusService(state, metadata, sources, coordinator))
+        val queries = LibraryQueryService(MetadataLibraryImports(metadata), StateLibraryCopies(state), Dispatchers.Default)
+        val model = withContext(Dispatchers.Main) {
+            LibraryViewModel(state::current, queries, NoCovers, queue.events, NoHistory, batch).apply { setVisible(true); onMeasured(20) }
+        }
+        suspend fun <T> onMain(read: LibraryViewModel.() -> T) = withContext(Dispatchers.Main) { model.read() }
+        suspend fun until(condition: LibraryViewModel.() -> Boolean) = withTimeout(10_000) { while (!onMain(condition)) delay(20) }
+        suspend fun readShown(book: BookKey) = onMain { (content as LibraryContent.Books).rows.single { it.key == book }.read }
+        val guide = guide()
+        until { (content as? LibraryContent.Books)?.rows?.any { it.key == guide } == true }
+        onMain { toggleBook(guide) }
+        until { readMark?.action == ReadMarkAction.MARK_READ && readMark?.blocked == null }
+        onMain { markSelection(ReadMarkAction.MARK_READ) }
+        until { selected == null && pendingReads[guide] == PendingRead.Pending(true) }
+        assertEquals(false, readShown(guide))
+        // Selecting it again offers the undo, before anything was written.
+        onMain { toggleBook(guide) }
+        until { readMark?.action == ReadMarkAction.MARK_UNREAD }
+        onMain { finishSelection() }
+
+        var pushedButNotSynced: Pair<Boolean?, PendingRead?>? = null
+        source.afterPush = { pushedButNotSynced = runBlocking { isRead(guide) to batch.pendingReads()[guide] } }
+        coordinator.drain()
+        // Pushed: the import is unchanged and the book still pending until its sync ends.
+        assertEquals(false to PendingRead.Pending(true), pushedButNotSynced)
+        until { pendingReads.isEmpty() }
+        until { (content as? LibraryContent.Books)?.rows?.single { it.key == guide }?.read == true }
+        assertEquals(listOf(1L to 1L, 4L to 1L, 5L to 0L), values(source.bytes, 1))
+        withContext(Dispatchers.Main) { model.setVisible(false) }
+    }
+
+    private object NoCovers : LibraryCovers {
+        override suspend fun read(book: BookKey): android.graphics.Bitmap? = null
+        override suspend fun request(books: List<BookKey>, selectionToken: UUID): TaskId? = null
+        override fun changes(task: TaskId): kotlinx.coroutines.flow.Flow<TaskState> = kotlinx.coroutines.flow.emptyFlow()
+        override suspend fun wake() {}
+    }
+
+    private object NoHistory : SearchHistoryStore {
+        override suspend fun list(libraryId: io.github.chenxiex.calibrecloud.model.LibraryId) = emptyList<String>()
+        override suspend fun record(libraryId: io.github.chenxiex.calibrecloud.model.LibraryId, query: String) {}
+        override suspend fun clear(libraryId: io.github.chenxiex.calibrecloud.model.LibraryId) {}
     }
 
     private fun open() {

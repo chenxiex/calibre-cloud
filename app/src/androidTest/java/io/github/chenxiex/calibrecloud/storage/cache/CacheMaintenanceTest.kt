@@ -163,8 +163,10 @@ class CacheMaintenanceTest {
         val pdfTask = pendingCopy(pdf.key)
         val pdfEntry = queue.get(pdfTask)
         val queries = LibraryQueryService(MetadataLibraryImports(metadata), StateLibraryCopies(state), Dispatchers.Default)
+        val sources = io.github.chenxiex.calibrecloud.storage.SourcePolicies.sources
         val batch = QueueLibraryBatch(CopyService(state, metadata, TaskCoordinator(queue, emptyList()), queue),
-            TaskCoordinator(queue, emptyList()), maintenance)
+            TaskCoordinator(queue, emptyList()), maintenance, state, metadata, sources, queue,
+            io.github.chenxiex.calibrecloud.tasks.readstatus.ReadStatusService(state, metadata, sources, TaskCoordinator(queue, emptyList())))
         val model = withContext(Dispatchers.Main) {
             LibraryViewModel(state::current, queries, NoCovers, emptyFlow(), NoHistory, batch).apply {
                 setVisible(true)

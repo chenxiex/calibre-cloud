@@ -339,5 +339,8 @@ class TaskCoordinator(
         is TaskRequest.CoverLoad -> listOf(TaskStage.COVER_TRANSFER, TaskStage.COVER_PUBLISH)
         is TaskRequest.ReadStatusWrite -> listOf(TaskStage.WRITE_SNAPSHOT, TaskStage.WRITE_PREPARE, TaskStage.WRITE_COMMIT)
     }
-    companion object { private const val MAX_RETRIES = 3 }
+    companion object {
+        /** Automatic retries of a task before it fails; a manual retry starts the count again. */
+        const val MAX_RETRIES = 3
+    }
 }

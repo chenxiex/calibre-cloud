@@ -33,6 +33,9 @@
     <string name="library_problem_read_filter">已读栏目未配置或已失效，已读筛选不可用。请在设置中重新选择已读栏目。</string>
     <string name="library_problem_search_column">搜索所用的栏目已失效，请重新选择搜索范围。</string>
     <string name="library_read_label">已读</string>
+    <string name="library_unread_label">未读</string>
+    <string name="library_read_pending_description">等待写入书库：%1$s</string>
+    <string name="library_read_failed_description">《%1$s》的阅读状态未能写入书库</string>
     <string name="library_downloaded_description">已下载</string>
     <string name="library_source_missing">源不可用</string>
     <string name="library_folder_description">%1$s，%2$s</string>
@@ -84,7 +87,11 @@
     <string name="selection_mark_unread">标为未读</string>
     <string name="selection_mark_no_books">所选内容在当前搜索和筛选下没有书籍，无法标记阅读状态。</string>
     <string name="selection_mark_no_column">已读栏目未配置或已失效，无法标记阅读状态。可在设置中选择已读栏目。</string>
-    <string name="selection_mark_no_write">写回 Calibre 书库的功能尚未提供，暂不能标记阅读状态。</string>
+    <string name="selection_mark_write_authorization">书库目录授权已失效，请在书库页重新授权后再标记阅读状态。</string>
+    <string name="selection_mark_write_login">需要登录此书库所属的 OneDrive 账号后才能标记阅读状态。</string>
+    <string name="selection_mark_write_read_only">目录授权不含写入权限，请在书库页重新授权后再标记阅读状态。</string>
+    <string name="selection_mark_write_unsupported">此目录的存储提供方不支持写回所需的写入、重命名或删除，无法标记阅读状态。</string>
+    <string name="selection_mark_write_unavailable">暂时无法访问书库中的 metadata.db，无法标记阅读状态。</string>
     <string name="selection_remove">移除下载</string>
     <string name="removal_title">移除下载</string>
     <plurals name="removal_books">
@@ -111,4 +118,13 @@
     <string name="notice_removal_failed">移除未完成，所选内容已保留，可重试。</string>
     <string name="notice_no_books">所选内容在当前搜索和筛选下没有书籍。</string>
     <string name="notice_unavailable">书库已变化，无法完成本次操作，请重新选择。</string>
+    <string name="notice_mark_rejected">阅读状态标记未提交：书库、已读栏目或写入能力已变化，请重新选择后再试。</string>
+    <string name="read_failure_channel">阅读状态写回的问题</string>
+    <string name="read_failure_title">阅读状态未写入书库</string>
+    <plurals name="read_failure_text">
+        <item quantity="other">%1$d 本书的阅读状态未写入：%2$s。可在任务页重试，或重新标记。</item>
+    </plurals>
+    <plurals name="read_failure_cancelled">
+        <item quantity="other">%d 本书的阅读状态写回已取消。可在任务页重试，或重新标记。</item>
+    </plurals>
 </resources>

@@ -41,6 +41,8 @@ internal object MoreTarget {
     /** The menu itself, whose metadata group starts with the sync entry. */
     const val SYNC = 3
     const val DOWNLOAD_LIST = 4
+    /** The task queue, where a failed read-state write can be retried. */
+    const val TASKS = 5
 }
 
 /** A page of "更多": the grouped menu or one of its sub-pages; back returns to [parent]. */
@@ -64,6 +66,7 @@ internal enum class MorePage(val parent: MorePage?, val title: Int) {
         fun of(target: Int): MorePage = when (target) {
             MoreTarget.LOCATION, MoreTarget.LOCAL_AUTHORIZATION, MoreTarget.ONEDRIVE_LOGIN -> LIBRARIES
             MoreTarget.DOWNLOAD_LIST -> DOWNLOADS
+            MoreTarget.TASKS -> TASKS
             else -> MENU
         }
     }

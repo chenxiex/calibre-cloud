@@ -10,11 +10,15 @@
     <string name="task_filter_automatic">自动任务</string>
     <string name="task_queued">已排队</string>
     <string name="task_progress">%1$d%%</string>
-    <string name="task_committing">不可中断</string>
+    <string name="task_committing">不可暂停或取消</string>
     <string name="task_paused">已暂停</string>
     <string name="task_completed">已完成</string>
+    <string name="task_written">已写入书库</string>
     <plurals name="task_partial">
         <item quantity="other">已完成，%d 项书籍操作失败</item>
+    </plurals>
+    <plurals name="task_partial_write">
+        <item quantity="other">已写入书库，%d 本书已失效未写入</item>
     </plurals>
     <plurals name="task_partial_cover">
         <item quantity="other">已完成，%d 个封面未能加载</item>
@@ -39,6 +43,9 @@
     <string name="task_type_check">检查更新</string>
     <string name="task_type_cover">加载封面</string>
     <string name="task_type_write">已读状态写回</string>
+    <plurals name="task_type_write_books">
+        <item quantity="other">%1$s（%2$d 本）</item>
+    </plurals>
     <string name="task_wait_network">等待网络</string>
     <string name="task_wait_throttled">等待限流</string>
     <string name="task_wait_login">等待登录</string>
@@ -51,9 +58,9 @@
     <string name="task_stage_publish">发布完整书籍副本</string>
     <string name="task_stage_cover_transfer">传输封面</string>
     <string name="task_stage_cover_publish">发布完整封面</string>
-    <string name="task_stage_write_snapshot">获取写回快照</string>
+    <string name="task_stage_write_snapshot">读取最新数据库</string>
     <string name="task_stage_write_prepare">准备写回</string>
-    <string name="task_stage_write_commit">提交源变更</string>
+    <string name="task_stage_write_commit">正在推送</string>
     <string name="task_error_network">网络不可用</string>
     <string name="task_error_throttled">服务端限流</string>
     <string name="task_error_login">需要重新登录</string>
@@ -63,6 +70,7 @@
     <string name="task_error_missing">源文件不存在</string>
     <string name="task_error_incompatible">数据库结构不兼容</string>
     <string name="task_error_version">源版本发生变化</string>
+    <string name="task_error_version_retried">版本冲突，已自动重试 %1$d 次</string>
     <string name="task_error_space">存储空间不足</string>
     <string name="task_error_corrupt">文件内容损坏或不完整</string>
     <string name="task_error_unsupported">当前后端不支持该操作</string>

@@ -31,6 +31,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import io.github.chenxiex.calibrecloud.R
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
+import io.github.chenxiex.calibrecloud.tasks.persistence.TaskCoordinator
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.onedrive.OneDriveCandidateTaskHandler
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
@@ -48,7 +49,7 @@ internal fun TaskScreen(model: TaskViewModel) {
         model.setVisible(true)
         onDispose { model.setVisible(false) }
     }
-    TaskList(model.records, model.failed, model.operationFailed, model::control)
+    TaskList(model.records, model.failed, model.operationFailed, model.writeBooks, model::control)
 }
 
 /**
@@ -57,9 +58,11 @@ internal fun TaskScreen(model: TaskViewModel) {
  * the scheduling position while it only waits its turn, otherwise stage and percentage, waiting reasons or
  * result), and on the right only the control icons its state supports, or a check once completed.
  * Automatic cover batches of the shown tab fold into one row by default (R18); tapping it shows them.
+ * A read-state write's title counts the books of its change list ([writeBooks]).
  */
 @Composable
-internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFailed: Boolean = false, onControl: (TaskRecord, TaskControl) -> Unit) {
+internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFailed: Boolean = false, writeBooks: Map<TaskId, Int> = emptyMap(),
+    onControl: (TaskRecord, TaskControl) -> Unit) {
     var page by rememberSaveable { mutableIntStateOf(0) }
     var tab by rememberSaveable { mutableStateOf(TaskTab.ACTIVE) }
     var source by rememberSaveable { mutableStateOf(TaskSourceFilter.ALL) }
@@ -111,7 +114,7 @@ internal fun TaskList(records: List<TaskRecord>, failed: Boolean, operationFaile
                 Column(Modifier.fillMaxSize()) {
                     lines.drop(current * rows).take(rows).forEach { line ->
                         when (line) {
-                            is TaskLine.Single -> TaskRow(line.record, pending.indexOf(line.record).takeIf { it >= 0 }?.plus(1), onControl)
+                            is TaskLine.Single -> TaskRow(line.record, pending.indexOf(line.record).takeIf { it >= 0 }?.plus(1), writeBooks[line.record.id], onControl)
                             is TaskLine.CoverGroup -> CoverGroupRow(line, coversExpanded,
                                 pending.indexOf(line.shown).takeIf { it >= 0 }?.plus(1)) { coversExpanded = !coversExpanded }
                         }
@@ -164,9 +167,11 @@ private fun CoverGroupRow(group: TaskLine.CoverGroup, expanded: Boolean, positio
 }
 
 @Composable
-private fun TaskRow(record: TaskRecord, position: Int?, onControl: (TaskRecord, TaskControl) -> Unit) {
+private fun TaskRow(record: TaskRecord, position: Int?, books: Int?, onControl: (TaskRecord, TaskControl) -> Unit) {
+    val type = stringResource(taskTypeResource(record.submission.request))
     ListItem(
-        stringResource(taskTypeResource(record.submission.request)), Modifier.testTag("task_${record.id.value}"), TWO_LINE_ROW_HEIGHT,
+        if (books != null && books > 0) pluralStringResource(R.plurals.task_type_write_books, books, type, books) else type,
+        Modifier.testTag("task_${record.id.value}"), TWO_LINE_ROW_HEIGHT,
         bold = true, divider = true,
         supporting = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -196,6 +201,7 @@ private val USER_MARK_SIZE = 14.dp
 /** A task that only waits its turn shows "排队" and its position (R18); other states a short stage, percentage or reason. */
 @Composable
 private fun taskStatusLine(record: TaskRecord, position: Int?): String = buildList {
+    val write = record.submission.request is TaskRequest.ReadStatusWrite
     when (val state = record.state) {
         TaskState.Queued -> add(if (position != null) stringResource(R.string.task_queued_position, position) else stringResource(R.string.task_queued))
         is TaskState.Waiting -> add(state.reasons.map { stringResource(waitingResource(it)) }.joinToString(stringResource(R.string.list_separator)))
@@ -213,13 +219,21 @@ private fun taskStatusLine(record: TaskRecord, position: Int?): String = buildLi
             add(stringResource(stageResource(state.stage)))
         }
         is TaskState.Finished -> when (val result = state.result) {
-            TaskResult.Completed -> add(stringResource(R.string.task_completed))
-            is TaskResult.CompletedWithBookFailures -> add(pluralStringResource(
-                if (record.submission.request is TaskRequest.CoverLoad) R.plurals.task_partial_cover else R.plurals.task_partial,
-                result.failures.size, result.failures.size))
+            TaskResult.Completed -> add(stringResource(if (write) R.string.task_written else R.string.task_completed))
+            is TaskResult.CompletedWithBookFailures -> add(pluralStringResource(when (record.submission.request) {
+                is TaskRequest.CoverLoad -> R.plurals.task_partial_cover
+                is TaskRequest.ReadStatusWrite -> R.plurals.task_partial_write
+                else -> R.plurals.task_partial
+            }, result.failures.size, result.failures.size))
             TaskResult.Cancelled -> add(stringResource(R.string.task_cancelled))
-            is TaskResult.Failed -> add(stringResource(R.string.task_failed, stringResource(stageResource(result.failure.stage)),
-                stringResource(taskErrorResource(result.failure.error))))
+            is TaskResult.Failed -> {
+                val error = result.failure.error
+                // A conflicting push only fails once the automatic rounds are used up (R15).
+                val reason = if (write && (error as? TaskError.Source)?.error?.kind == StorageErrorKind.VERSION_CONFLICT) {
+                    stringResource(R.string.task_error_version_retried, TaskCoordinator.MAX_RETRIES)
+                } else stringResource(taskErrorResource(error))
+                add(stringResource(R.string.task_failed, stringResource(stageResource(result.failure.stage)), reason))
+            }
         }
     }
     if (record.restartedTransfer && (record.state is TaskState.Running || record.state is TaskState.Paused)) {

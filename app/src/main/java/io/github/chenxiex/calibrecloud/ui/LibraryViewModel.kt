@@ -26,6 +26,8 @@ import io.github.chenxiex.calibrecloud.library.LibraryProblem
 import io.github.chenxiex.calibrecloud.library.LibraryQueryResult
 import io.github.chenxiex.calibrecloud.library.LibraryQueryService
 import io.github.chenxiex.calibrecloud.library.LibraryRequest
+import io.github.chenxiex.calibrecloud.library.ReadMarkAction
+import io.github.chenxiex.calibrecloud.library.ReadMarkBlock
 import io.github.chenxiex.calibrecloud.library.ReadMarkChoice
 import io.github.chenxiex.calibrecloud.library.SelectionExpansion
 import io.github.chenxiex.calibrecloud.library.SelectionResult
@@ -37,6 +39,7 @@ import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.state.LibrarySelection
 import io.github.chenxiex.calibrecloud.state.SearchHistoryStore
 import io.github.chenxiex.calibrecloud.storage.covers.CoverRepository
+import io.github.chenxiex.calibrecloud.tasks.api.PendingRead
 import io.github.chenxiex.calibrecloud.tasks.api.SubmissionResult
 import io.github.chenxiex.calibrecloud.tasks.api.TaskEvent
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
@@ -126,6 +129,12 @@ class QueueLibraryCovers(
  * Selection mode ([selected]) collects books and folders of the shown level only; it ends with
  * [finishSelection], a submitted batch action or a change of library. Every action expands the
  * selection again under the shown search and filters and acts on that frozen result (R26).
+ *
+ * [pendingReads] are the read status targets still being written (R13, R27), read from the queue
+ * whenever a write or library sync changes and shown in place of the read marks. A target ends with the
+ * sync that imports its result, so its end is shown only together with a page reread after it; they never enter
+ * the query, so filters, search and sorting keep the import. A write failure that appears produces a
+ * [readFailure] notice; the failures shown are dismissed when the page is left.
  */
 class LibraryViewModel(
     private val selection: suspend () -> LibrarySelection?,
@@ -199,6 +208,17 @@ class LibraryViewModel(
         private set
     var notice by mutableStateOf<BatchNotice?>(null)
         private set
+    /** Books of the selected library whose read status target is still being written or failed to be. */
+    var pendingReads by mutableStateOf<Map<BookKey, PendingRead>>(emptyMap())
+        private set
+    /** Read-state writes that newly failed, for one replaceable system notification. */
+    var readFailure by mutableStateOf<ReadFailureNotice?>(null)
+        private set
+    /** The selection whose [pendingReads] are shown; failures already in them when it was first read are not notified again. */
+    private var pendingOwner: UUID? = null
+    private var pendingGeneration = 0L
+    /** Dismissing the failures of a left page; rereads wait for it so they cannot bring the failures back. */
+    private var dismissing: Job? = null
     /** A batch action is running; further actions wait for it. */
     var batchBusy by mutableStateOf(false)
         private set
@@ -220,6 +240,21 @@ class LibraryViewModel(
     private var pageBooks: Set<BookKey> = emptySet()
     private var coverToken: UUID? = null
 
+    init {
+        // A write can fail while another tab is shown; its notification should not wait for the page.
+        viewModelScope.launch {
+            events.collect { event ->
+                if (event !is TaskEvent.Changed) return@collect
+                when {
+                    // A sync publishes its import as it ends: the shown page is reread with the pending targets,
+                    // so a target never disappears while the older import is still shown.
+                    event.record.isLibrarySync() && visible && event.record.state is TaskState.Finished -> reload()
+                    event.record.submission.request is TaskRequest.ReadStatusWrite || event.record.isLibrarySync() -> refreshPending()
+                }
+            }
+        }
+    }
+
     fun setVisible(value: Boolean) {
         visible = value
         listening?.cancel()
@@ -227,6 +262,7 @@ class LibraryViewModel(
             loading?.cancel()
             loadGeneration++
             cancelCoverWaits()
+            dismissShownFailures()
             return
         }
         listening = viewModelScope.launch {
@@ -441,6 +477,81 @@ class LibraryViewModel(
         if (notice === shown) notice = null
     }
 
+    /** Called once [readFailure] has been handed to the system notification. */
+    fun readFailureHandled(shown: ReadFailureNotice) {
+        if (readFailure === shown) readFailure = null
+    }
+
+    /**
+     * Submits the shown read-state mark (R14, R26) with its explicit target for the selection expanded
+     * again now; the target is the one the user chose, never recomputed from a later state. The page's
+     * read marks do not change: the books show the pending target until the sync after the write ends.
+     */
+    fun markSelection(action: ReadMarkAction) = runBatch { expansion, owner ->
+        val blocked = if (!expansion.readColumnValid) ReadMarkBlock.COLUMN_UNAVAILABLE else batch.writeBlock()
+        when {
+            blocked != null -> notice = BatchNotice.ReadMarkRejected(blocked, backend)
+            batch.markRead(expansion.books.map { it.key }.toSet(), action == ReadMarkAction.MARK_READ, owner) -> {
+                try { batch.wake() } catch (failure: CancellationException) { throw failure } catch (_: Exception) { }
+                finishSelection()
+                refreshPending()
+            }
+            else -> notice = BatchNotice.ReadMarkRejected(null)
+        }
+    }
+
+    /** Rereads [pendingReads]; a book that newly failed is notified once. */
+    private fun refreshPending() {
+        val generation = ++pendingGeneration
+        viewModelScope.launch {
+            dismissing?.join()
+            val read = try {
+                val owner = selection()?.token
+                val latest = batch.pendingReads()
+                if (selection()?.token != owner) null else owner to latest
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // A local read failure keeps the shown marks; the next change rereads them.
+                null
+            }
+            if (read == null || generation != pendingGeneration) return@launch
+            val (owner, latest) = read
+            // A target ends only with its sync, whose import the shown page may not have yet: reread both.
+            val ended = pendingOwner == owner && pendingReads.any { (book, shown) -> shown is PendingRead.Pending && book !in latest }
+            if (ended && visible) reload() else applyPending(owner, latest)
+        }
+    }
+
+    /** Shows [latest] for the selection [owner]; a book that newly failed is notified once. */
+    private fun applyPending(owner: UUID?, latest: Map<BookKey, PendingRead>) {
+        val previous = pendingReads.takeIf { pendingOwner == owner }
+        pendingOwner = owner
+        pendingReads = latest
+        if (previous == null) return
+        val failed = latest.filter { (book, read) -> read is PendingRead.Failed && previous[book] !is PendingRead.Failed }
+        if (failed.isNotEmpty()) {
+            readFailure = ReadFailureNotice(failed.size, failed.values.firstNotNullOfOrNull { (it as PendingRead.Failed).error })
+        }
+    }
+
+    /** Leaving the page ends the failure marks it showed (R13); a retry or a new mark shows them again. */
+    private fun dismissShownFailures() {
+        val shown = pendingReads.filterValues { it is PendingRead.Failed }.keys
+        if (shown.isEmpty()) return
+        pendingGeneration++
+        pendingReads = pendingReads - shown
+        dismissing = viewModelScope.launch {
+            try {
+                batch.dismissReadFailures(shown)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // They show again on return; the next successful sync dismisses them too.
+            }
+        }
+    }
+
     /**
      * Submits a user download of each selected book's batch format (R24): books whose format already
      * has a complete copy are skipped and books without a format are counted, never submitted. No
@@ -534,9 +645,16 @@ class LibraryViewModel(
             } catch (_: Exception) {
                 null
             }
+            val choice = try {
+                expansion?.let { ReadMarkChoice.of(it, batch.writeBlock(), pendingTargets(batch.pendingReads())) }
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                null
+            }
             if (selected != set) return@launch
             selectedBooks = expansion?.books?.size
-            readMark = expansion?.let { ReadMarkChoice.of(it, batch.readWriteAvailable) }
+            readMark = choice
         }
     }
 
@@ -618,6 +736,15 @@ class LibraryViewModel(
                 return
             }
             val request = levelRequest(pageStart(firstVisible, capacity), capacity, current)
+            // Read before the page: a target that ended with its sync is then always replaced by that sync's import.
+            dismissing?.join()
+            val pending = try {
+                batch.pendingReads()
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                null
+            }
             val shown: LibraryContent = when (val result = queries.query(request)) {
                 LibraryQueryResult.Stale -> return@repeat
                 is LibraryQueryResult.Unavailable ->
@@ -637,6 +764,10 @@ class LibraryViewModel(
             overview = current
             content = shown
             syncing = sync
+            if (pending != null) {
+                pendingGeneration++
+                applyPending(selected.token, pending)
+            }
             if (coverToken != selected.token) resetCovers(selected.token)
             // A selection belongs to one library; an import or copy change only recounts it.
             if (selectionOwner != null && selectionOwner != selected.token) finishSelection() else expandSelection()
@@ -719,7 +850,8 @@ class LibraryViewModel(
                     dependencies.state::current, dependencies.libraryQuery,
                     QueueLibraryCovers(dependencies.covers, dependencies.coverService, dependencies.taskQueue, dependencies.taskCoordinator),
                     dependencies.taskQueue.events, dependencies.searchHistory,
-                    QueueLibraryBatch(dependencies.copyService, dependencies.taskCoordinator, dependencies.maintenance),
+                    QueueLibraryBatch(dependencies.copyService, dependencies.taskCoordinator, dependencies.maintenance, dependencies.state,
+                        dependencies.metadata, dependencies.librarySources, dependencies.taskQueue, dependencies.readStatusService),
                     dependencies.state::formatPriority,
                     keepAwake = CpuAwake(context.applicationContext, "library-page", counted = true)::during,
                     syncState = { token -> dependencies.taskQueue.latestLibrarySync(token)?.state?.takeUnless { it is TaskState.Finished } },
@@ -731,5 +863,9 @@ class LibraryViewModel(
 
 private fun TaskRecord.isLibrarySync() =
     (submission.request as? TaskRequest.CandidateConfiguration)?.operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC
+
+/** Targets that count for the mark choice (R26): failed writes keep the import's state. */
+private fun pendingTargets(reads: Map<BookKey, PendingRead>) =
+    reads.filterValues { it is PendingRead.Pending }.mapValues { it.value.target }
 
 private fun <T> Set<T>.toggle(value: T): Set<T> = if (value in this) this - value else this + value

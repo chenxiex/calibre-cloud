@@ -297,7 +297,10 @@ internal fun FormatPriorityPage(model: MetadataViewModel) {
     PagedEntries(entries, page, { page = it }, Modifier.testTag("format_page"), "format", focus = moved?.let { it + offset })
 }
 
-/** The read column (R13): the imported boolean columns; the choice is saved privately, never in the source. */
+/**
+ * The read column (R13): the imported boolean columns; the choice is saved privately, never in the
+ * source. Marks write the chosen column, which the page explains as best-effort write-back (R15).
+ */
 @Composable
 internal fun ReadColumnPage(model: MetadataViewModel) {
     var page by rememberSaveable { mutableIntStateOf(0) }
@@ -311,6 +314,8 @@ internal fun ReadColumnPage(model: MetadataViewModel) {
             else -> stringResource(R.string.metadata_columns_unconfigured)
         }))
         if (model.configurationFailed) add(MenuEntry.Note("read_column_failed", stringResource(R.string.metadata_configuration_failed)))
+        // R15: marking writes the source on a best-effort basis; the conditions belong next to the column it writes.
+        add(MenuEntry.Note("read_column_best_effort", stringResource(R.string.metadata_write_best_effort)))
         if (imported != null) {
             val columns = imported.metadata.columns.filter { it.datatype == "bool" && it.supported }
             if (columns.isEmpty()) add(MenuEntry.Note("read_column_empty", stringResource(R.string.metadata_columns_empty)))

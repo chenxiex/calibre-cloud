@@ -14,7 +14,9 @@ import android.app.Application
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import io.github.chenxiex.calibrecloud.CalibreCloudApplication
+import io.github.chenxiex.calibrecloud.tasks.api.TaskId
 import io.github.chenxiex.calibrecloud.tasks.api.TaskRecord
+import io.github.chenxiex.calibrecloud.tasks.api.TaskRequest
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
 import io.github.chenxiex.calibrecloud.tasks.persistence.DurableTaskQueue
 import io.github.chenxiex.calibrecloud.tasks.persistence.TaskControl
@@ -41,6 +43,9 @@ class TaskViewModel(
     private val restorePending: suspend () -> Unit = {},
 ) : AndroidViewModel(application) {
     var records by mutableStateOf<List<TaskRecord>>(emptyList())
+        private set
+    /** Books in each read-state write's change list, for its title. */
+    var writeBooks by mutableStateOf<Map<TaskId, Int>>(emptyMap())
         private set
     var automaticSync by mutableStateOf(false)
         private set
@@ -101,6 +106,8 @@ class TaskViewModel(
                 else -> 1
             } }
             if (showProgress) progressUpdatedAt = now
+            writeBooks = latest.filter { it.submission.request is TaskRequest.ReadStatusWrite }
+                .associate { it.id to queue.readStatusChanges(it.id).size }
             automaticSync = startupEnabled()
             refreshCapabilities()
             settingsLoaded = true

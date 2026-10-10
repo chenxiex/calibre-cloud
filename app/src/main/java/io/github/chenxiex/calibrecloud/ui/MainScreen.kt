@@ -48,7 +48,8 @@ private const val TAB_MORE = 1
  * [more] draws the "更多" tab and opens the [MoreTarget] it is handed once. A book being opened shows its
  * mark: a cancellable progress mark while it downloads, a warning when it needs the user, whose
  * reason [notify] posts as a system notification. [moreRequest] (from such a notification) opens a
- * [MoreTarget] once. [notifyBatch] posts a batch action of the library that was not fully done. [startReader] hands a ready copy to the system, and leaving the page revokes the
+ * [MoreTarget] once. [notifyBatch] posts a batch action of the library that was not fully done and
+ * [notifyReadFailure] a read-state write that failed. [startReader] hands a ready copy to the system, and leaving the page revokes the
  * wait so a finished download never opens a reader later.
  */
 @OptIn(ExperimentalComposeUiApi::class)
@@ -59,6 +60,7 @@ internal fun MainScreen(
     startReader: (OpenLaunch) -> LaunchOutcome,
     notify: (OpenNotice) -> Unit = {},
     notifyBatch: (BatchNotice) -> Unit = {},
+    notifyReadFailure: (ReadFailureNotice) -> Unit = {},
     moreRequest: Int? = null,
     onMoreRequestHandled: () -> Unit = {},
     /** Changes whenever the current library may have changed on the more page, which keeps the tab. */
@@ -92,6 +94,13 @@ internal fun MainScreen(
         if (batchNotice != null) {
             notifyBatch(batchNotice)
             library.noticeHandled(batchNotice)
+        }
+    }
+    val readFailure = library.readFailure
+    LaunchedEffect(readFailure) {
+        if (readFailure != null) {
+            notifyReadFailure(readFailure)
+            library.readFailureHandled(readFailure)
         }
     }
     LaunchedEffect(moreRequest) {

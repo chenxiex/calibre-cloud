@@ -88,7 +88,8 @@ class MainActivity : ComponentActivity() {
                         if (Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                     },
                 )
-                MainScreen(libraryModel, openModel, { launchReader(this, it.copy) }, ::notify, ::notifyBatch, moreRequest, { moreRequest = null },
+                MainScreen(libraryModel, openModel, { launchReader(this, it.copy) }, ::notify, ::notifyBatch, ::notifyReadFailure, moreRequest,
+                    { moreRequest = null },
                     librariesModel.revision) { request, handled, showLibrary ->
                     MoreScreen(models, actions, pickerOpen, request, handled, showLibrary)
                 }
@@ -120,6 +121,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun notifyBatch(notice: BatchNotice) = withPermission { BatchNotifications.post(this, notice) }
+
+    private fun notifyReadFailure(notice: ReadFailureNotice) = withPermission { BatchNotifications.post(this, notice) }
 
     /** Posts now, or after the permission prompt when the first notification still needs it. */
     private fun withPermission(post: () -> Unit) {

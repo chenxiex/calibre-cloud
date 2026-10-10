@@ -239,6 +239,28 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         } finally { db.endTransaction() }
     }
 
+    /**
+     * The library page that showed these failure marks was left (R13): rows of [books] in finished
+     * writes of [libraryId] are no longer shown. Unfinished writes are untouched, so a write that
+     * fails later still shows its failure; a retry or a new mark shows the book again.
+     */
+    suspend fun dismissShownReadFailures(libraryId: LibraryId, books: Collection<BookKey>) = withContext(io) {
+        if (books.isEmpty()) return@withContext
+        transaction {
+            val finished = rawQuery("""SELECT DISTINCT q.task_id, q.record FROM queued_tasks q
+                JOIN read_status_changes c ON c.task_id = q.task_id WHERE c.dismissed = 0""", null).use { c ->
+                buildList { while (c.moveToNext()) {
+                    val record = TaskCodec.decode(c.getString(1))
+                    if (record.libraryId == libraryId && record.state is TaskState.Finished) add(c.getString(0))
+                } }
+            }
+            finished.forEach { task -> books.filter { it.libraryId == libraryId }.forEach { book ->
+                execSQL("UPDATE read_status_changes SET dismissed = 1 WHERE task_id = ? AND book_id = ? AND book_uuid = ?",
+                    arrayOf<Any>(task, book.sourceId, book.sourceUuid.toString()))
+            } }
+        }
+    }
+
     /** Called once under the shared execution lock before dispatch; Running never implies success. */
     internal suspend fun recover() = mutateAll { entry ->
         if (entry.record.state is TaskState.Running) entry.copy(

@@ -183,24 +183,31 @@ sealed interface SelectionResult {
 
 enum class ReadMarkAction { MARK_READ, MARK_UNREAD }
 
-/** Why the read-state mark cannot be submitted, in the order they are reported. */
-enum class ReadMarkBlock { NO_BOOKS, COLUMN_UNAVAILABLE, WRITE_UNAVAILABLE }
+/**
+ * Why the read-state mark cannot be submitted, in the order they are reported. The `WRITE_*` reasons
+ * come from the source's write capability: no grant or sign-in for the library, a grant without
+ * write access, a provider that cannot write, rename and delete, or an unreachable `metadata.db`.
+ */
+enum class ReadMarkBlock { NO_BOOKS, COLUMN_UNAVAILABLE, WRITE_AUTHORIZATION, WRITE_READ_ONLY, WRITE_UNSUPPORTED, WRITE_SOURCE_UNAVAILABLE }
 
 /** The one read-state operation offered for a selection, and why it is disabled when [blocked] is set. */
 data class ReadMarkChoice(val action: ReadMarkAction, val blocked: ReadMarkBlock?) {
     companion object {
         /**
-         * R26 on the last successful import: an all-read set offers "mark unread"; all unread (an empty
-         * value counts as unread) or mixed offers "mark read". Queued writes do not change the choice.
+         * R26 on each book's state: the last successful import, replaced by the target of a write still
+         * pending for that book ([pending]; failed writes do not count), so a book just marked read
+         * offers "mark unread". An all-read set offers "mark unread"; all unread (an empty value counts
+         * as unread) or mixed offers "mark read". [writeBlocked] is why the source cannot write, null
+         * when it can.
          */
-        fun of(expansion: SelectionExpansion, writeAvailable: Boolean): ReadMarkChoice {
+        fun of(expansion: SelectionExpansion, writeBlocked: ReadMarkBlock?, pending: Map<BookKey, Boolean> = emptyMap()): ReadMarkChoice {
             val books = expansion.books
-            val action = if (books.isNotEmpty() && books.all { it.read == true }) ReadMarkAction.MARK_UNREAD else ReadMarkAction.MARK_READ
+            val action = if (books.isNotEmpty() && books.all { pending[it.key] ?: (it.read == true) }) ReadMarkAction.MARK_UNREAD
+                else ReadMarkAction.MARK_READ
             val blocked = when {
                 books.isEmpty() -> ReadMarkBlock.NO_BOOKS
                 !expansion.readColumnValid -> ReadMarkBlock.COLUMN_UNAVAILABLE
-                !writeAvailable -> ReadMarkBlock.WRITE_UNAVAILABLE
-                else -> null
+                else -> writeBlocked
             }
             return ReadMarkChoice(action, blocked)
         }

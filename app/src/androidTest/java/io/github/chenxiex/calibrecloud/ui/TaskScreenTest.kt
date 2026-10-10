@@ -36,7 +36,41 @@ class TaskScreenTest {
     /** Room for the tab row, six 56dp rows, or five and the page bar. */
     private fun show(records: () -> List<TaskRecord>, failed: Boolean = false, operationFailed: Boolean = false,
                      onControl: (TaskRecord, TaskControl) -> Unit = { _, _ -> }) {
-        compose.setContent { Box(Modifier.height(410.dp)) { TaskList(records(), failed, operationFailed, onControl) } }
+        compose.setContent { Box(Modifier.height(410.dp)) { TaskList(records(), failed, operationFailed, onControl = onControl) } }
+    }
+
+    private val writeLibrary = LibraryId(UUID.randomUUID())
+
+    private fun write(sequence: Long, state: TaskState) = TaskRecord(TaskId(UUID.randomUUID()),
+        TaskSubmission(TaskRequest.ReadStatusWrite(writeLibrary, io.github.chenxiex.calibrecloud.model.CustomColumnId(1, "#read"),
+            UUID.randomUUID()), TaskOrigin.USER_READ_STATUS),
+        SchedulingPosition(TaskPriority.HIGH, QueueSequence(sequence)), state = state, controls = TaskControls(false, false, false, false))
+
+    @Test
+    fun readStatusWritesShowTheirBooksStagesAndResults() {
+        val pushing = write(1, TaskState.Running(TaskStage.WRITE_COMMIT, null))
+        val snapshot = write(2, TaskState.Running(TaskStage.WRITE_SNAPSHOT, null))
+        val conflict = write(3, TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.WRITE_COMMIT,
+            TaskError.Source(StorageError(StorageErrorKind.VERSION_CONFLICT))))))
+        val column = write(4, TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.WRITE_PREPARE, TaskError.InvalidColumn))))
+        val leftover = write(5, TaskState.Finished(TaskResult.Failed(StageFailure(TaskStage.WRITE_SNAPSHOT,
+            TaskError.Source(StorageError(StorageErrorKind.LEFTOVER_FILES))))))
+        val book = io.github.chenxiex.calibrecloud.model.BookKey(writeLibrary, 1, UUID.randomUUID())
+        val partial = write(6, TaskState.Finished(TaskResult.CompletedWithBookFailures(FrozenSet(listOf(
+            BookFailure(book, TaskError.BookIdentityChanged(book)))))))
+        val done = write(7, TaskState.Finished(TaskResult.Completed))
+        val records = listOf(pushing, snapshot, conflict, column, leftover, partial, done)
+        compose.setContent { Box(Modifier.height(500.dp)) { TaskList(records, false, false, mapOf(pushing.id to 3, done.id to 1)) { _, _ -> } } }
+        compose.onNodeWithText("已读状态写回（3 本）").assertIsDisplayed()
+        compose.onNodeWithText("正在推送 · 不可暂停或取消").assertIsDisplayed()
+        compose.onNodeWithText("读取最新数据库").assertIsDisplayed()
+        compose.onNodeWithTag("task_tab_finished").performClick()
+        compose.onNodeWithText("已读状态写回（1 本）").assertIsDisplayed()
+        compose.onNodeWithText("已写入书库").assertIsDisplayed()
+        compose.onNodeWithText("已写入书库，1 本书已失效未写入").assertIsDisplayed()
+        compose.onNodeWithText("失败：正在推送（版本冲突，已自动重试 3 次）").assertIsDisplayed()
+        compose.onNodeWithText("失败：准备写回（已读栏目失效）").assertIsDisplayed()
+        compose.onNodeWithText("metadata.db.calibrecloud-new", substring = true).assertIsDisplayed()
     }
 
     @Test

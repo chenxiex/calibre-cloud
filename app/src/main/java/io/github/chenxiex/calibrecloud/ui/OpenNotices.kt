@@ -164,29 +164,48 @@ internal fun batchNoticeText(context: Context, notice: BatchNotice): String = wh
     BatchNotice.RemovalFailed -> context.getString(R.string.notice_removal_failed)
     BatchNotice.NoBooks -> context.getString(R.string.notice_no_books)
     BatchNotice.Unavailable -> context.getString(R.string.notice_unavailable)
+    is BatchNotice.ReadMarkRejected -> context.getString(notice.block?.let { readMarkBlockResource(it, notice.backend) } ?: R.string.notice_mark_rejected)
 }
 
-/** Posts a batch action that was not fully done as one replaceable notification; tapping it brings the app back. */
+/** The text of a read-state write that failed or was cancelled, with what the user can do. */
+internal fun readFailureText(context: Context, notice: ReadFailureNotice): String = when (val error = notice.error) {
+    null -> context.resources.getQuantityString(R.plurals.read_failure_cancelled, notice.books, notice.books)
+    else -> context.resources.getQuantityString(R.plurals.read_failure_text, notice.books, notice.books, context.getString(taskErrorResource(error)))
+}
+
+/**
+ * Posts a batch action that was not fully done, and read-state writes that failed, each as one replaceable
+ * notification; tapping it brings the app back.
+ */
 internal object BatchNotifications {
     private const val CHANNEL = "batch-problems"
     private const val NOTIFICATION = 11
+    private const val READ_CHANNEL = "read-status-problems"
+    private const val READ_NOTIFICATION = 12
 
-    fun post(context: Context, notice: BatchNotice) {
+    fun post(context: Context, notice: BatchNotice) =
+        post(context, CHANNEL, R.string.notice_channel, NOTIFICATION, context.getString(R.string.notice_title), batchNoticeText(context, notice), null)
+
+    /** Read-state write failures have their own replaceable notification, which opens the task page to retry. */
+    fun post(context: Context, notice: ReadFailureNotice) = post(context, READ_CHANNEL, R.string.read_failure_channel, READ_NOTIFICATION,
+        context.getString(R.string.read_failure_title), readFailureText(context, notice), MoreTarget.TASKS)
+
+    private fun post(context: Context, channel: String, channelName: Int, id: Int, title: String, text: String, more: Int?) {
         val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL,
-            context.getString(R.string.notice_channel), NotificationManager.IMPORTANCE_DEFAULT))
+        manager.createNotificationChannel(NotificationChannel(channel,
+            context.getString(channelName), NotificationManager.IMPORTANCE_DEFAULT))
         val target = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        val intent = PendingIntent.getActivity(context, NOTIFICATION, target, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val text = batchNoticeText(context, notice)
-        val notification = NotificationCompat.Builder(context, CHANNEL)
+        more?.let { target.putExtra(OpenNotifications.EXTRA_MORE_TARGET, it) }
+        val intent = PendingIntent.getActivity(context, id, target, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val notification = NotificationCompat.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_launcher)
-            .setContentTitle(context.getString(R.string.notice_title))
+            .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText(text))
             .setContentIntent(intent)
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_ERROR)
             .build()
-        if (OpenNotifications.allowed(context)) manager.notify(NOTIFICATION, notification)
+        if (OpenNotifications.allowed(context)) manager.notify(id, notification)
     }
 }

@@ -73,6 +73,8 @@ import io.github.chenxiex.calibrecloud.library.LibraryProblem
 import io.github.chenxiex.calibrecloud.library.ReadFilter
 import io.github.chenxiex.calibrecloud.library.ReadMarkAction
 import io.github.chenxiex.calibrecloud.library.ReadMarkBlock
+import io.github.chenxiex.calibrecloud.model.BackendKind
+import io.github.chenxiex.calibrecloud.tasks.api.PendingRead
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.model.CopyKey
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
@@ -429,7 +431,7 @@ private fun GridCell(model: LibraryViewModel, item: LibraryItem, marks: BookMark
             Modifier.fillMaxSize().then(if (selected == true) Modifier.border(FRAME, INK) else Modifier))
         when (item) {
             is LibraryItem.Book -> {
-                if (item.row.read == true) ReadRibbon(Modifier.align(Alignment.TopEnd))
+                ReadState(item.row, model.pendingReads[item.row.key], Modifier.align(Alignment.TopEnd))
                 val open = marks.of(item.row)
                 when {
                     // The touch area reaches the cell corner; the drawn ring keeps the check's inset.
@@ -489,7 +491,7 @@ private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, mark
                             overflow = TextOverflow.Ellipsis)
                         // Unknown authors and sizes leave no placeholder text at all.
                         if (row.authors.isNotEmpty()) SupportingText(row.authors.joinToString(stringResource(R.string.list_separator)))
-                        ListMeta(row)
+                        ListMeta(row, model.pendingReads[row.key])
                     }
                     is LibraryItem.Folder -> {
                         Text(item.row.key.name ?: stringResource(R.string.library_unnamed_folder), Modifier.weight(1f, fill = false),
@@ -511,15 +513,21 @@ private fun ListRow(model: LibraryViewModel, item: LibraryItem, height: Dp, mark
 }
 
 @Composable
-private fun ListMeta(row: BookRow) {
+private fun ListMeta(row: BookRow, pending: PendingRead?) {
     val size = row.defaultFormat?.sizeBytes?.let { Formatter.formatShortFileSize(LocalContext.current, it) }
     val missing = row.defaultFormat?.sourceMissing == true
-    if (row.read != true && size == null && !missing) return
+    if (row.read != true && pending == null && size == null && !missing) return
     Row(verticalAlignment = Alignment.CenterVertically) {
-        if (row.read == true) {
-            TagLabel(stringResource(R.string.library_read_label))
-            Spacer(Modifier.width(SECTION_GAP))
+        // A target still being written replaces the imported state; a failed write shows its mark instead.
+        when (pending) {
+            is PendingRead.Failed -> ReadFailedMark(row, Modifier)
+            is PendingRead.Pending -> {
+                val description = pendingDescription(pending.target)
+                TagLabel(stringResource(readLabel(pending.target)), Modifier.testTag("read_tag_pending").semantics { contentDescription = description })
+            }
+            null -> if (row.read == true) TagLabel(stringResource(R.string.library_read_label), Modifier.testTag("read_tag"), filled = true)
         }
+        if (pending != null || row.read == true) Spacer(Modifier.width(SECTION_GAP))
         if (missing) {
             SourceMissing(Modifier)
             Spacer(Modifier.width(SECTION_GAP))
@@ -545,31 +553,69 @@ private val RIBBON_OUTER = 50.dp
 private val RIBBON_INNER = 28.dp
 private val RIBBON_TEXT = 11.sp
 
+private fun readLabel(read: Boolean) = if (read) R.string.library_read_label else R.string.library_unread_label
+
+@Composable
+private fun pendingDescription(target: Boolean) = stringResource(R.string.library_read_pending_description, stringResource(readLabel(target)))
+
 /**
- * Trapezoid band across the top-right corner: its legs lie on the cover's top and right edges, its
- * parallel sides run diagonally. The text keeps the state readable without colour.
+ * The cover's top-right corner (R27): the imported "已读" as a solid ribbon; a target still being
+ * written as an outlined ribbon with that target, which replaces the imported state; a failed write
+ * as the exclamation mark of a failed download.
  */
 @Composable
-private fun ReadRibbon(modifier: Modifier) {
+private fun ReadState(row: BookRow, pending: PendingRead?, modifier: Modifier) {
+    when (pending) {
+        is PendingRead.Failed -> ReadFailedMark(row, modifier.padding(MARK_INSET))
+        is PendingRead.Pending -> {
+            val description = pendingDescription(pending.target)
+            ReadRibbon(stringResource(readLabel(pending.target)), outlined = true,
+                modifier.testTag("read_ribbon_pending").semantics { contentDescription = description })
+        }
+        null -> if (row.read == true) ReadRibbon(stringResource(R.string.library_read_label), outlined = false, modifier.testTag("read_ribbon"))
+    }
+}
+
+/**
+ * Trapezoid band across the top-right corner: its legs lie on the cover's top and right edges, its
+ * parallel sides run diagonally. The text keeps the state readable without colour; an [outlined]
+ * band is white with a black edge and black text.
+ */
+@Composable
+private fun ReadRibbon(text: String, outlined: Boolean, modifier: Modifier) {
     // The band's centre line meets both edges at the mean of the inner and outer distances.
     val shift = (RIBBON_OUTER - (RIBBON_OUTER + RIBBON_INNER) / 2) / 2
-    Box(modifier.size(RIBBON_OUTER).testTag("read_ribbon")) {
+    Box(modifier.size(RIBBON_OUTER)) {
         Canvas(Modifier.fillMaxSize()) {
             val outer = size.width
             val inner = RIBBON_INNER.toPx()
-            drawPath(Path().apply {
+            val band = Path().apply {
                 moveTo(0f, 0f)
                 lineTo(outer - inner, 0f)
                 lineTo(outer, inner)
                 lineTo(outer, outer)
                 close()
-            }, INK)
+            }
+            if (outlined) {
+                drawPath(band, PAPER)
+                drawPath(band, INK, style = Stroke(BORDER.toPx()))
+            } else drawPath(band, INK)
         }
         Text(
-            stringResource(R.string.library_read_label),
+            text,
             Modifier.align(Alignment.Center).offset(x = shift, y = -shift).graphicsLayer { rotationZ = 45f },
-            color = PAPER, fontSize = RIBBON_TEXT, lineHeight = RIBBON_TEXT, textAlign = TextAlign.Center, maxLines = 1,
+            color = if (outlined) INK else PAPER, fontSize = RIBBON_TEXT, lineHeight = RIBBON_TEXT, textAlign = TextAlign.Center, maxLines = 1,
         )
+    }
+}
+
+/** A failed read-state write: the failed download's exclamation disc; the reason is in the notification. */
+@Composable
+private fun ReadFailedMark(row: BookRow, modifier: Modifier) {
+    val description = stringResource(R.string.library_read_failed_description, row.title)
+    Box(modifier.size(MARK_SIZE).background(INK, MARK_SHAPE).border(BORDER, PAPER, MARK_SHAPE)
+        .semantics { contentDescription = description }.testTag("read_failed"), contentAlignment = Alignment.Center) {
+        Icon(painterResource(R.drawable.ic_priority_high), null, Modifier.size(MARK_ICON), tint = PAPER)
     }
 }
 
@@ -827,18 +873,13 @@ private fun SelectionTopBar(model: LibraryViewModel, moreOpen: Boolean, onMore: 
 private fun BatchMenu(model: LibraryViewModel, close: () -> Unit) {
     val choice = model.readMark
     val entries = buildList {
-        val reason = when (choice?.blocked) {
-            ReadMarkBlock.NO_BOOKS -> R.string.selection_mark_no_books
-            ReadMarkBlock.COLUMN_UNAVAILABLE -> R.string.selection_mark_no_column
-            ReadMarkBlock.WRITE_UNAVAILABLE -> R.string.selection_mark_no_write
-            null -> null
-        }
-        if (reason != null) add(MenuEntry.Note("selection_mark_reason", stringResource(reason)))
+        choice?.blocked?.let { add(MenuEntry.Note("selection_mark_reason", stringResource(readMarkBlockResource(it, model.backend)))) }
         val unread = choice?.action == ReadMarkAction.MARK_UNREAD
         add(MenuEntry.Choice(if (unread) "selection_mark_unread" else "selection_mark_read",
             stringResource(if (unread) R.string.selection_mark_unread else R.string.selection_mark_read),
-            enabled = choice != null && choice.blocked == null) {
-            // Source write-back arrives in phase 4; until then the choice is never enabled.
+            enabled = choice != null && choice.blocked == null && !model.batchBusy) {
+            close()
+            if (choice != null) model.markSelection(choice.action)
         })
         add(MenuEntry.Rule)
         add(MenuEntry.Choice("selection_remove", stringResource(R.string.selection_remove), enabled = !model.batchBusy) {
@@ -852,6 +893,17 @@ private fun BatchMenu(model: LibraryViewModel, close: () -> Unit) {
 }
 
 private val BATCH_MENU_WIDTH = 240.dp
+
+/** Why the read-state mark is disabled; an authorization is a directory grant or an OneDrive sign-in by backend. */
+internal fun readMarkBlockResource(block: ReadMarkBlock, backend: BackendKind?): Int = when (block) {
+    ReadMarkBlock.NO_BOOKS -> R.string.selection_mark_no_books
+    ReadMarkBlock.COLUMN_UNAVAILABLE -> R.string.selection_mark_no_column
+    ReadMarkBlock.WRITE_AUTHORIZATION ->
+        if (backend == BackendKind.ONEDRIVE) R.string.selection_mark_write_login else R.string.selection_mark_write_authorization
+    ReadMarkBlock.WRITE_READ_ONLY -> R.string.selection_mark_write_read_only
+    ReadMarkBlock.WRITE_UNSUPPORTED -> R.string.selection_mark_write_unsupported
+    ReadMarkBlock.WRITE_SOURCE_UNAVAILABLE -> R.string.selection_mark_write_unavailable
+}
 
 /** Confirmation over the page: the frozen books, formats, copies and bytes; nothing is removed until confirmed. */
 @Composable

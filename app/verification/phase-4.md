@@ -289,3 +289,60 @@ Gradle 结束后已卸载 debug 与测试包，设备上只保留正式应用（
 ### 未完成
 
 - 真实进程终止后的重跑、推送后断网与界面路径在步骤 07 联验。
+
+## 步骤 06：界面接入（2026-10-11）
+
+对应 R13 的待写入显示与失败通知、R15 的尽力写回说明、R18 的写回任务显示、R26／AC07 的标记提交与按钮判定、R27 的空心斜幅／标签与感叹号、AC04 的“点击后立即显示空心标记、筛选不变、刚标为已读的书再选中为标为未读”。界面规则见[界面约束](../src/main/java/io/github/chenxiex/calibrecloud/ui/AGENTS.md)。
+
+### 改动
+
+- `ReadMarkChoice.of` 接收源写入原因与待写入目标：每书状态为导入值再以 `Pending` 目标覆盖（`Failed` 不覆盖）；`ReadMarkBlock` 的“写回不可用”拆为授权、只读授权、提供方不支持、`metadata.db` 不可访问四种，由界面从 `writeCapability` 映射，未登录 OneDrive 与本地授权失效分别说明。
+- `LibraryBatch` 增加 `writeBlock`、`pendingReads`、`markRead`（经 `ReadStatusService`）、`dismissReadFailures`；`DurableTaskQueue.dismissShownReadFailures` 只隐藏已结束写回中已显示书籍的行。
+- `LibraryViewModel`：`markSelection` 提交所显示的操作，成功后退出选择、页面导入状态不变；被拒或不可用时以 `BatchNotice.ReadMarkRejected` 通知并保留选择。`pendingReads` 在页面加载及任何写回／书库同步变化时重读（订阅随 ViewModel 存在）；新出现的失败产生 `ReadFailureNotice`，经另一条可替换通知发送，点击打开任务页（新增 `MoreTarget.TASKS`）；离开图书馆页时持久隐藏已显示的失败，之后的重读等待它完成。
+- 网格：实心 `read_ribbon`、同形空心 `read_ribbon_pending`（白底黑边黑字，文字为目标值），失败为下载失败同款感叹号 `read_failed`；列表：已读改为实心标签 `read_tag`，待写入为细边框 `read_tag_pending`。`TagLabel` 增加 `filled`。
+- 已读栏目页增加尽力写回说明，栏目说明不再写“不修改源书库”。
+- 任务页：写回标题带书籍数（`TaskViewModel.writeBooks`），阶段为“读取最新数据库”“准备写回”“正在推送 · 不可暂停或取消”；完成为“已写入书库”，部分失效为“已写入书库，N 本书已失效未写入”，版本冲突失败为“版本冲突，已自动重试 3 次”（`TaskCoordinator.MAX_RETRIES` 公开），残留文件沿用列出文件名的原因。
+
+与计划的工程差异：完成文字用“已写入书库”而非“已推送”，因为无需修改时任务不推送也完成，两种情况下源都已是目标值。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+```
+
+结果成功，JVM **172 tests、0 failures、0 errors**（修正后 173）；lint debug 0 error，只有原有的 `AndroidGradlePluginVersion`、`NewerVersionAvailable` 提示。`git diff --check` 无问题。新增 JVM 检查：
+
+- `LibraryIndexTest`：待写入目标参与判定（全未读刚标为已读 → 标为未读；部分 → 标为已读；已读刚标未读 → 标为已读），写入原因原样作为禁用原因。
+- `LibraryViewModelTest`（3 项）：按钮计入 `Pending`、不计 `Failed`；提交冻结的集合与所选目标，退出选择，页面行与已读筛选结果不变；只读授权禁用并通知、被拒保留选择；写回事件刷新待写入，新失败只通知一次，离开页面隐藏失败，其它标签页时出现的失败仍通知。
+
+### 真机平台测试
+
+设备 PA6（无线调试），`aapt2` 核对 debug application ID 后 `adb install -r -t`，按 `AwakeTestRunner` 执行 `LibraryScreenTest`、`TaskScreenTest`、`ReadStatusWriteTaskHandlerTest`、`CacheMaintenanceTest`：**OK (74 tests)**。第一轮发现新测试按合并语义树找不到封面内的标记（改为 `useUnmergedTree`）、测试记录的书库不一致，并暴露 `refreshPending` 在数据库关闭后读取选择会使进程崩溃（已改为捕获，与其它本地读取一致），修正后整轮重跑通过。新增覆盖：
+
+- Compose：选择两本未读书提交“标为已读”后退出选择、出现两条空心“已读”斜幅且无实心斜幅，再选其中一本显示“标为未读”并撤销为空心“未读”；已读筛选仍只有导入已读的书；已同步已读书待写入未读时只显示空心“未读”；列表的实心／细边框标签与感叹号；失败不参与判定；新失败经 `MainScreen` 发出一条通知（文字核对），切到“更多”再回来后感叹号消失且不重复通知；写回任务的标题、阶段与各结果文字。
+- 平台（`ReadStatusWriteTaskHandlerTest#aMarkFromTheLibraryPageShowsThePendingTargetUntilTheSyncAfterThePush`，真实 SQLite、生产 `QueueLibraryBatch`／`ReadStatusService`／队列／处理器，fixture 源）：从页面模型选择并提交，页面导入仍为未读而书显示 `Pending(true)`，再选显示“标为未读”；推送完成时导入未变、仍为待写入；紧接同步后待写入消失，页面显示已读，源中该书为 1。
+
+### 真机界面路径（PA6 本地测试副本）
+
+按用户此前授权使用 `/sdcard/Download/calibre-step04-test-library`（286 本）。写前拉回 `metadata.db`（MD5 `e12b36d4…`）并记录 620 个文件的 MD5。agent 用 helper 经正式入口完成添加向导（系统选择器确认框为“这么做可让Calibre Cloud Debug访问目前及以后存储在 calibre-step04-test-library 中的内容。”）、同步并在“已读栏目”选择 `阅读状态（#read_status）`，该页显示尽力写回说明。随后：
+
+- 单本：书 1（空值）标为已读；之后再选书 1，菜单为“标为未读”，提交后立即导出界面树，书 1 位置为 `read_ribbon_pending`，文字“未读”，描述“等待写入书库：未读”。
+- 多选：书 5、书 288 一起标为已读；单本书 286 标为已读。
+- 文件夹展开：按标签分类，长按“传记”文件夹显示“已选 28 本”，混合状态提交“标为已读”；再选同一文件夹菜单为“标为未读”，提交。
+- 队列记录：6 个写回任务均完成，变更列表分别为 1、2、1、28、28、1 本，目标与点击一致，紧接的同步全部完成。
+- 源复核：拉回 `metadata.db`，`calibre_db_diff.py` 只有 `books`（32 本的 `last_modified`）、`custom_column_1`、`metadata_dirtied`、`sqlite_sequence` 变化；书 1 为显式 0，书 5、286、288 为 1，28 本传记书全为显式 0，其它书不变。Calibre 9.14 `calibredb list` 读回一致；`check_library` 与写前数据库的结果只差一行顺序（只拉回数据库，两者都列出缺失格式）。根目录无 `metadata.db.calibrecloud-*`。
+- 恢复与清理：卸载 debug 与测试包后推回原 `metadata.db`，620 个文件 MD5 与写前完全一致。设备上只保留正式应用（未触碰）。操作中误把一次界面树导出写到 `/sdcard/ui-step06.xml`，核对内容后已删除。产物在被忽略的 `app/build/verification/phase4-step06/`。
+
+### 共同验收发现的缺陷与修正
+
+用户在 PA6 上标为已读后、标记变实心前立即标为未读：空心“未读”保持到最后，但写后同步结束时先闪现实心“已读”再消失。原因：同步结束后待写入映射与页面行分别异步重读，待写入（已空）先于页面行（仍为上一次同步导入的“已读”）生效。修正：书库同步结束时在页面重读中先读待写入、再读页面并一起显示；仅重读待写入时发现某个 `Pending` 已结束，则改为重读页面。先在 `LibraryViewModelTest#theEndOfTheSyncAfterAWriteNeverShowsTheOlderImportWithoutItsPendingTarget` 稳定复现（同步结束事件与其后读取的写回事件两种顺序均显示为 `(已读, 无待写入)`），修正后通过；`./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug` 成功，PA6 上 `LibraryScreenTest`、`ReadStatusWriteTaskHandlerTest` **OK (45 tests)**。
+
+### 未完成
+
+- 任务开始前连续点击并入同一任务未在真机界面上观察到：本地写回在 helper 下一次点击前已完成，每次点击都形成独立任务。合并规则由队列与处理器平台测试覆盖，真机界面上的合并留待步骤 07 的离线（OneDrive）路径。
+- 失败感叹号与通知只有 Compose 与 JVM 证据；真实写回失败的界面与系统通知、OneDrive 后端的界面路径在步骤 07 联验。
+
+### 共同验收
+
+用户在 PA6 上重新安装的 debug 包中目视检查实心／空心斜幅与标签，并复测“标为已读后立即标为未读”，确认修正后空心“未读”保持到结束、不再闪现实心“已读”，验收本步（2026-10-11）。之后卸载 debug 包，推回原 `metadata.db`，测试副本 620 个文件 MD5 与写前一致；设备上只保留正式应用。

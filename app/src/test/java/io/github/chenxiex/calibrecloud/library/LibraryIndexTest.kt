@@ -310,9 +310,10 @@ class LibraryIndexTest {
         val unread = book(2, "Unread", values = mapOf(1L to ImportedColumnValue.Bool(false)))
         val empty = book(3, "Empty")
         val books = listOf(read, unread, empty)
-        fun choice(chosen: List<ImportedBook>, status: CustomColumnId? = readColumn, write: Boolean = true): ReadMarkChoice {
+        fun choice(chosen: List<ImportedBook>, status: CustomColumnId? = readColumn, write: ReadMarkBlock? = null,
+            pending: Map<BookKey, Boolean> = emptyMap()): ReadMarkChoice {
             val result = library(books, status).expand(base, emptySet(), chosen.map { it.key() }.toSet(), emptyList())
-            return ReadMarkChoice.of((result as SelectionResult.Expanded).expansion, write)
+            return ReadMarkChoice.of((result as SelectionResult.Expanded).expansion, write, pending)
         }
         assertEquals(ReadMarkChoice(ReadMarkAction.MARK_UNREAD, null), choice(listOf(read)))
         // An empty value counts as unread.
@@ -321,6 +322,10 @@ class LibraryIndexTest {
         assertEquals(ReadMarkChoice(ReadMarkAction.MARK_READ, ReadMarkBlock.NO_BOOKS), choice(emptyList()))
         assertEquals(ReadMarkBlock.COLUMN_UNAVAILABLE, choice(listOf(read), status = null).blocked)
         assertEquals(ReadMarkBlock.COLUMN_UNAVAILABLE, choice(listOf(read), status = CustomColumnId(2, "#topic")).blocked)
-        assertEquals(ReadMarkChoice(ReadMarkAction.MARK_UNREAD, ReadMarkBlock.WRITE_UNAVAILABLE), choice(listOf(read), write = false))
+        assertEquals(ReadMarkChoice(ReadMarkAction.MARK_UNREAD, ReadMarkBlock.WRITE_READ_ONLY), choice(listOf(read), write = ReadMarkBlock.WRITE_READ_ONLY))
+        // Pending targets replace the import (R26, Q81): just marked read offers "mark unread", and back.
+        assertEquals(ReadMarkAction.MARK_UNREAD, choice(listOf(unread, empty), pending = mapOf(unread.key() to true, empty.key() to true)).action)
+        assertEquals(ReadMarkAction.MARK_READ, choice(listOf(read, unread, empty), pending = mapOf(unread.key() to true)).action)
+        assertEquals(ReadMarkAction.MARK_READ, choice(listOf(read), pending = mapOf(read.key() to false)).action)
     }
 }

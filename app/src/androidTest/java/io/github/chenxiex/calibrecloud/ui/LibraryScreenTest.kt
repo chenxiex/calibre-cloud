@@ -80,6 +80,10 @@ import io.github.chenxiex.calibrecloud.library.LibraryFilters
 import androidx.compose.ui.test.longClick
 import io.github.chenxiex.calibrecloud.tasks.api.FrozenSet
 import io.github.chenxiex.calibrecloud.tasks.api.TaskId
+import io.github.chenxiex.calibrecloud.tasks.api.PendingRead
+import io.github.chenxiex.calibrecloud.tasks.api.TaskError
+import io.github.chenxiex.calibrecloud.library.ReadMarkBlock
+import io.github.chenxiex.calibrecloud.library.ReadFilter
 import kotlinx.coroutines.flow.MutableStateFlow
 import io.github.chenxiex.calibrecloud.tasks.api.TaskResult
 import io.github.chenxiex.calibrecloud.tasks.api.TaskState
@@ -161,7 +165,16 @@ class LibraryScreenTest {
 
     /** Records batch submissions; removal plans cover one EPUB copy per book. */
     private val batch = object : LibraryBatch {
-        override val readWriteAvailable = false
+        @Volatile var writeBlocked: ReadMarkBlock? = ReadMarkBlock.WRITE_READ_ONLY
+        val pending = java.util.concurrent.ConcurrentHashMap<BookKey, PendingRead>()
+        val marks = java.util.concurrent.CopyOnWriteArrayList<Pair<Set<BookKey>, Boolean>>()
+        override suspend fun writeBlock() = writeBlocked
+        override suspend fun pendingReads(): Map<BookKey, PendingRead> = HashMap(pending)
+        override suspend fun markRead(books: Set<BookKey>, target: Boolean, selectionToken: UUID) = true.also {
+            marks += books to target
+            books.forEach { pending[it] = PendingRead.Pending(target) }
+        }
+        override suspend fun dismissReadFailures(books: Set<BookKey>) { books.forEach { if (pending[it] is PendingRead.Failed) pending.remove(it) } }
         val downloads = mutableListOf<CopyKey>()
         val previews = mutableListOf<Set<BookFormat>?>()
         val removed = mutableListOf<CleanupPlan>()
@@ -210,6 +223,9 @@ class LibraryScreenTest {
     }
 
     private fun shown(prefix: String) = compose.onAllNodes(tagged(prefix)).fetchSemanticsNodes().size
+
+    /** Marks inside a book cell are merged into it, so they are counted in the unmerged tree. */
+    private fun unmerged(tag: String) = compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().size
 
     /** Pages the view menu forward until the entry is on the shown page. */
     private fun menuEntry(tag: String): androidx.compose.ui.test.SemanticsNodeInteraction {
@@ -931,10 +947,10 @@ class LibraryScreenTest {
         compose.waitUntil(10_000) { model.selectedBooks == 4 }
         compose.onNodeWithTag("selection_more").performClick()
         awaitTag("selection_menu")
-        // Mixed: only "mark read" is offered, disabled until source write-back exists.
+        // Mixed: only "mark read" is offered, disabled with the source's reason while it cannot write.
         compose.onNodeWithTag("selection_mark_read").assertIsNotEnabled()
         compose.onNodeWithTag("selection_mark_unread").assertDoesNotExist()
-        compose.onNode(hasAnyAncestor(hasTestTag("selection_mark_reason")) and hasText("尚未提供", substring = true)).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag("selection_mark_reason")) and hasText("不含写入权限", substring = true)).assertExists()
         // A small popup at the top bar's right end; the page stays visible beside and under it.
         val menu = compose.onNodeWithTag("selection_menu").getUnclippedBoundsInRoot()
         assertEquals(240f, (menu.right - menu.left).value, 0.5f)
@@ -1020,5 +1036,115 @@ class LibraryScreenTest {
             assertEquals(setOf(epub), batch.removed.single().formats)
         }
         compose.onNodeWithTag("selection_top_bar").assertDoesNotExist()
+    }
+
+    @Test
+    fun markingShowsOutlinedPendingTargetsKeepsTheImportAndOffersTheUndo() {
+        // Book 1 is read; 2 and 3 are not.
+        library((1..3).map { book(it) })
+        batch.writeBlocked = null
+        val model = model()
+        show(model)
+        awaitTag("book_3")
+        compose.onNode(hasAnyAncestor(hasTestTag("book_1")) and hasTestTag("read_ribbon"), useUnmergedTree = true).assertExists()
+        longPress("book_2")
+        compose.onNodeWithTag("book_3").performClick()
+        compose.waitUntil(10_000) { model.selectedBooks == 2 && model.readMark?.blocked == null }
+        compose.onNodeWithTag("selection_more").performClick()
+        awaitTag("selection_mark_read")
+        compose.onNodeWithTag("selection_mark_read").assertIsEnabled().performClick()
+        // Submitting ends the selection; the books show the outlined target, not a synced ribbon.
+        awaitTag("library_title")
+        compose.waitUntil(10_000) { unmerged("read_ribbon_pending") == 2 }
+        compose.onNode(hasAnyAncestor(hasTestTag("book_2")) and hasTestTag("read_ribbon_pending"), useUnmergedTree = true).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag("book_2")) and hasAnyAncestor(hasTestTag("read_ribbon_pending")) and hasText("已读"), useUnmergedTree = true).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag("book_2")) and hasTestTag("read_ribbon"), useUnmergedTree = true).assertDoesNotExist()
+        compose.runOnIdle { assertEquals(listOf(setOf(key(2).book, key(3).book) to true), batch.marks.toList()) }
+        // Just marked read: selecting it again offers "mark unread", which undoes the click.
+        longPress("book_2")
+        compose.waitUntil(10_000) { model.readMark?.action == io.github.chenxiex.calibrecloud.library.ReadMarkAction.MARK_UNREAD }
+        compose.onNodeWithTag("selection_more").performClick()
+        awaitTag("selection_mark_unread")
+        compose.onNodeWithTag("selection_mark_unread").performClick()
+        awaitTag("library_title")
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasAnyAncestor(hasTestTag("book_2")) and hasAnyAncestor(hasTestTag("read_ribbon_pending")) and hasText("未读"), useUnmergedTree = true).fetchSemanticsNodes().size == 1
+        }
+        // The read filter keeps the import: only book 1 is read.
+        compose.runOnIdle { model.updateFilters { LibraryFilters(read = ReadFilter.READ) } }
+        compose.waitUntil(10_000) { shown("book_") == 1 }
+        compose.onNodeWithTag("book_1").assertExists()
+        // A synced read book marked unread shows the outlined "未读" instead of its solid ribbon.
+        compose.runOnIdle { batch.pending[key(1).book] = PendingRead.Pending(false); model.refresh() }
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasAnyAncestor(hasTestTag("book_1")) and hasAnyAncestor(hasTestTag("read_ribbon_pending")) and hasText("未读"), useUnmergedTree = true).fetchSemanticsNodes().size == 1
+        }
+        compose.onNode(hasAnyAncestor(hasTestTag("book_1")) and hasTestTag("read_ribbon"), useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun theListShowsAFilledReadTagAnOutlinedPendingTagAndAFailureMark() {
+        library((1..3).map { book(it) })
+        batch.pending[key(2).book] = PendingRead.Pending(true)
+        batch.pending[key(3).book] = PendingRead.Failed(true, TaskError.InvalidColumn)
+        val model = model()
+        show(model)
+        compose.runOnIdle { model.showAs(LibraryViewMode.LIST) }
+        compose.waitUntil(10_000) { unmerged("read_failed") > 0 }
+        compose.onNode(hasAnyAncestor(hasTestTag("book_1")) and hasTestTag("read_tag") and hasText("已读"), useUnmergedTree = true).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag("book_2")) and hasTestTag("read_tag_pending") and hasText("已读"), useUnmergedTree = true).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag("book_3")) and hasTestTag("read_failed"), useUnmergedTree = true).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag("book_3")) and hasTestTag("read_tag_pending"), useUnmergedTree = true).assertDoesNotExist()
+        // In the grid the failure takes the ribbon's corner.
+        compose.runOnIdle { model.showAs(LibraryViewMode.GRID) }
+        compose.waitUntil(10_000) { unmerged("read_ribbon") > 0 }
+        compose.onNode(hasAnyAncestor(hasTestTag("book_3")) and hasTestTag("read_failed"), useUnmergedTree = true).assertExists()
+        compose.onNode(hasAnyAncestor(hasTestTag("book_2")) and hasTestTag("read_ribbon_pending"), useUnmergedTree = true).assertExists()
+        // A failed write does not count for the choice: book 3 is still unread.
+        longPress("book_3")
+        compose.waitUntil(10_000) { model.readMark?.action == io.github.chenxiex.calibrecloud.library.ReadMarkAction.MARK_READ }
+    }
+
+    @Test
+    fun aNewWriteFailureIsNotifiedAndLeavingTheLibraryDismissesItsMark() {
+        library((1..2).map { book(it) })
+        val events = kotlinx.coroutines.flow.MutableSharedFlow<io.github.chenxiex.calibrecloud.tasks.api.TaskEvent>(extraBufferCapacity = 4)
+        val imports = object : LibraryImports {
+            override suspend fun currentRevision() = index?.revision
+            override suspend fun currentIndex() = index
+        }
+        val noCovers = object : LibraryCovers {
+            override suspend fun read(book: BookKey): Bitmap? = null
+            override suspend fun request(books: List<BookKey>, selectionToken: UUID): TaskId? = null
+            override fun changes(task: TaskId) = emptyFlow<TaskState>()
+            override suspend fun wake() {}
+        }
+        val model = LibraryViewModel({ selection }, LibraryQueryService(imports, LibraryCopies { copies }, Dispatchers.Default), noCovers,
+            events, history, batch)
+        val failures = mutableListOf<ReadFailureNotice>()
+        compose.setContent {
+            MainScreen(model, OpenViewModel(opening), { LaunchOutcome.STARTED }, notifyReadFailure = { failures += it }) { _, _, _ -> Text("更多页") }
+        }
+        awaitTag("book_2")
+        batch.pending[key(2).book] = PendingRead.Failed(true, TaskError.InvalidColumn)
+        val write = io.github.chenxiex.calibrecloud.tasks.api.TaskRecord(TaskId(UUID.randomUUID()),
+            io.github.chenxiex.calibrecloud.tasks.api.TaskSubmission(
+                io.github.chenxiex.calibrecloud.tasks.api.TaskRequest.ReadStatusWrite(libraryId, readColumn, UUID.randomUUID()),
+                io.github.chenxiex.calibrecloud.tasks.api.TaskOrigin.USER_READ_STATUS),
+            io.github.chenxiex.calibrecloud.tasks.api.SchedulingPosition(io.github.chenxiex.calibrecloud.tasks.api.TaskPriority.HIGH,
+                io.github.chenxiex.calibrecloud.tasks.api.QueueSequence(1)),
+            state = TaskState.Finished(TaskResult.Cancelled), controls = io.github.chenxiex.calibrecloud.tasks.api.TaskControls(false, false, false, false))
+        compose.runOnIdle { events.tryEmit(io.github.chenxiex.calibrecloud.tasks.api.TaskEvent.Changed(write)) }
+        compose.waitUntil(10_000) { unmerged("read_failed") > 0 }
+        compose.waitUntil(10_000) { failures.size == 1 }
+        compose.runOnIdle {
+            assertEquals("1 本书的阅读状态未写入：已读栏目失效。可在任务页重试，或重新标记。", readFailureText(compose.activity, failures.single()))
+        }
+        compose.onNodeWithTag("nav_more").performClick()
+        awaitText("更多页")
+        compose.onNodeWithTag("nav_library").performClick()
+        awaitTag("book_2")
+        compose.onNodeWithTag("read_failed", useUnmergedTree = true).assertDoesNotExist()
+        compose.runOnIdle { assertEquals(1, failures.size) }
     }
 }
