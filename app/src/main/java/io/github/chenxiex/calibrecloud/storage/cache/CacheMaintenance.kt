@@ -182,6 +182,7 @@ class CacheMaintenance(
     internal suspend fun recoverLocked(): Unit = withContext(io) {
         val db = database.writableDatabase
         journalAbandonedInputs(db)
+        journalPrunedTasks(db)
         val journals = db.rawQuery("SELECT cleanup_id,payload FROM cache_cleanup", null).use {
             buildList { while (it.moveToNext()) add(it.getString(0) to JSONObject(it.getString(1))) }
         }
@@ -217,6 +218,7 @@ class CacheMaintenance(
         if (journals.isNotEmpty()) {
             queue.invalidateObservers()
             journalAbandonedInputs(db)
+            journalPrunedTasks(db)
             if (DurableTaskQueue.cacheCleanupPending(db)) recoverLocked()
         }
     }
@@ -226,6 +228,27 @@ class CacheMaintenance(
      * become active again. Reclaim this ordinary temporary data even when legacy ownership cannot
      * be reconstructed; never infer a library or touch complete metadata/books/protection domains.
      */
+    /**
+     * Removes finished tasks beyond the kept history (Q74) and journals their task-keyed temporary
+     * files in the same transaction, so the deletion below completes even after process death.
+     * Runs only with no other cleanup pending, whose journals may still name these tasks.
+     */
+    private fun journalPrunedTasks(db: SQLiteDatabase) {
+        db.transaction {
+            if (DurableTaskQueue.cacheCleanupPending(db)) return
+            val tasks = queue.pruneFinished(db)
+            if (tasks.isEmpty()) return
+            val paths = tasks.flatMap { listOf("book-staging/${it.value}", "cover-staging/${it.value}",
+                "snapshots/local/${it.value}", "snapshots/onedrive/${it.value}",
+                "onedrive-browser/${it.value}.json", "onedrive-browser/${it.value}.part") }
+            val payload = JSONObject().put("paths", JSONArray(paths)).put("libraries", JSONArray())
+                .put("tasks", JSONArray()).put("kind", "INPUTS")
+            db.insertOrThrow("cache_cleanup", null, ContentValues().apply {
+                put("cleanup_id", UUID.randomUUID().toString()); put("payload", payload.toString())
+            })
+        }
+    }
+
     private fun journalAbandonedInputs(db: SQLiteDatabase) {
         db.transaction {
             if (DurableTaskQueue.cacheCleanupPending(db)) return

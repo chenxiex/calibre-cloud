@@ -287,6 +287,37 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         changed.forEach { publish(it) }
     }
 
+    /**
+     * Deletes, in the caller's transaction, finished tasks older than the newest [keep] (R18, Q74) and
+     * returns them; the caller reclaims their task-keyed private files. A finished task stays while a
+     * task depends on it or waits on it as its stale-path sync, while it keeps a checkpoint for
+     * cleanup, while a write has not reached a safe terminal state, and while it is a candidate of the
+     * current selection or the addition under way, whose listing the wizard still reads.
+     */
+    internal fun pruneFinished(db: SQLiteDatabase, keep: Int = FINISHED_HISTORY): List<TaskId> {
+        val all = entries(db)
+        val prerequisites = db.rawQuery("SELECT DISTINCT prerequisite_id FROM task_dependencies", null).use {
+            buildSet { while (it.moveToNext()) add(TaskId(UUID.fromString(it.getString(0)))) }
+        }
+        val awaited = all.mapNotNull { it.sourceSync }.toSet()
+        val pruned = all.filter { it.record.state is TaskState.Finished }
+            .sortedByDescending { it.record.scheduling.sequence.value }
+            .drop(keep)
+            .filter { entry ->
+                val record = entry.record
+                val request = record.submission.request
+                record.id !in prerequisites && record.id !in awaited && entry.checkpoint == null &&
+                    (request !is TaskRequest.ReadStatusWrite || safeTerminal(record)) &&
+                    (request !is TaskRequest.CandidateConfiguration || !activeCandidate(db, request))
+            }.map { it.record.id }
+        pruned.forEach { id ->
+            val args = arrayOf(id.value.toString())
+            db.delete("task_dependencies", "task_id = ?", args)
+            db.delete("queued_tasks", "task_id = ?", args)
+        }
+        return pruned
+    }
+
     /** Internal handler boundary: persists before returning, preserving concurrent promotion/control. */
     internal suspend fun update(id: TaskId, cachePublished: Boolean = false, action: (QueueEntry) -> QueueEntry): QueueEntry = withContext(io) {
         val updated = transaction {
@@ -543,6 +574,8 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             })
         }
 
+        /** Finished tasks the task page keeps (Q74): about ten pages of history. */
+        internal const val FINISHED_HISTORY = 50
         internal val queuedControls = TaskControls(false, true, false, false)
         internal val noControls = TaskControls(false, false, false, false)
         fun initialStage(request: TaskRequest): TaskStage = when (request) {

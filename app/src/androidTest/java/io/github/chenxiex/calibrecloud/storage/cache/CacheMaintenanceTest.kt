@@ -107,6 +107,39 @@ class CacheMaintenanceTest {
         assertEquals("PDF pending bytes", pendingPdfFile.readText())
     }
 
+    /** Q74: only the newest 50 finished tasks stay; older ones go with their private files unless still needed. */
+    @Test
+    fun finishedHistoryKeepsTheNewestFiftyAndTheTasksOthersStillNeed() = runBlocking<Unit> {
+        fun request(number: Long) = TaskRequest.FormatCopy(FormatResource(BookKey(book.libraryId, number, UUID.randomUUID()),
+            BookFormat.parse("EPUB"), SourceFileLocator.Relative(BackendKind.LOCAL, RelativeSourcePath("author/book-$number/file.epub"))))
+        val finished = (1..60L).map { number ->
+            submit(request(number), TaskOrigin.USER_DOWNLOAD).also { task ->
+                queue.update(task) { it.copy(record = it.record.copy(state = TaskState.Finished(TaskResult.Completed),
+                    controls = DurableTaskQueue.noControls)) }
+            }
+        }
+        // The oldest is a prerequisite of unfinished work; the second still holds a checkpoint for cleanup.
+        val dependent = (queue.submit(TaskSubmission(request(100), TaskOrigin.USER_DOWNLOAD,
+            FrozenSet(listOf(TaskDependency(finished[0], DependencyRequirement.SUCCESS))))) as SubmissionResult.Created).taskId
+        queue.update(finished[1]) { it.copy(checkpoint = RecoveryCheckpoint(UUID.randomUUID(), FileVersion(BackendKind.LOCAL, "fixture-version"))) }
+        val leftover = File(staging(finished[2]), "left.part").apply { parentFile!!.mkdirs(); writeText("partial") }
+        val listing = File(files, "onedrive-browser/${finished[3].value}.json").apply { parentFile!!.mkdirs(); writeText("{}") }
+
+        maintenance.recoverLocked()
+
+        (2..9).forEach { assertNull(queue.get(finished[it])) }
+        (listOf(0, 1) + (10..59)).forEach { assertNotNull(queue.get(finished[it])) }
+        assertNotNull(queue.get(dependent))
+        assertEquals(1L, count("task_dependencies"))
+        assertEquals(0L, count("cache_cleanup"))
+        assertFalse(leftover.exists())
+        assertFalse(staging(finished[2]).exists())
+        assertFalse(listing.exists())
+        database.close()
+        reopen()
+        assertEquals(53, queue.list().size)
+    }
+
     /** R26 through the library page: the format filter at preview is the removal scope, whatever happens after. */
     @Test
     fun selectionRemovalUnderAnEpubFilterKeepsThePdfCopyAndItsTask() = runBlocking<Unit> {

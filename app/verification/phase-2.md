@@ -171,7 +171,7 @@ adb shell pm list packages io.github.chenxiex.calibrecloud.debug
 
 成功文件按任务 ID 和不可变尝试代次保存于私有 `filesDir/snapshots/local`，失败只清理本次暂存，保留旧成功快照，不进入书籍 provider。候选处理器使用当前选择代号，复制块及发布前检查控制／重选；恢复重新获取源，不凭暂存或 Running 判成功。取消使旧代号失效，再次验证取得新上下文。完成不分配 LibraryId、不导入、不发 `CacheChanged`。静态入口显示排队／执行／暂停／错误与“有效 SQLite 快照，待导入；尚未验证 Calibre 结构”，提供显式加载及当前阶段控制；页面恢复仅查私有状态，不隐式打开源。
 
-实现契约见 [本地后端](../src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md) 与 [任务模块](../src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)，操作说明见 [本地入口](../README.md#本地目录授权)。没有新增产品决策、权限、Manifest、数据库 schema、依赖或锁文件变更。
+实现契约见 [本地后端](../src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md) 与 [任务模块](../src/main/java/io/github/chenxiex/calibrecloud/tasks/AGENTS.md)，操作说明见 [本地入口](../README.md#书库)。没有新增产品决策、权限、Manifest、数据库 schema、依赖或锁文件变更。
 
 ### 自动检查
 

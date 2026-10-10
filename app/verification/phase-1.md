@@ -201,7 +201,7 @@ debug APK 构建成功；debug lint 为 **0 errors、5 warnings**，均为既有
 - 持久权限只取实际返回的读写 flags；缺持久／读取授权拒绝保存。私有 SharedPreferences 保存位置，恢复时核对 OS 持久授权，区别未选择、读写、只读、失效与不支持提供方。新配置保存成功后才释放旧授权；取消与失败保持原选择，失败清理新授权，不误释放同 URI 的授权。
 - 代码复核发现 Activity 自有协调器可能在保存期间重建后留下旧 UI 快照，实施中改为保留 ViewModel，并串行执行授权操作与结果交付，忙时不重复恢复；没有依赖 Activity 生命周期取消已经提交的授权操作。为这条路径增加共享 ViewModelStore、独立 Main／I/O scheduler 的必要测试。
 - 配置／授权 I/O 在后台执行；入口用黑白文字和边框、无 ripple 的控件与显式两页切换，无滚动或应用过渡／加载动画。页面明确“目录已授权，书库待验证”，不读取、枚举、复制或写入源文件，不导入元数据，不建立 LibraryId，不发起队列／同步。
-- 提供方规则、权限 flags 与私有配置细节见 [本地授权开发约束](../src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md)，使用入口见 [模块 README](../README.md#本地目录授权)。授权 flags 不是源目录仍存在或 R15 安全提交能力的证据，真实文件能力探测留待后续后端实现。
+- 提供方规则、权限 flags 与私有配置细节见 [本地授权开发约束](../src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md)，使用入口见 [模块 README](../README.md#书库)。授权 flags 不是源目录仍存在或 R15 安全提交能力的证据，真实文件能力探测留待后续后端实现。
 
 ### 自动检查
 
