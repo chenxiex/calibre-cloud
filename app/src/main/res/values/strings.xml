@@ -40,7 +40,7 @@
     <string name="onedrive_current_directory">当前目录：%1$s</string>
     <string name="metadata_synced_at">上次成功同步：%1$s</string>
     <string name="metadata_columns_explanation">阅读状态取自所选栏目在上次成功同步时的值；栏目选择只保存在本应用。在图书馆标为已读／未读会把“是”或“否”写入书库中的该栏目。</string>
-    <string name="metadata_write_best_effort">写回书库是尽力而为：每次写入前重新获取最新的数据库，书库已被其它设备修改时不覆盖，重新获取后再写入；但无法保证与正在运行的桌面 Calibre、或随后上传旧数据库的同步工具同时修改时的安全。请在 Calibre 关闭、桌面同步完成后再标记阅读状态。</string>
+    <string name="metadata_write_best_effort">阅读状态会尽力写回书库。标记前请关闭桌面 Calibre 并等待同步完成，否则修改可能失败或被覆盖。</string>
     <string name="metadata_columns_unconfigured">未选择已读栏目，已读状态功能不可用。</string>
     <string name="metadata_columns_invalid">已选栏目已改名、删除或不再为布尔，请重新选择。</string>
     <string name="metadata_column_option">%1$s（%2$s）</string>

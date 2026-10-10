@@ -2,7 +2,7 @@
 
 用于从不同存储后端上的 Calibre 书库下载元数据与书籍的 Android 应用。
 
-开发环境配置及缓存、SDK 扩展、设备连接方法见 [.github/.devcontainer/README.md](.github/.devcontainer/README.md)。Android 工程的构建与产物说明见 [app/README.md](app/README.md)，实际验证结果见 [第一阶段验证记录](app/verification/phase-1.md)、[第二阶段验证记录](app/verification/phase-2.md) 和 [第三阶段验证记录](app/verification/phase-3.md)。后台任务与启动同步使用方法见[Android 工程说明](app/README.md#任务与后台)，步骤 09 验收流程与结果见[步骤 09 指南](app/verification/step-09-device-guide.md)。
+开发环境配置及缓存、SDK 扩展、设备连接方法见 [.github/.devcontainer/README.md](.github/.devcontainer/README.md)。Android 工程的构建与产物说明见 [app/README.md](app/README.md)，实际验证结果见 [第一阶段验证记录](app/verification/phase-1.md)、[第二阶段验证记录](app/verification/phase-2.md)、[第三阶段验证记录](app/verification/phase-3.md) 和 [第四阶段验证记录](app/verification/phase-4.md)。后台任务与启动同步使用方法见[Android 工程说明](app/README.md#任务与后台)，步骤 09 验收流程与结果见[步骤 09 指南](app/verification/step-09-device-guide.md)。
 
 ## 项目文档
 
@@ -26,7 +26,7 @@
     onedrive.debugRedirectUri=org.example.calibrecloud.debug://auth/oauth2redirect
     ```
 
-5. 工程按构建变体读取相应 URI，同时配置应用回调接收范围；浏览器登录端点使用个人账号范围 `consumers`，采用授权码与 PKCE。Android 原生客户端不配置或打包 client secret；client ID 是注册标识，登录令牌由设备上的应用管理。见[微软原生授权流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。真实登录回调与目录选择的验收结果见验证记录；专门测试书库的写回在第四阶段于独立 debug 包中验证。
+5. 工程按构建变体读取相应 URI，同时配置应用回调接收范围；浏览器登录端点使用个人账号范围 `consumers`，采用授权码与 PKCE。Android 原生客户端不配置或打包 client secret；client ID 是注册标识，登录令牌由设备上的应用管理。见[微软原生授权流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。真实登录回调与目录选择的验收结果见验证记录；专门测试书库的写回已在第四阶段于独立 debug 包中验证，结果见[第四阶段记录](app/verification/phase-4.md)。
 
 三项属性未配置时，工程仍可构建并使用本地后端，OneDrive 入口显示配置指引。正式版与 debug 版必须分别匹配已注册回调，避免测试包接收正式版的授权回调；构建和 ADB 方法仍见开发容器文档。
 

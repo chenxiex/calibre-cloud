@@ -346,3 +346,65 @@ Gradle 结束后已卸载 debug 与测试包，设备上只保留正式应用（
 ### 共同验收
 
 用户在 PA6 上重新安装的 debug 包中目视检查实心／空心斜幅与标签，并复测“标为已读后立即标为未读”，确认修正后空心“未读”保持到结束、不再闪现实心“已读”，验收本步（2026-10-11）。之后卸载 debug 包，推回原 `metadata.db`，测试副本 620 个文件 MD5 与写前一致；设备上只保留正式应用。
+
+## 步骤 07：两后端端到端联验与收口（2026-10-11）
+
+对应 AC04 的端到端部分（离线提交、写后同步失败、推送阶段真实进程终止、栏目改名／删除、无关内容不变、Calibre 一致性）、AC05 的真机界面合并、R13 的失败感叹号与通知、AC09 的写回日志脱敏、AC10 的新增文案资源化。设备 PA6（Android 14，无线调试），debug application ID 经 `aapt2 dump badging` 核对为 `io.github.chenxiex.calibrecloud.debug`。
+
+### 改动
+
+- 新增显式启用的设备测试 `ReadStatusEndToEndDeviceTest`（`-e e2eWrite true` 加各路径参数），对当前书库经生产服务、队列、处理器与后端运行：`e2eSyncFailure`（推送成功后在源接口注入同步读取失败）、`e2eKill=arm`／`verify`（推送阶段停住后由 agent 以 SIGKILL 终止进程，正常重新打开后核对）、`e2eTwoLibraries`（本地与 OneDrive 书库同数字 ID）。
+- 已读栏目页的尽力写回说明缩短为一句（用户共同验收时指出原文过长触发折叠）：“阅读状态会尽力写回书库。标记前请关闭桌面 Calibre 并等待同步完成，否则修改可能失败或被覆盖。”PA6 上两行显示、无折叠。
+- README、spec 状态说明（Q33）加入第四阶段记录链接。
+
+与计划的工程差异：
+
+- 推送阶段的终止用 `run-as … kill -9`（SIGKILL）而非 `am kill`：前台测试进程不受 `am kill` 影响。
+- 写后同步失败在源接口注入（测试侧故障，代替推送后断网），不是物理断网；无线 ADB 下物理断网只用于下面由用户执行的离线界面路径。
+- 栏目改名／删除只在本地测试副本执行：栏目在获取数据库后的暂存解析中核对，与存储后端无关（用户确认）。
+- 真实冲突沿用步骤 04（本地第 ② 步前替换源）与步骤 05（Graph 412）的证据：步骤 06 只改界面，未触及推送路径。
+- 写回任务结束后 `write-staging/<task>` 留下空目录（文件均已删除），由已结束任务保留规则随任务删除；测试据此检查目录内无文件。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :app:assembleRelease :app:lintRelease
+```
+
+成功，JVM **173 tests、0 failures、0 errors**；lint debug／release 0 error。修改说明文案后重跑 `:app:testDebugUnitTest :app:assembleDebug :app:lintDebug` 成功。
+
+全量 `./gradlew :app:connectedDebugAndroidTest`（PA6）：**316 tests、0 failures、0 errors、29 skipped**（跳过的均为需显式参数的源写入或真实上游测试，不计为通过）。Gradle 结束后已卸载 debug 与测试包。
+
+### 本地测试副本（`/sdcard/Download/calibre-step04-test-library`）
+
+按用户授权写入，写前拉回 `metadata.db`（MD5 `e12b36d4…`）并记录 620 个文件 MD5。agent 用 helper 复用步骤 06 的流程完成添加向导、系统选择器授权、同步与选择 `阅读状态（#read_status）`。
+
+- 写后同步失败：书 7（空值 → 是）推送成功，紧接同步在注入下失败；待写入标记随同步结束消失，导入仍为原值；任务页同等的手动重试（`TaskControl.RETRY`）经生产协调器完成同步，导入为已读，源版本（全文 SHA-256）仍等于推送结果。**OK (1 test)**。
+- 推送阶段真实进程终止：书 8（是 → 否）在第 ③ 步改名前停住，SIGKILL 后源目录只有 `metadata.db.calibrecloud-new`（`79f6302e…`）与 `-old`，没有 `metadata.db`。`am start` 正常打开后，队列自动重跑：`write_snapshot` 收尾把 `-new` 改回 `metadata.db`、删除 `-old`，`write_prepare` 发现已是目标值直接完成（没有推送）；`metadata.db` 散列仍为 `79f6302e…`。verify **OK (1 test)**（首次因断言空目录失败，见上，改为检查无文件后通过）。
+- 栏目改名／删除：容器中用 Calibre 9.14 把当前数据库的 `read_status` 改名为 `read_status_renamed`（`set_custom_column_metadata`），或 `calibredb remove_custom_column` 删除，推回测试副本（模拟桌面修改，未同步）。界面对书 5 “标为已读”：两次任务均在 `write_prepare` 以 `failed:invalid_column` 失败，没有推送，源散列保持推入值；书 5 位置出现 `read_failed`（描述“《李尔王》的阅读状态未能写入书库”），系统通知标题“阅读状态未写入书库”、正文“1 本书的阅读状态未写入：已读栏目失效。可在任务页重试，或重新标记。”（通知权限由 agent 以 `pm grant` 授予 debug 包）；切到“更多”再回图书馆后感叹号消失。随后推回改栏目前的数据库。
+- 无关内容：本轮写入后的数据库对原库（`calibre_db_diff.py`）只有书 7、8 的 `custom_column_1` 新行（1 与显式 0）、`books.last_modified` 与该表序号；第二个布尔栏目 `#retired` 不变；其余 619 个文件 MD5 不变。`integrity_check` 为 `ok`，`calibredb list` 读回书 7 True、书 8 False。
+- 同数字 ID 的两个书库（与下面的 OneDrive 书库同时列入）：本地书 1 提交后切到 OneDrive，OneDrive 页面无本地待写入，本地任务等待 `INACTIVE_LIBRARY`、本地源版本不变；OneDrive 书 1 写入完成；切回本地后本地任务执行，只改本地书 1（差异仅该书的上述行与 `metadata_dirtied`），OneDrive 版本不变。**OK (1 test)**。
+- 恢复：推回原 `metadata.db`，620 个文件 MD5 与写前完全一致，无 `metadata.db.calibrecloud-*`。
+
+本地后端不需要网络，离线提交不适用；点击后的空心标记与界面路径沿用步骤 06。
+
+### OneDrive 测试书库（`library-a`）
+
+用户登录、添加并同步 `library-a`、选择已读栏目，并允许写入。
+
+- 写后同步失败：**OK (1 test)**；手动重试同步只读取，cTag 仍为推送结果。
+- 推送阶段真实进程终止：书 5（→ 是）在 Graph 接受上传后、任务完成前停住，SIGKILL 后正常打开，队列重跑一轮，`write_prepare` 已是目标值直接完成，没有再次上传；verify 核对 cTag 等于被终止推送的结果、紧接同步完成、导入为已读：**OK (1 test)**。
+- 离线界面路径（用户执行物理断网）：用户开启飞行模式，在图书馆页对两本书标记并撤销，确认离线时显示空心标记、已读筛选不变，联网后空心标记保持到写后同步结束再显示导入状态，回复“通过”。agent 重连后核对队列：两轮离线操作各形成**一个**写回任务，各含 2 本书（任务开始前的点击并入，同一本书取最后一次目标），均一轮完成并紧接同步完成。
+
+### 日志与文案
+
+- 本轮应用进程 logcat 无 `http`、`content://`、`/sdcard`、`/storage`、令牌字段、测试目录名或书名；写回日志只有 task ID、阶段、轮次、书籍数、结果分类与耗时。
+- 主代码中的中文字面量只出现在 KDoc 注释；写回相关文案（按钮、斜幅描述、通知、任务阶段与结果、说明）均来自 `strings.xml`。
+
+### 清理
+
+Gradle 全量测试结束后 debug 与测试包已卸载，设备上只保留正式应用（未触碰）。本地测试副本已恢复原状；`library-a` 保持写后状态。产物在被忽略的 `app/build/verification/phase4-step07/`。
+
+### 未完成
+
+无已知未完成项。用户确认离线界面路径通过并验收本步（2026-10-11）。
