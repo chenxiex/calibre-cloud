@@ -42,8 +42,13 @@ class SourceSnapshot(val file: File, val version: FileVersion)
 /** The user action that lets work blocked by an authorization failure continue. */
 enum class Reauthorization { SIGN_IN, DIRECTORY_GRANT }
 
-/** Why read status cannot be written back to a library (R15); shown where marking is disabled. */
-enum class WriteBlock { NOT_IMPLEMENTED }
+/**
+ * Why read status cannot be written back to a library (R15); shown where marking is disabled.
+ * AUTHORIZATION_REQUIRED: the library must be granted again; READ_ONLY_GRANT: the grant lacks write
+ * access; UNSUPPORTED_PROVIDER: the source cannot guarantee every operation the commit needs;
+ * SOURCE_UNAVAILABLE: metadata.db cannot be reached now; NOT_IMPLEMENTED: the backend has no commit yet.
+ */
+enum class WriteBlock { AUTHORIZATION_REQUIRED, READ_ONLY_GRANT, UNSUPPORTED_PROVIDER, SOURCE_UNAVAILABLE, NOT_IMPLEMENTED }
 
 /** Result of a push whose version precondition was checked by the source. */
 sealed interface PushOutcome {

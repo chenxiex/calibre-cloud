@@ -67,6 +67,7 @@
     <string name="task_error_corrupt">文件内容损坏或不完整</string>
     <string name="task_error_unsupported">当前后端不支持该操作</string>
     <string name="task_error_io">文件读写失败</string>
+    <string name="task_error_leftover">书库根目录有无法确认来源的 metadata.db.calibrecloud-new 或 metadata.db.calibrecloud-old，请手动处理后重试</string>
     <string name="task_notifications_on">系统通知：开启</string>
     <string name="task_notifications_off">系统通知：关闭</string>
     <string name="task_notifications_request">允许任务通知</string>

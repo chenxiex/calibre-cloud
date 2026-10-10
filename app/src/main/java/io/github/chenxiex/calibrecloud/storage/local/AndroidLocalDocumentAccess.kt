@@ -17,7 +17,10 @@ import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import java.io.File
 import java.io.InputStream
 
-/** AOSP external-storage documents only; no source filesystem conversion or writable open mode. */
+/**
+ * AOSP external-storage documents only, without converting to source filesystem paths. Write operations
+ * are for the read status commit only and need a persisted grant with write access.
+ */
 class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
     private val resolver = context.contentResolver
     private val permissions = AndroidDirectoryPermissions(context)
@@ -91,6 +94,52 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
         }
     }
 
+    override fun writeGranted(treeUri: String): Boolean =
+        permissions.localLocation(treeUri) != null && permissions.persistedGrant(treeUri).writable
+
+    override fun create(treeUri: String, parentId: String, name: String): LocalDocument {
+        requireWriteGrant(treeUri)
+        requireWithinRoot(treeUri, parentId)
+        val created = DocumentsContract.createDocument(resolver, documentUri(treeUri, parentId), "application/octet-stream", name)
+            ?: throw java.io.IOException()
+        return document(treeUri, DocumentsContract.getDocumentId(created))
+    }
+
+    override fun rename(treeUri: String, documentId: String, name: String): LocalDocument {
+        requireWriteGrant(treeUri)
+        requireWithinRoot(treeUri, documentId)
+        // null means the document keeps its URI under the new name.
+        val renamed = DocumentsContract.renameDocument(resolver, documentUri(treeUri, documentId), name)
+        return document(treeUri, renamed?.let { DocumentsContract.getDocumentId(it) } ?: documentId)
+    }
+
+    override fun delete(treeUri: String, documentId: String) {
+        requireWriteGrant(treeUri)
+        requireWithinRoot(treeUri, documentId)
+        if (!DocumentsContract.deleteDocument(resolver, documentUri(treeUri, documentId))) throw java.io.IOException()
+    }
+
+    override fun openWrite(treeUri: String, documentId: String): java.io.FileOutputStream {
+        requireWriteGrant(treeUri)
+        requireWithinRoot(treeUri, documentId)
+        // "rwt" truncates on the supported provider; "w" was observed not to (app/verification/phase-4.md).
+        val descriptor = resolver.openFileDescriptor(documentUri(treeUri, documentId), "rwt") ?: throw java.io.IOException()
+        return ParcelFileDescriptor.AutoCloseOutputStream(descriptor)
+    }
+
+    private fun documentUri(treeUri: String, documentId: String) = DocumentsContract.buildDocumentUriUsingTree(treeUri.toUri(), documentId)
+
+    private fun document(treeUri: String, documentId: String): LocalDocument {
+        requireWithinRoot(treeUri, documentId)
+        return query(documentUri(treeUri, documentId)).singleOrNull()?.takeIf { it.id == documentId }
+            ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
+    }
+
+    private fun requireWriteGrant(treeUri: String) {
+        requireGrant(treeUri)
+        if (!permissions.persistedGrant(treeUri).writable) throw SecurityException()
+    }
+
     /** The selected provider and a readable persisted grant; checked on every access without querying the root document. */
     private fun requireGrant(treeUri: String): LibraryLocation.Local {
         val location = permissions.localLocation(treeUri)
@@ -121,9 +170,13 @@ class AndroidLocalDocumentAccess(context: Context) : LocalDocumentAccess {
                 while (it.moveToNext()) {
                     val id = it.getString(0) ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
                     val name = it.getString(1) ?: throw LocalSourceException(StorageErrorKind.UNSUPPORTED_OPERATION)
+                    val flags = it.getInt(3)
                     add(LocalDocument(id, name, it.getString(2) == DocumentsContract.Document.MIME_TYPE_DIR,
-                        it.getInt(3) and DocumentsContract.Document.FLAG_SUPPORTS_WRITE != 0,
-                        if (it.isNull(4)) null else it.getLong(4)))
+                        flags and DocumentsContract.Document.FLAG_SUPPORTS_WRITE != 0,
+                        if (it.isNull(4)) null else it.getLong(4),
+                        renamable = flags and DocumentsContract.Document.FLAG_SUPPORTS_RENAME != 0,
+                        deletable = flags and DocumentsContract.Document.FLAG_SUPPORTS_DELETE != 0,
+                        creatable = flags and DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE != 0))
                 }
             }
         }

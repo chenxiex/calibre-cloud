@@ -176,3 +176,65 @@ adb shell am instrument -w -r -e class io.github.chenxiex.calibrecloud.metadata.
 ### 未完成
 
 真实本地与 OneDrive 推送、三步重命名收尾、真实冲突与真实进程终止在步骤 04、05、07 验证；界面入口与待写入显示在步骤 06。用户共同验收尚未进行。
+
+## 步骤 04：本地三步重命名提交（2026-10-10）
+
+对应 R15 的本地推送（Q78）、AC04 的“本地推送在各步之间中断后，下一轮收尾且 `metadata.db` 始终完整”、R18 的残留文件失败原因。规则见[本地约束](../src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md#已读写回提交)。
+
+### 改动
+
+- `LocalDatabaseCommit`：三步重命名、每步前写入推送日志、按日志与文件内容收尾；`LocalLibrarySource` 的 `writeCapability`、`pushDatabase`、`finishPendingPush` 委托给它。
+- `LocalDocumentAccess` 增加 `writeGranted`、`create`、`rename`、`delete`、`openWrite`（`rwt`），以及文档的重命名／删除／创建 flags；`AndroidLocalDocumentAccess` 的写操作要求持久授权含写入。
+- `WriteBlock` 增加 `AUTHORIZATION_REQUIRED`、`READ_ONLY_GRANT`、`UNSUPPORTED_PROVIDER`、`SOURCE_UNAVAILABLE`；`StorageErrorKind.LEFTOVER_FILES`（编码 `leftover_files`，任务页文案列出两个临时文件名）。
+- 处理器：推送日志存在期间保留 `*.staged.db`，供收尾判断残留的 `-new` 是否为本任务未写完的文件。
+
+与计划的工程差异：
+
+- 推送中途的异常（非进程终止）当场执行与下一轮相同的收尾，再按结果不明抛出可重试失败；当场创建的 `-new` 视为自建，不必核对内容。
+- 第 ② 步只按名称定位 `-wal`、`-journal`、`-shm`，不再列目录查找 `-mj*`。
+- 无法识别的日志内容只在 `metadata.db` 存在且两个临时名都不存在时清除，否则以 `LEFTOVER_FILES` 失败。
+
+### 自动检查
+
+```bash
+./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug :app:assembleRelease :app:lintRelease
+```
+
+结果 `BUILD SUCCESSFUL`，JVM **161 tests、0 failures、0 errors、0 skipped**；lint debug／release 均 0 error、5 warning（`AndroidGradlePluginVersion`、`NewerVersionAvailable`，与步骤 03 相同）。
+
+`LocalDatabaseCommitTest`（8 项，JVM，目录 fixture 模拟系统提供方：ID 即名称、改名到已存在名字时另取 `name (1)`、截断写入）：
+
+- 正常推送：`metadata.db` 等于暂存文件，根目录只剩原有文件，日志依次为 `NEW_WRITING`、`NEW_WRITTEN`、`OLD_RENAMED`、`NEW_RENAMED`、清除。
+- 在每一次提供方操作（创建、每个写入块、两次重命名、删除）前注入进程终止（不被任何代码捕获的 `Error`）：终止时 `metadata.db` 为完整基底或暂存，或缺失而完整的 `-old`／`-new` 仍在；下一轮收尾后无临时文件、日志清除；回滚的轮次再次推送成功。
+- 在同样位置注入 I/O 失败：当场收尾，`metadata.db` 完整、无临时文件、日志清除，报告可重试的 `LOCAL_IO`。
+- 第 ② 步前源被改动、出现非空 WAL、出现 SHM 或 `metadata.db` 消失：`Conflict`，只删除自建的 `-new`，其它文件不变；空 WAL 不视为改动。
+- 没有日志时已存在 `-new` 或 `-old`：`LEFTOVER_FILES` 不重试，未执行任何提供方写操作；有日志但 `-new` 不是暂存前缀、`-old` 不是基底：不动文件并失败。
+- 写入中断留下的部分 `-new` 依据暂存文件识别并删除；暂存文件不在时只识别完整文件。
+- 改名时目标名被他人占用（提供方另取名称）：撤回改名，`metadata.db` 仍为基底，他人文件不动。
+- 写回能力：读写授权与 flags 齐全为可写；缺 flags、只读授权、授权失效、`metadata.db` 缺失、未列入授权分别给出对应原因。
+
+### 真机平台测试
+
+设备 PA6（无线调试 `192.168.12.156:41623`），经 Gradle `connectedDebugAndroidTest` 安装 debug 与测试包定向执行：
+
+- `ReadStatusWriteTaskHandlerTest`（处理器丢弃规则变化后的回归）：**10/10 通过**。
+- `LocalReadStatusCommitDeviceTest`：未启用时 3 项均跳过（只确认可加载，不计为通过）。
+
+Gradle 结束后已卸载 debug 与测试包，设备上只保留正式应用（未触碰）。
+
+### 真实 SAF 写入（PA6 本地测试副本）
+
+用户授权写入 `/sdcard/Download/calibre-step04-test-library`（286 本扩展库，测试后恢复）。
+
+- 准备：先拉回原 `metadata.db`（MD5 `e12b36d4…`）并记录全部 620 个文件的 MD5。`installDebug`／`installDebugAndroidTest` 后，agent 用 helper 按资源 ID 操作：添加向导选本地目录，系统选择器（`com.android.documentsui`）中依次进入 PA6 → Download → 该目录，确认框为“要允许Calibre Cloud Debug访问 calibre-step04-test-library 中的文件吗？”，点“允许”；完成向导后自动同步，书籍出现；在“已读栏目”页选择 `阅读状态（#read_status）`。几次点击后置条件超时（页面实际已切换），均先核对当前页面再继续，没有重复点击。
+- 执行：`adb shell am instrument -w -r -e localWrite true -e localConflict true -e class …LocalReadStatusCommitDeviceTest …debug.test/…AwakeTestRunner`，**OK (3 tests)**：
+    - 经生产服务、队列与处理器对书 1 依次标已读、标未读，每次写回完成、紧接同步完成、导入显示目标值、无临时文件。
+    - 对书 4 推送到第 ③ 步前测试侧注入中断（不被捕获的 `Error`，不是真实进程终止）：真实 SAF 上 `metadata.db` 不存在，`-old` 等于基底、`-new` 等于暂存；下一轮收尾后 `metadata.db` 等于暂存，临时文件均删除，同步后导入为目标值。
+    - 在第 ② 步核对前以测试侧写入把源替换为另一写入者的数据库（书 6 改值）：`Conflict`，源保持另一写入者的内容，自建 `-new` 已删除；随后经队列对书 5 写回，结果两处修改都保留。
+- 容器复核（Calibre 9.14，`calibre_db_diff.py`）：每次写回只改目标书的 `custom_column_1` 行（新 id，“是”为 1、“否”为显式 0）、`books.last_modified`、`metadata_dirtied`（书已在其中时不变）与 `sqlite_sequence` 的该表序号，与步骤 02 及 Calibre 自身写入的差异一致；冲突后的结果同时含书 5、书 6 的修改。最终库对原库只差书 1、4、5、6 的上述行。拉回整个测试副本后，最终库与原库的 `calibredb check_library` 均无问题条目；`calibredb list` 读回书 1、4 为 False，书 5、6 为 True。除 `metadata.db` 外 619 个文件 MD5 与写前完全一致，根目录无 `metadata.db.calibrecloud-*` 残留。
+- 恢复与清理：`adb push` 原 `metadata.db` 回测试副本，MD5 复核为 `e12b36d4…`。已卸载 debug 与测试包（`Success`），其外部私有目录随之删除；设备上只保留正式应用（未触碰）。拉回的数据库与界面结果在被忽略的 `app/build/verification/phase4-step04/`。
+
+### 未完成
+
+- 真实进程终止（`am kill`）后的重跑与界面路径在步骤 07 联验。
+- 用户共同验收尚未进行。

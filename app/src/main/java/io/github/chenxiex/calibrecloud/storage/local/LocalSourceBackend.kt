@@ -10,6 +10,7 @@ import io.github.chenxiex.calibrecloud.model.SourceFileLocator
 import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
@@ -20,10 +21,18 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
-/** Provider metadata is a locator/capability/size hint, never content-version or integrity evidence. */
-data class LocalDocument(val id: String, val name: String, val directory: Boolean, val writable: Boolean, val sizeBytes: Long? = null)
+/**
+ * Provider metadata is a locator/capability/size hint, never content-version or integrity evidence.
+ * [renamable], [deletable] and, for a directory, [creatable] are the provider's document flags.
+ */
+data class LocalDocument(val id: String, val name: String, val directory: Boolean, val writable: Boolean, val sizeBytes: Long? = null,
+    val renamable: Boolean = false, val deletable: Boolean = false, val creatable: Boolean = false)
 
-/** Read-only source surface. Implementations must verify the actual grant and selected local provider. */
+/**
+ * Source surface. Implementations must verify the actual grant and selected local provider. The write
+ * operations exist only for the read status commit ([LocalDatabaseCommit]) and require a grant with
+ * write access; every other caller only reads.
+ */
 interface LocalDocumentAccess {
     fun root(treeUri: String): LocalDocument
     fun children(treeUri: String, parentId: String): List<LocalDocument>
@@ -35,6 +44,15 @@ interface LocalDocumentAccess {
     fun openRead(treeUri: String, documentId: String): InputStream
     /** Must seek directly, without reading/skipping the prefix. null for non-seekable providers. */
     fun openRange(treeUri: String, documentId: String, offset: Long): InputStream? = null
+    /** Whether the persisted grant includes write access. */
+    fun writeGranted(treeUri: String): Boolean = false
+    /** Creates an empty file in [parentId]; the provider may choose another name, so callers check [LocalDocument.name]. */
+    fun create(treeUri: String, parentId: String, name: String): LocalDocument = throw UnsupportedOperationException()
+    /** Renames a document; the provider may choose another name when [name] exists, so callers check the result. */
+    fun rename(treeUri: String, documentId: String, name: String): LocalDocument = throw UnsupportedOperationException()
+    fun delete(treeUri: String, documentId: String): Unit = throw UnsupportedOperationException()
+    /** Truncating write; the caller syncs through the descriptor before closing. */
+    fun openWrite(treeUri: String, documentId: String): FileOutputStream = throw UnsupportedOperationException()
 }
 
 class LocalSourceException(val kind: StorageErrorKind) : IOException()
@@ -71,6 +89,9 @@ class LocalSourceBackend(
     private val validator: SnapshotValidator,
     private val ioDispatcher: CoroutineDispatcher,
 ) {
+    /** The read status commit (R15); the only source write. */
+    val commit = LocalDatabaseCommit(documents, ioDispatcher)
+
     suspend fun resolve(treeUri: String, path: RelativeSourcePath): LocalSourceResult<LocalSourceFile> = operation {
         val document = resolveDocument(treeUri, path)
         LocalSourceFile(SourceFileLocator.Local(document.id), document.writable)

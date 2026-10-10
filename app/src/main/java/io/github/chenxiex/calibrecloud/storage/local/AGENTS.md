@@ -1,6 +1,6 @@
 # 本地目录授权开发约束
 
-本目录遵循 [存储约束](../AGENTS.md)；覆盖 R04、R07、R20、R31–R35 的平台授权入口。授权组件只管理每个书库的持久目录授权，不分配书库身份，不读取或枚举源文件（只查询所选目录本身的显示名）。显式候选任务通过 `LocalSourceBackend` 读取源并取得只读私有快照；快照交给元数据模块验证 Calibre 结构并原子导入／激活书库，后端自身不解析完整元数据。
+本目录遵循 [存储约束](../AGENTS.md)；覆盖 R04、R07、R20、R31–R35 的平台授权入口。授权组件只管理每个书库的持久目录授权，不分配书库身份，不读取或枚举源文件（只查询所选目录本身的显示名）。显式候选任务通过 `LocalSourceBackend` 读取源并取得私有快照，唯一的源写入是已读写回提交（见下文）；快照交给元数据模块验证 Calibre 结构并原子导入／激活书库，后端自身不解析完整元数据。
 
 ## 授权边界
 
@@ -24,10 +24,17 @@ JVM 测试使用授权元数据适配器；书库页与向导的授权释放规�
 
 ## 显式源读取与快照
 
-- `AndroidLocalDocumentAccess` 仅支持已识别的系统 external-storage 提供方，每次访问复核实际持久读取授权。只使用 tree 内 document URI 和只读流，不转换源绝对路径，不提供源写入 API。按显示名逐级解析并复核外部存储文档 ID 根范围，拒绝重复名称、目录冒充文件及树外定位。
+- `AndroidLocalDocumentAccess` 仅支持已识别的系统 external-storage 提供方，每次访问复核实际持久读取授权。只使用 tree 内 document URI，不转换源绝对路径；创建、重命名、删除和截断写入只供已读写回提交使用，并要求持久授权含写入。按显示名逐级解析并复核外部存储文档 ID 根范围，拒绝重复名称、目录冒充文件及树外定位。
 - 单格式副本续传通过只读文件描述符探测 `lseek`，定位成功后仅提供断点之后的流；不可寻址提供方返回不支持范围读取，由任务层重新完整传输，不用读取并跳过前缀伪装续传。
 - 内容版本使用完整流 SHA-256，不依赖提供方的时间／大小字段；封面（不超过封面编码上限）只读取一次，边读边算哈希，版本即所交付字节的摘要。每次 SAF 访问都核对所选提供方与持久读授权，只在 `root()` 时查询根文档。系统外部存储提供方的文档 ID 为“卷:相对路径”，按相对路径直接拼出 ID 只查询目标文档，不逐级列目录；不存在时提供方返回空结果或拒绝该 ID，均视为源缺失；提供方报告的文档大小只用于副本进度与下载前空间预检。文件可写标志仅表达提供方能力，不代表已授权写回或安全提交能力。
 - `LocalSourceBackend.acquireSnapshot` 为每次候选任务创建独立私有暂存和不可变文件代次；复制 hash 必须与第二次完整源读取一致，并复查 `metadata.db` 文档 ID 和事务日志。非空 WAL／rollback journal、SHM 及 master journal 无一致快照获取路径时拒绝同步；空 WAL／journal 实际读流确认。此协议不宣称任意并发写入安全。
 - `AndroidSnapshotValidator` 只对私有副本执行 `OPEN_READONLY` 和 SQLite `integrity_check`；禁用默认损坏文件删除处理，不进行修复、迁移、checkpoint 或源库升级。校验和发布前再次检查队列控制，取消或失败只清理本次暂存，保留之前成功快照。
 - 快照按候选任务 UUID 隔离，不分配 LibraryId 或激活书库；源缺失、授权撤销、版本冲突、损坏内容和本地 I/O 等失败用结构化原因返回，不携带路径、URI 或异常原文。
 - JVM 后端测试使用只读文档适配器验证解析、双读、日志、失败保留与控制中断；`LocalSnapshotIntegrityTest` 使用真实 Android SQLite 验证私有完整性检查。两者不替代目标设备系统 SAF 获取与源内容不变验证，实际证据在第二阶段验证记录就近维护。
+
+## 已读写回提交
+
+- [LocalDatabaseCommit](LocalDatabaseCommit.kt) 实现 R15／Q78 的三步重命名：在书库根目录创建 `metadata.db.calibrecloud-new`，以 `rwt` 写入、`sync()` 并重读核对暂存散列；核对 `metadata.db` 仍为基底散列且没有非空 `-wal`／`-journal`、没有 `-shm`（否则为冲突，删除自建的 `-new`）后改名为 `metadata.db.calibrecloud-old`；把 `-new` 改名为 `metadata.db` 并核对散列；`-old` 仍为基底散列时删除。系统提供方改名到已存在的名字会另取名称，因此只改名到确认不存在的名字，结果名称不符即撤回并失败。每步前把阶段、基底与暂存散列及私有暂存文件路径写入任务的 `PushJournal`。
+- 收尾只依据日志和文件内容：缺 `metadata.db` 时 `-new` 等于暂存散列则改回，否则 `-old` 等于基底则改回；残留 `-new` 只在内容是暂存文件前缀（暂存文件不在时须等于暂存散列）时删除，残留 `-old` 只在等于基底时删除；其它情况不动文件，以 `LEFTOVER_FILES` 失败。没有日志时发现这两个名字的文件同样失败而不触碰。推送中途的异常当场执行同样的收尾后按结果不明重试一整轮；进程终止则由下一轮的 `finishPendingPush` 收尾。所有文档按名称直接定位，不列目录。
+- `writeCapability` 只查询提供方：未列入授权为 `AUTHORIZATION_REQUIRED`，授权无写入为 `READ_ONLY_GRANT`，根目录不支持创建或 `metadata.db` 缺少写入／重命名／删除 flags 为 `UNSUPPORTED_PROVIDER`，`metadata.db` 不可达为 `SOURCE_UNAVAILABLE`。
+- JVM `LocalDatabaseCommitTest` 以目录 fixture 模拟系统提供方（ID 即名称、同名改名另取名称），在每次提供方操作处注入进程终止或 I/O 失败。真实 SAF 的写入、中断收尾与冲突由 `LocalReadStatusCommitDeviceTest` 验证：只能在用户指定并以读写授权的专用测试副本上，以 `-e localWrite true` 显式启用；冲突用例会替换源数据库，另需 `-e localConflict true`。结果见[第四阶段验证记录](../../../../../../../../../verification/phase-4.md)。

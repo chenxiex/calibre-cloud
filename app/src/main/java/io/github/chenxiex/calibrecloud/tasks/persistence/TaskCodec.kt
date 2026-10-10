@@ -247,6 +247,7 @@ internal object TaskCodec {
         StorageErrorKind.SOURCE_MISSING -> "source_missing"
         StorageErrorKind.INCOMPATIBLE_DATABASE -> "incompatible_database"
         StorageErrorKind.VERSION_CONFLICT -> "version_conflict"
+        StorageErrorKind.LEFTOVER_FILES -> "leftover_files"
         StorageErrorKind.INSUFFICIENT_SPACE -> "insufficient_space"
         StorageErrorKind.CORRUPT_CONTENT -> "corrupt_content"
         StorageErrorKind.UNSUPPORTED_OPERATION -> "unsupported_operation"

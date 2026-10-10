@@ -12,7 +12,7 @@ import java.util.UUID
  * [LibrarySource] over a granted SAF tree. The version is the SHA-256 of all bytes, so it is also the
  * content digest and is read again before publication. A cover is read once and hashed as it is read. Every downloaded copy is checked after each
  * import, a missing path is missing at once, nothing needs a network, and a lost grant waits for the
- * directory to be granted again. [treeUri] returns the grant the library at [LibraryLocation.Local] was
+ * directory to be granted again. Read status is written back by [LocalDatabaseCommit]. [treeUri] returns the grant the library at [LibraryLocation.Local] was
  * listed with, or null when it is not listed.
  */
 class LocalLibrarySource(
@@ -65,13 +65,19 @@ class LocalLibrarySource(
         return SourceSnapshot(snapshot.file, snapshot.version)
     }
 
-    /** Write-back arrives in a later step of phase 4; until then no library is writable. */
-    override suspend fun writeCapability(location: LibraryLocation) = WriteBlock.NOT_IMPLEMENTED
+    /** A library that is not listed with a grant must be granted again before it can be written. */
+    override suspend fun writeCapability(location: LibraryLocation): WriteBlock? {
+        val tree = (location as? LibraryLocation.Local)?.let { treeUri(it) } ?: return WriteBlock.AUTHORIZATION_REQUIRED
+        return source.commit.capability(tree)
+    }
 
+    /** Three renames in the library root, see [LocalDatabaseCommit]. */
     override suspend fun pushDatabase(location: LibraryLocation, staged: java.io.File, stagedSha256: String, base: FileVersion,
-        journal: PushJournal): PushOutcome = throw SourceFailure(StorageErrorKind.UNSUPPORTED_OPERATION)
+        journal: PushJournal): PushOutcome = source.commit.push(tree(location), staged, stagedSha256, base, journal)
 
-    override suspend fun finishPendingPush(location: LibraryLocation, journal: PushJournal) {}
+    override suspend fun finishPendingPush(location: LibraryLocation, journal: PushJournal) {
+        if (journal.read() != null) source.commit.finish(tree(location), journal)
+    }
 
     private suspend fun tree(location: LibraryLocation): String =
         (location as? LibraryLocation.Local)?.let { treeUri(it) } ?: throw SourceFailure(StorageErrorKind.AUTHORIZATION_EXPIRED)

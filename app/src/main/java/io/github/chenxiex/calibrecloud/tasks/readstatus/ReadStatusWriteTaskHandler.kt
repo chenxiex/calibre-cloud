@@ -192,10 +192,16 @@ class ReadStatusWriteTaskHandler(
     private fun directory(id: TaskId) = File(filesDir, "write-staging/${id.value}")
     private fun roundFile(id: TaskId, generation: UUID, name: String) = File(directory(id), "$generation.$name")
 
-    /** Deletes the round's files, never following links; the push journal stays for the next round. */
+    /**
+     * Deletes the round's files, never following links. The push journal stays for the next round and,
+     * while it exists, so does the staged database it may name: finishing an interrupted push can need
+     * it to recognise its own partial upload.
+     */
     private fun discardRound(id: TaskId) {
+        val pushPending = File(directory(id), JOURNAL).isFile
         directory(id).listFiles().orEmpty().forEach { file ->
-            if (file.name != JOURNAL && !Files.isSymbolicLink(file.toPath()) && file.isFile) file.delete()
+            if (file.name != JOURNAL && !(pushPending && file.name.endsWith(".staged.db")) &&
+                !Files.isSymbolicLink(file.toPath()) && file.isFile) file.delete()
         }
     }
 
