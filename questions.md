@@ -38,7 +38,7 @@
 
 用户自行完成微软应用注册，README 提供指引；fork 开发者使用自己的 client ID 和正式／debug 回调 URI。缺少配置时仍可使用本地后端，原生授权不配置 client secret。
 
-**规格位置**：R08、README 的 OneDrive 应用注册。
+**规格位置**：R08、贡献指南的 OneDrive 应用注册。
 
 ## 二、数据写回与存储边界
 

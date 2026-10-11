@@ -91,7 +91,7 @@
 
 使用全球 Microsoft Graph 服务和个人账号的交互式授权；采用公开原生客户端的授权码与 PKCE 流程，不在 APK 中放置 client secret。登录通过系统浏览器／兼容授权界面完成，令牌由应用私有安全存储管理，不纳入普通缓存清理。[微软原生客户端授权流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
 
-client ID 和每个构建变体的回调 URI 可由 fork 开发者配置，不依赖原维护者的注册或凭据。缺少配置时仍可构建和使用本地后端，OneDrive 入口说明如何配置；错误回调配置明确报错。注册入口和构建配置契约见 [README](README.md#onedrive-应用注册)。
+client ID 和每个构建变体的回调 URI 可由 fork 开发者配置，不依赖原维护者的注册或凭据。缺少配置时仍可构建和使用本地后端，OneDrive 入口说明如何配置；错误回调配置明确报错。注册入口和构建配置契约见 [贡献指南](contribution-guide.md#onedrive-应用注册)。
 
 后续工程读取已被 Git 忽略的 `local.properties` 中 `onedrive.clientId`、`onedrive.redirectUri` 和 `onedrive.debugRedirectUri`；分别用于客户端标识、正式版回调和独立 debug 回调。三者缺失或不完整时不启用 OneDrive，不能要求用户提供 client secret；原生授权使用个人账号范围 `consumers`，请求 `openid`、`offline_access` 和 Graph 委托范围 `Files.ReadWrite`。回调接收配置须按变体与属性同步生成，不能只改变浏览器请求却保留另一个 scheme 的接收器。
 
@@ -454,7 +454,7 @@ OneDrive 按记录的路径请求书籍格式或封面得到“不存在”时�
 | Q01 | 本文的编号、验收追踪与 AGENTS.md 的 SDD 流程 |
 | Q02–Q03 | R01、R09、R13：Android 11 / API 30、目标设备、Calibre 样本及动态栏目 |
 | Q04 | R03、R12：一个当前配置，切换隔离、保留旧缓存和兜底清理 |
-| Q05 | R08、README：个人 OneDrive、自行注册和构建属性 |
+| Q05 | R08、贡献指南：个人 OneDrive、自行注册和构建属性 |
 | Q06–Q08 | R13–R16：尽力写回、任务意图、写后同步、无本地已读覆盖（任务组织、重试与写后同步方式由 Q75–Q78 修订） |
 | Q09–Q10 | R06–R07、R28：SAF 源访问、本地副本、统一文件提供 |
 | Q11 | R12、R24、R26–R28、AC06–AC07：格式优先级、状态、大小、批量与打开；移除下载仅影响提交时格式筛选范围内的副本及相关任务；未知作者／大小不显示或留空 |

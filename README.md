@@ -1,40 +1,62 @@
 # Calibre Cloud
 
-用于从不同存储后端上的 Calibre 书库下载元数据与书籍的 Android 应用。
+**把整个 Calibre 书库装进你的墨水屏阅读器。**
 
-开发环境配置及缓存、SDK 扩展、设备连接方法见 [.github/.devcontainer/README.md](.github/.devcontainer/README.md)。Android 工程的构建与产物说明见 [app/README.md](app/README.md)，实际验证结果见 [第一阶段验证记录](app/verification/phase-1.md)、[第二阶段验证记录](app/verification/phase-2.md)、[第三阶段验证记录](app/verification/phase-3.md)、[第四阶段验证记录](app/verification/phase-4.md) 和 [第五阶段验证记录](app/verification/phase-5.md)（首版验收汇总）。后台任务与启动同步使用方法见[Android 工程说明](app/README.md#任务与后台)，步骤 09 验收流程与结果见[步骤 09 指南](app/verification/step-09-device-guide.md)。
+Calibre Cloud 是一款为墨水屏设备打造的 Android 书库应用。它直接读取你放在设备存储、SD 卡或个人 OneDrive 里的 Calibre 书库，让你像在电脑上一样浏览、搜索和筛选全部藏书。只需轻点一本书，它就会下载下来，交给你喜欢的阅读器打开。
 
-## 项目文档
+<p align="center">
+    <img src="docs/screenshots/grid-read.png" width="32%" alt="图书馆网格视图，封面右上角标出已读">
+    <img src="docs/screenshots/list-read.png" width="32%" alt="图书馆列表视图，显示标题、作者、已读标签和文件大小">
+    <img src="docs/screenshots/series.png" width="32%" alt="按丛书分类的文件夹视图">
+</p>
 
-- [spec.md](spec.md)：已通过用户验收的首版需求、模块契约、状态与验收条件，是后续开发的唯一需求与验收基线。
-- [AGENTS.md](AGENTS.md)：轻量 SDD 流程、协作、文件写入和验证约定。
-- [questions.md](questions.md)：当前已确认结论，以及后续需要填写的阻塞问题。
-- [Android 真机操作技能](.agents/skills/android-device-verification/SKILL.md)：可复用 ADB helper、页面流程与轻量设备操作 agent。
+[**⬇ 从 GitHub Release 下载最新版本**](https://github.com/chenxiex/calibre-cloud/releases/latest)
 
-## OneDrive 应用注册
+## 为什么选择 Calibre Cloud
 
-首版只支持全球服务的个人 OneDrive 账号。开发者及 fork 维护者使用自己的微软应用注册；本地后端不需要这些配置。Android 工程已按变体读取以下属性并生成回调配置；已接入个人账号浏览器授权，真实登录验收状态见验证记录。详细校验和构建矩阵见 [工程配置说明](app/README.md#onedrive-配置)。
+- **为墨水屏而生**：黑白高对比界面，简洁无动画，用分页代替滚动，适合墨水屏刷新。
+- **书库原样即用**：无需架设服务器，也无需转换格式。只要选中含有 `metadata.db` 的 Calibre 书库目录，标题、作者、丛书、标签、封面和自定义栏目都会自动导入。
+- **本地与云端，同样丝滑**：支持设备存储、SD 卡上的书库，也支持个人 OneDrive 中的书库；可以添加多个书库，随时切换。云端元数据自动缓存，响应就如本地般迅速。
+- **用你喜欢的阅读器**：书籍通过系统交给 KOReader 等已安装的阅读器打开，不绑定内置阅读器。底栏的“继续阅读”可一键回到上次打开的书。
+- **按需下载，省空间**：只有打开的书才会下载到本机，你也可以多选下载，或随时按格式移除已下载的副本，书库中的源文件不受影响。
+- **已读状态与 Calibre 同步**：选好书库中记录已读状态的“是／否”栏目后，可以在手机上批量标为已读或未读，结果写回书库，回到电脑上的 Calibre 也能看到。
 
-1. 在 Azure 门户的 Microsoft Entra ID／[Entra 管理中心](https://entra.microsoft.com/)进入“应用注册 → 新注册”，选择“仅个人 Microsoft 账号”，注册后记录“应用程序（客户端）ID”。需要具备所选租户的应用注册权限，具体步骤见[微软注册说明](https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app)。
-2. 为正式版和 debug 版选择各自独立、属于自己的回调 scheme，例如 `org.example.calibrecloud://auth/oauth2redirect` 与 `org.example.calibrecloud.debug://auth/oauth2redirect`。将示例前缀换成自己的值，在“身份验证 → 添加平台 → 移动和桌面应用”中登记两个自定义重定向 URI。本项目使用 AppAuth，因此选择“移动和桌面应用程序”，而不是要求包名／签名哈希的“Android”平台。注册值须与构建配置完全一致。示例采用门户提示要求的 `customScheme://` 格式，其中 `auth` 是 URI 的 host，`/oauth2redirect` 是路径，不需要部署网站；标准允许的无 host 单斜杠格式 `scheme:/oauth2redirect` 会被当前门户输入校验拒绝，不用于这里的注册示例。见[微软回调平台说明](https://learn.microsoft.com/en-us/entra/identity-platform/how-to-add-redirect-uri)。
-3. 在“API 权限”添加 Microsoft Graph 的委托权限 `Files.ReadWrite`，供目录访问和已读写回使用；不用应用程序权限或 `Files.ReadWrite.All` 扩大范围。应用授权请求使用 `openid`、`offline_access` 和 `https://graph.microsoft.com/Files.ReadWrite`。文件写入权限参见[Graph 权限说明](https://learn.microsoft.com/en-us/graph/api/driveitem-createuploadsession?view=graph-rest-1.0)，刷新令牌范围参见[授权码流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。
-4. 在项目根目录的 `local.properties` 中添加以下属性，保留已有的 SDK 配置。该文件已被 Git 忽略；示例 client ID 必须换成注册结果。
+## 功能一览
 
-    ```properties
-    onedrive.clientId=00000000-0000-0000-0000-000000000000
-    onedrive.redirectUri=org.example.calibrecloud://auth/oauth2redirect
-    onedrive.debugRedirectUri=org.example.calibrecloud.debug://auth/oauth2redirect
-    ```
+<p align="center">
+    <img src="docs/screenshots/filter.png" width="32%" alt="筛选面板：下载状态、已读状态和格式">
+    <img src="docs/screenshots/more.png" width="32%" alt="更多页：元数据同步、已下载文件和任务">
+    <img src="docs/screenshots/wizard.png" width="32%" alt="添加书库向导：本地目录或 OneDrive">
+</p>
 
-5. 工程按构建变体读取相应 URI，同时配置应用回调接收范围；浏览器登录端点使用个人账号范围 `consumers`，采用授权码与 PKCE。Android 原生客户端不配置或打包 client secret；client ID 是注册标识，登录令牌由设备上的应用管理。见[微软原生授权流程](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)。真实登录回调与目录选择的验收结果见验证记录；专门测试书库的写回已在第四阶段于独立 debug 包中验证，结果见[第四阶段记录](app/verification/phase-4.md)。
+- **浏览**：可选网格或列表视图，可按丛书、标签或其他栏目分成文件夹浏览，并按标题等依据升降序排列。
+- **搜索**：可以搜索全部字段，也可以只搜标题、作者、丛书、标签、简介或自定义栏目；搜索时保留当前筛选，每个书库都有独立的搜索历史。
+- **筛选**：按已下载／未下载、已读／未读以及书库中实际存在的格式组合筛选。
+- **格式优先级**：一本书有多个格式时，按你设定的顺序（默认 EPUB 优先）选择要打开的格式。
+- **后台任务**：同步、下载、加载封面和写回已读状态都在后台排队执行。你主动发起的操作最先处理，任务可以暂停、继续或重试；中断后会从断点续传。
+- **启动时同步**：可选择每次打开应用时自动同步书库。
+- **离线可用**：已同步的书目和已下载的书籍在没有网络时依然可以浏览和打开。
 
-三项属性未配置时，工程仍可构建并使用本地后端，OneDrive 入口显示配置指引。正式版与 debug 版必须分别匹配已注册回调，避免测试包接收正式版的授权回调；构建和 ADB 方法仍见开发容器文档。
+## 快速开始
 
-## CI 与发布
+1. 从 [Releases](https://github.com/chenxiex/calibre-cloud/releases/latest) 下载 APK，并安装到 Android 11 或更高版本的设备上。
+2. 打开应用，进入“更多 → 书库”，点击右上角加号，选择“本地目录”或“OneDrive”。
+3. 选中 Calibre 书库所在目录（也就是包含 `metadata.db` 的目录）并点击“完成”，应用会自动同步书库。
+4. 在图书馆中轻点一本书，下载完成后会用你的阅读器打开。
+5. 如需同步已读状态，可在“更多 → 已读栏目”中选择书库里用来记录已读的“是／否”栏目。
 
-[ci.yml](.github/workflows/ci.yml) 对每次分支 push 和 PR 运行单元测试、`lintDebug` 并构建 debug APK，上传为 workflow artifact。[release.yml](.github/workflows/release.yml) 在推送 `v*` 标签（须与 `versionName` 一致）时构建签名 release APK 并发布到 GitHub Release。
+## 使用提示
 
-GitHub secret 名不能含点号，因此把 `local.properties` 的键转为大写下划线（由 [write-local-properties.py](.github/scripts/write-local-properties.py) 生成）：`release.storePassword`→`RELEASE_STORE_PASSWORD`，`release.keyAlias`→`RELEASE_KEY_ALIAS`，`release.keyPassword`→`RELEASE_KEY_PASSWORD`，`onedrive.clientId`→`ONEDRIVE_CLIENT_ID`，`onedrive.redirectUri`→`ONEDRIVE_REDIRECT_URI`，`onedrive.debugRedirectUri`→`ONEDRIVE_DEBUG_REDIRECT_URI`。`release.storeFile` 对应的密钥库文件以 base64 存入 `RELEASE_STORE_FILE_BASE64`（`base64 -w0 your.jks`）。OneDrive 三项缺省时构建仍可进行，只是登录回调保持禁用。
+- 将书标为已读或未读之前，请先关闭电脑上的 Calibre，并等待书库同步完成；否则修改可能失败或被覆盖。
+- 应用只会修改书库中你选定的已读栏目，不会修改其他信息，也不会删除书库中的书。
+- 有些阅读器会按文件名导入书籍。如果在不同书库中有两本书的 ID 和书名都相同，阅读器可能把它们当成同一本书：后打开的文件会覆盖先打开的，两者共用阅读进度。
+- 需要真实文件路径的阅读器无法打开本应用提供的书籍。遇到这种情况，请换用 KOReader 等支持系统文件分享的阅读器。
+- OneDrive 目前只支持个人账号，不支持工作或学校账号以及世纪互联版。
+- 界面目前只有中文。
+
+## 参与开发
+
+欢迎提交问题和改进。开发环境、OneDrive 应用注册、构建与发布流程见[贡献指南](contribution-guide.md)。
 
 ## 许可证
 

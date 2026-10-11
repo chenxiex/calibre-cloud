@@ -137,7 +137,7 @@
 
 ## OneDrive 配置
 
-工程读取根目录被忽略的 `local.properties`，保留 `sdk.dir` 等已有属性。微软注册步骤与无凭据模板见 [OneDrive 应用注册](../README.md#onedrive-应用注册)。三项属性全部填写后才启用配置：
+工程读取根目录被忽略的 `local.properties`，保留 `sdk.dir` 等已有属性。微软注册步骤与无凭据模板见 [OneDrive 应用注册](../contribution-guide.md#onedrive-应用注册)。三项属性全部填写后才启用配置：
 
 | 属性 | 用途 |
 | --- | --- |
