@@ -645,6 +645,23 @@ class LibraryScreenTest {
     }
 
     @Test
+    fun theFilterBannerListsTheAppliedFiltersAndItsCloseIconClearsThem() {
+        library((1..6).map { book(it) })
+        show(model())
+        awaitTag("book_6")
+        compose.onNodeWithTag("library_filter_banner").assertDoesNotExist()
+        compose.onNodeWithTag("library_filter_button").performClick()
+        compose.onNodeWithTag("filter_read_read").performClick()
+        compose.onNodeWithTag("filter_format_EPUB").performClick()
+        compose.onNodeWithTag("library_filter_button").performClick()
+        compose.onNodeWithText("已读 · EPUB").assertExists()
+        compose.onNodeWithTag("library_filter_clear").performClick()
+        compose.onNodeWithTag("library_filter_banner").assertDoesNotExist()
+        compose.onNodeWithTag("library_filter_button").assert(hasContentDescription("筛选"))
+        awaitTag("book_6")
+    }
+
+    @Test
     fun readFilterWithoutAValidColumnIsUnavailableAndExplained() {
         library((1..6).map { book(it) }, read = ReadColumnStatus.INVALID)
         show(model())

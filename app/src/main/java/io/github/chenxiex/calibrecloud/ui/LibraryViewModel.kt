@@ -135,6 +135,10 @@ class QueueLibraryCovers(
  * sync that imports its result, so its end is shown only together with a page reread after it; they never enter
  * the query, so filters, search and sorting keep the import. A write failure that appears produces a
  * [readFailure] notice; the failures shown are dismissed when the page is left.
+ *
+ * The library's view mode, categorization, root sort, folder direction and filters are restored from
+ * [viewStore] before the first page loads and saved on every change (R21, Q82); search session
+ * changes are not saved. A change made before the restore finished wins over the saved view.
  */
 class LibraryViewModel(
     private val selection: suspend () -> LibrarySelection?,
@@ -144,6 +148,8 @@ class LibraryViewModel(
     private val historyStore: SearchHistoryStore,
     private val batch: LibraryBatch,
     private val formatPriority: suspend () -> List<BookFormat> = { LibraryRequest.DEFAULT_FORMAT_PRIORITY },
+    /** Where the library's view and filters are kept across launches. */
+    private val viewStore: LibraryViewStore = LibraryViewStore.None,
     /** Keeps the CPU running while a page load or a finished cover's read is under way. */
     private val keepAwake: suspend (suspend () -> Unit) -> Unit = { it() },
     /** State of the unfinished library sync of the selection with this token, or null when none is under way. */
@@ -239,8 +245,29 @@ class LibraryViewModel(
     private var pageKey: Any? = null
     private var pageBooks: Set<BookKey> = emptySet()
     private var coverToken: UUID? = null
+    /** The saved view being restored; loads wait for it. */
+    private val restoring: Job
+    private var viewChanged = false
+    private var saving: Job? = null
 
     init {
+        restoring = viewModelScope.launch {
+            val saved = try {
+                viewStore.load()
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // An unreadable setting starts with the defaults.
+                null
+            }
+            if (saved != null && !viewChanged) {
+                libraryViewMode = saved.viewMode
+                categorization = saved.categorization
+                rootSort = saved.sort
+                foldersAscending = saved.foldersAscending
+                libraryFilters = saved.filters
+            }
+        }
         // A write can fail while another tab is shown; its notification should not wait for the page.
         viewModelScope.launch {
             events.collect { event ->
@@ -303,7 +330,10 @@ class LibraryViewModel(
     fun showAs(mode: LibraryViewMode) {
         if (mode == viewMode) return
         val session = search
-        if (session != null) search = session.copy(viewMode = mode) else libraryViewMode = mode
+        if (session != null) search = session.copy(viewMode = mode) else {
+            libraryViewMode = mode
+            saveView()
+        }
         // The grid and list capacities differ; the first visible item stays on the shown page.
         reload()
     }
@@ -314,6 +344,7 @@ class LibraryViewModel(
         categorization = value
         folder = null
         firstVisible = 0
+        saveView()
         reload()
     }
 
@@ -344,7 +375,10 @@ class LibraryViewModel(
         when {
             session != null -> search = session.copy(sort = value)
             folder != null -> folderSort = value
-            else -> rootSort = value
+            else -> {
+                rootSort = value
+                saveView()
+            }
         }
         firstVisible = 0
         reload()
@@ -354,6 +388,7 @@ class LibraryViewModel(
     fun reverseFolders() {
         foldersAscending = !foldersAscending
         firstVisible = 0
+        saveView()
         reload()
     }
 
@@ -361,9 +396,34 @@ class LibraryViewModel(
     fun updateFilters(change: (LibraryFilters) -> LibraryFilters) {
         finishSelection()
         val session = search
-        if (session != null) search = session.copy(filters = change(session.filters)) else libraryFilters = change(libraryFilters)
+        if (session != null) search = session.copy(filters = change(session.filters)) else {
+            libraryFilters = change(libraryFilters)
+            saveView()
+        }
         firstVisible = 0
         reload()
+    }
+
+    /** Clears every filter of the shown page, as the filter banner's close icon does (R24, Q83). */
+    fun clearFilters() {
+        if (filters != LibraryFilters()) updateFilters { LibraryFilters() }
+    }
+
+    /** Saves the library's (not the search session's) view; saves run in the order of the changes. */
+    private fun saveView() {
+        viewChanged = true
+        val view = SavedLibraryView(libraryViewMode, categorization, rootSort, foldersAscending, libraryFilters)
+        val previous = saving
+        saving = viewModelScope.launch {
+            previous?.join()
+            try {
+                viewStore.save(view)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                // The shown view stays; the next change saves again.
+            }
+        }
     }
 
     /** Opens the search page with the library's view, book sort and filters; the library position is kept. */
@@ -695,6 +755,7 @@ class LibraryViewModel(
     }
 
     private suspend fun load(generation: Long) {
+        restoring.join()
         val selected = selection()
         if (selected?.location == null) {
             if (generation != loadGeneration) return
@@ -855,6 +916,7 @@ class LibraryViewModel(
                     dependencies.state::formatPriority,
                     keepAwake = CpuAwake(context.applicationContext, "library-page", counted = true)::during,
                     syncState = { token -> dependencies.taskQueue.latestLibrarySync(token)?.state?.takeUnless { it is TaskState.Finished } },
+                    viewStore = SettingsLibraryViewStore(dependencies.state),
                 ))!!
             }
         }

@@ -160,6 +160,10 @@ internal fun LibraryScreen(
                 }, onFilter = toggleFilter, onMenu = toggleMenu)
             }
             HorizontalRule()
+            if (model.filters != LibraryFilters()) {
+                FilterBanner(model.filters, clearable = !selecting) { closePanels(); model.clearFilters() }
+                HorizontalRule()
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     menuOpen -> ViewMenu(model, menuPage, { menuPage = it }) {
@@ -234,6 +238,29 @@ internal fun FilterButton(model: LibraryViewModel, enabled: Boolean, open: Boole
                 .background(if (open) PAPER else INK, MARK_SHAPE).border(BORDER, INK, MARK_SHAPE))
         }
     }
+}
+
+/**
+ * The applied filters of the shown page under the top bar (R24, Q83): download state, read state and
+ * formats in that order on one line, and a close icon that clears them all. In selection mode the icon
+ * is disabled, since the filters fix what the selection covers.
+ */
+@Composable
+private fun FilterBanner(filters: LibraryFilters, clearable: Boolean, onClear: () -> Unit) {
+    val parts = listOfNotNull(
+        filters.download?.let { stringResource(if (it == DownloadFilter.DOWNLOADED) R.string.filter_downloaded else R.string.filter_not_downloaded) },
+        filters.read?.let { stringResource(if (it == ReadFilter.READ) R.string.filter_read else R.string.filter_unread) },
+        filters.formats.takeIf { it.isNotEmpty() }?.map { it.value }?.sorted()?.joinToString(stringResource(R.string.filter_banner_format_separator)),
+    )
+    ListItem(
+        parts.joinToString(stringResource(R.string.filter_banner_separator)),
+        Modifier.testTag("library_filter_banner"),
+        leading = { Icon(painterResource(R.drawable.ic_filter), stringResource(R.string.filter_banner_applied), Modifier.size(ICON_SIZE), tint = INK) },
+        trailing = {
+            IconAction(R.drawable.ic_close, stringResource(R.string.filter_banner_clear), clearable,
+                Modifier.testTag("library_filter_clear"), onClick = onClear)
+        },
+    )
 }
 
 @Composable

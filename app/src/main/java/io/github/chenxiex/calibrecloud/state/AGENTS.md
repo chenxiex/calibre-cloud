@@ -28,4 +28,5 @@
 - Schema v11 非破坏性为 `application_settings` 增加 `format_priority`（逗号分隔的格式名，默认 `EPUB`），保存 R24 的全局格式顺序；未列出的格式由查询按名称排在后面。与启动设置一样不随任何缓存清理删除。
 - Schema v12 增加 `configured_libraries` 与 `library_addition`：当前选择有位置时成为列表第一项，原单一 `local_authorization` 的 tree URI 迁为其访问键后删除该表；没有位置的旧候选选择被移除，迁移后没有当前书库。删除书库（[CacheMaintenance](../storage/cache/CacheMaintenance.kt) 的 `LIBRARY` 计划）在清理事务中删除该位置全部绑定的副本、索引、封面、偏好、搜索历史、上次打开和列表项，删除当前书库时一并删除当前选择；绑定行与保护资料保留。
 - Schema v13 把任务等待的路径失效同步从 `queued_tasks.source_sync` 迁入 `task_dependencies`（要求 `awaited_sync`）；升级的数据库保留已清空的 `source_sync` 列（API 30 的 SQLite 不能删除列），新建数据库没有该列。
+- Schema v15 非破坏性为 `application_settings` 增加可空的 `library_view`，保存界面编码的图书馆视图与筛选（R21，Q82）；状态库不解析其内容。与其它设置一样全局、不随任何缓存清理删除。
 - Schema v6 非破坏性增加独立 `application_settings`，启动自动同步默认关闭；设置与书库代次无关，清元数据、移除副本和其它书库清理均保留它。读取／更新通过共享 repository 在 I/O dispatcher 上执行，不在 Activity 或 worker 另建状态库。

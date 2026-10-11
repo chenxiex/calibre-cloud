@@ -32,6 +32,7 @@ import org.json.JSONObject
  * Version 14 replaces the write-back commit protocol: read status changes are kept per write task,
  * queued_tasks records whether a task has started and the sync that followed a write, and
  * dispatch_next names the task the next selection must take. Payloads keep their ignored commit field.
+ * Version 15 adds application_settings.library_view, the library page's saved view and filters.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  * Raising [VERSION] also requires its reversal in the androidTest StateSchemaHistory fixture.
@@ -39,7 +40,7 @@ import org.json.JSONObject
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
     SQLiteOpenHelper(context.applicationContext, name, null, VERSION) {
     companion object {
-        const val VERSION = 14
+        const val VERSION = 15
     }
 
     private val privateFiles = context.applicationContext.filesDir
@@ -63,6 +64,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createFormatPriority(db)
         createLibraryList(db)
         createReadStatusChanges(db)
+        createLibraryView(db)
     }
 
     /**
@@ -403,6 +405,15 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
             removeLegacyWrites(db)
             createReadStatusChanges(db)
         }
+        if (oldVersion <= 14) createLibraryView(db)
+    }
+
+    /**
+     * The library page's view and filters as the UI encodes them (R21, Q82); null until first changed.
+     * Global like the other settings and kept by every cache cleanup.
+     */
+    private fun createLibraryView(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE application_settings ADD COLUMN library_view TEXT")
     }
 
     /**

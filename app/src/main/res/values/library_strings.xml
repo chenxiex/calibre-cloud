@@ -60,6 +60,10 @@
     <string name="filter_unread">未读</string>
     <string name="filter_read_unavailable">已读栏目未配置或已失效，可在设置中选择已读栏目。</string>
     <string name="filter_formats">格式</string>
+    <string name="filter_banner_applied">已应用筛选</string>
+    <string name="filter_banner_clear">清除筛选</string>
+    <string name="filter_banner_separator">" · "</string>
+    <string name="filter_banner_format_separator">、</string>
     <string name="search_back">返回图书馆</string>
     <string name="search_input">搜索书库</string>
     <string name="search_clear">清空输入</string>

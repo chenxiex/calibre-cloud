@@ -245,6 +245,19 @@ class ApplicationStateRepository(
         }
     }
 
+    /** The library page's saved view and filters, opaque to this layer; null until first saved. Survives cache cleanup. */
+    suspend fun libraryView(): String? = withContext(ioDispatcher) {
+        database.readableDatabase.rawQuery("SELECT library_view FROM application_settings WHERE singleton = 1", null).use {
+            if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null
+        }
+    }
+
+    suspend fun setLibraryView(value: String): Unit = withContext(ioDispatcher) {
+        transaction {
+            update("application_settings", ContentValues().apply { put("library_view", value) }, "singleton = 1", null)
+        }
+    }
+
     suspend fun binding(id: LibraryId): LibraryIdentity? = withContext(ioDispatcher) {
         binding(database.readableDatabase, id)
     }

@@ -84,3 +84,16 @@ adb shell am instrument -w -r io.github.chenxiex.calibrecloud.debug.test/io.gith
 用户共同验收（2026-10-11）：确认本记录的汇总结论，上列条件项均难以构造测试，接受为首版已知限制，日后出现实际使用场景中的缺陷再排查。OneDrive 不在最终构建上重跑串联：两后端经同一存储接口接入上层，OneDrive 实现已有契约测试与真实服务证据，此后生产代码只改了版本号。
 
 验收后清理：经用户同意删除了设备上两个非本阶段创建的遗留测试文件——`/data/local/tmp` 中 2026-10-09 的空 helper XML，以及 KOReader 私有目录中第三阶段留下的 `Return to Garden 280-285.sdr`（只含 `metadata.pdf.lua`）。KOReader 目录中的其它书籍未触碰。
+
+## 图书馆视图恢复与筛选横幅（R21、R24、AC06，Q82–Q83，2026-10-11）
+
+首版之后的新增功能，在 `f0210ae` 之上的工作区改动验证。
+
+| 层次 | 执行方式 | 结果 |
+| --- | --- | --- |
+| 接口回归 | `testDebugUnitTest`：`LibraryViewModelTest` 新增重启恢复（不含文件夹、文件夹内排序与搜索会话）、保存格式解码及无效项回退默认、清空筛选只作用于搜索会话并写入保存值 | 通过 |
+| 构建与静态检查 | `assembleDebug`、`assembleDebugAndroidTest`、`lintDebug` | 通过；lint 仅有既有的依赖新版本提示 |
+| 平台测试（PA6） | 经 socat 转发后 `connectedDebugAndroidTest`：`LibraryScreenTest` 的筛选横幅（列出“已读 · EPUB”、叉清空后横幅消失）与筛选面板 2 项，`ApplicationStateRepositoryTest`（含 v15 迁移）15 项，`SearchHistoryRepositoryTest` 3 项、`LastOpenedRepositoryTest` 2 项、`TaskSchemaMigrationTest` 6 项 | 28 项通过；转发建立前启动的一轮已作废重跑 |
+| 人工体验（PA6） | 用户安装 debug 包：设置视图、分类、排序与筛选后强行停止并重开，核对恢复与横幅清空 | 用户确认通过 |
+
+测试结束后停止 socat，卸载 `.debug` 与测试包；正式包未触碰。

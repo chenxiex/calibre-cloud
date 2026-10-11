@@ -375,6 +375,76 @@ class LibraryViewModelTest {
         assertEquals(SearchScope.All, model.search?.scope)
     }
 
+    /** Keeps the encoded text, as the settings column does. */
+    private class FakeViewStore(var text: String? = null) : LibraryViewStore {
+        override suspend fun load() = text?.let(SavedLibraryView::decode)
+        override suspend fun save(view: SavedLibraryView) { text = view.encode() }
+    }
+
+    private fun TestScope.model(store: LibraryViewStore): LibraryViewModel {
+        val service = LibraryQueryService(FakeImports { imported }, { copies }, dispatcher)
+        return LibraryViewModel({ selection }, service, FakeCovers(), emptyFlow(), history, batch, { priority }, viewStore = store).also {
+            it.setVisible(true); it.onMeasured(10); advanceUntilIdle()
+        }
+    }
+
+    @Test
+    fun theLibraryViewIsRestoredOnTheNextLaunchWithoutTheFolderOrTheSearchSession() = runTest(dispatcher) {
+        imported = library(6)
+        val store = FakeViewStore()
+        val first = model(store)
+        first.showAs(LibraryViewMode.LIST)
+        first.sortBy(BookSortKey.TITLE)
+        first.updateFilters { it.copy(download = DownloadFilter.NOT_DOWNLOADED, formats = setOf(BookFormat.parse("EPUB"))) }
+        first.categorize(Categorization.Tags)
+        first.reverseFolders()
+        first.openFolder(FolderKey("even"))
+        first.sortBy(BookSortKey.RATING)
+        first.openSearch()
+        first.showAs(LibraryViewMode.GRID)
+        first.updateFilters { LibraryFilters() }
+        advanceUntilIdle()
+
+        val second = model(store)
+        assertEquals(LibraryViewMode.LIST, second.viewMode)
+        assertEquals(Categorization.Tags, second.categorization)
+        assertFalse(second.foldersAscending)
+        assertEquals(LibraryFilters(DownloadFilter.NOT_DOWNLOADED, null, setOf(BookFormat.parse("EPUB"))), second.filters)
+        // The root of the saved categorization, its first page; the folder's own sort is not kept.
+        assertNull(second.folder)
+        assertNull(second.search)
+        assertTrue(second.content is LibraryContent.Folders)
+        second.categorize(Categorization.None); advanceUntilIdle()
+        assertEquals(BookSort(BookSortKey.TITLE, true), second.sort)
+    }
+
+    @Test
+    fun aSavedColumnIsDecodedAndAnUnreadableSettingKeepsItsDefault() {
+        val column = Categorization.Column(io.github.chenxiex.calibrecloud.model.CustomColumnId(7, "#genre"))
+        val view = SavedLibraryView(LibraryViewMode.LIST, column, BookSort(BookSortKey.RATING, true), false,
+            LibraryFilters(DownloadFilter.DOWNLOADED, ReadFilter.UNREAD, setOf(BookFormat.parse("PDF"), BookFormat.parse("EPUB"))))
+        assertEquals(view, SavedLibraryView.decode(view.encode()))
+        assertEquals(SavedLibraryView(sort = BookSort(BookSortKey.TITLE, true)),
+            SavedLibraryView.decode("view=TILES\ncategory=column:x:#genre\nsort=TITLE:asc\nfolders=up\nread=MAYBE\nformats=E-PUB"))
+    }
+
+    @Test
+    fun clearingTheFiltersSavesThemAndOnlyClearsTheSearchSessionWhileItIsOpen() = runTest(dispatcher) {
+        imported = library(6)
+        val store = FakeViewStore()
+        val model = model(store)
+        model.updateFilters { it.copy(download = DownloadFilter.DOWNLOADED) }; advanceUntilIdle()
+        assertEquals(0, (model.content as LibraryContent.Books).total)
+        model.openSearch()
+        model.clearFilters(); advanceUntilIdle()
+        assertEquals(LibraryFilters(), model.filters)
+        model.closeSearch(); advanceUntilIdle()
+        assertEquals(DownloadFilter.DOWNLOADED, model.filters.download)
+        model.clearFilters(); advanceUntilIdle()
+        assertEquals(6, (model.content as LibraryContent.Books).total)
+        assertEquals(LibraryFilters(), SavedLibraryView.decode(requireNotNull(store.text)).filters)
+    }
+
     @Test
     fun aSeriesIndexSortIsNotCarriedIntoTheFlatSearch() = runTest(dispatcher) {
         imported = library(3)
