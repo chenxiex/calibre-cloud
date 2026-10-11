@@ -30,6 +30,12 @@
 
 三项属性未配置时，工程仍可构建并使用本地后端，OneDrive 入口显示配置指引。正式版与 debug 版必须分别匹配已注册回调，避免测试包接收正式版的授权回调；构建和 ADB 方法仍见开发容器文档。
 
+## CI 与发布
+
+[ci.yml](.github/workflows/ci.yml) 对每次分支 push 和 PR 运行单元测试、`lintDebug` 并构建 debug APK，上传为 workflow artifact。[release.yml](.github/workflows/release.yml) 在推送 `v*` 标签（须与 `versionName` 一致）时构建签名 release APK 并发布到 GitHub Release。
+
+GitHub secret 名不能含点号，因此把 `local.properties` 的键转为大写下划线（由 [write-local-properties.py](.github/scripts/write-local-properties.py) 生成）：`release.storePassword`→`RELEASE_STORE_PASSWORD`，`release.keyAlias`→`RELEASE_KEY_ALIAS`，`release.keyPassword`→`RELEASE_KEY_PASSWORD`，`onedrive.clientId`→`ONEDRIVE_CLIENT_ID`，`onedrive.redirectUri`→`ONEDRIVE_REDIRECT_URI`，`onedrive.debugRedirectUri`→`ONEDRIVE_DEBUG_REDIRECT_URI`。`release.storeFile` 对应的密钥库文件以 base64 存入 `RELEASE_STORE_FILE_BASE64`（`base64 -w0 your.jks`）。OneDrive 三项缺省时构建仍可进行，只是登录回调保持禁用。
+
 ## 许可证
 
 Copyright (C) 2026 Anlor
