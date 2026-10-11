@@ -1,4 +1,7 @@
 {
     "name": "Calibre Cloud Android",
-    "image": "ghcr.io/chenxiex/calibre-cloud/devcontainer:latest"
+    "image": "ghcr.io/chenxiex/calibre-cloud/devcontainer:latest",
+    "remoteEnv": {
+        "ADB_SERVER_SOCKET": "tcp:host.containers.internal:5037"
+    }
 }
