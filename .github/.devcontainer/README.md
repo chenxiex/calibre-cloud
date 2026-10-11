@@ -111,6 +111,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 配对端口与连接端口不同，分别读取手机上的配对页面和无线调试主页面；它们也可能在下次启用无线调试时变化。容器需要能访问手机所在网络，可显式使用 IP 和端口连接，参考 [ADB 无线调试说明](https://developer.android.com/tools/adb#wireless-android11-command-line)。
 
+[devcontainer.json](../../.devcontainer/devcontainer.json) 设置 `ADB_SERVER_SOCKET=tcp:host.containers.internal:5037`，容器内的 `adb` 命令连接宿主机的 ADB server，宿主机已连接（包括 USB）的设备在容器中直接可见，无需在容器内配对。Gradle 的 `connectedDebugAndroidTest` 使用的 ddmlib 不读取该变量，ADB server 地址固定为容器内回环地址（只有端口可经 `ANDROID_ADB_SERVER_PORT` 修改），直接运行会报“Cannot reach ADB server”且不执行测试。运行前在另一终端执行 `socat TCP-LISTEN:5037,bind=127.0.0.1,fork,reuseaddr TCP:host.containers.internal:5037` 转发到宿主机 ADB server，测试结束后停止该进程（第五阶段实测，见[第五阶段验证记录](../../app/verification/phase-5.md)）。
+
 如果改为在容器内运行模拟器，可通过 `sdkmanager` 将 `emulator` 和系统镜像安装到 SDK volume，AVD 数据保存在 Android 用户数据 volume。Linux 上的硬件加速通常还需要额外映射 `/dev/kvm` 并配置权限；USB 真机调试也需要单独配置设备访问。
 
 ## 验证记录

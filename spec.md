@@ -1,6 +1,6 @@
 # Calibre Cloud 首版规格
 
-状态：规格已通过用户验收，是后续开发的需求与验收基线；阶段一至四已实现，验收结果与未完成项见各阶段验证记录（[第一阶段](app/verification/phase-1.md)、[第二阶段](app/verification/phase-2.md)、[第三阶段](app/verification/phase-3.md)、[第四阶段](app/verification/phase-4.md)）。采用轻量 Specification-Driven Development（SDD）：需求编号 → 最小实现 → 对应验证 → 记录结果。
+状态：规格已通过用户验收，是后续开发的需求与验收基线；阶段一至四已实现，第五阶段（首版验收）已完成并经用户共同验收，条件项作为首版已知限制，验收结果与未完成项见各阶段验证记录（[第一阶段](app/verification/phase-1.md)、[第二阶段](app/verification/phase-2.md)、[第三阶段](app/verification/phase-3.md)、[第四阶段](app/verification/phase-4.md)、[第五阶段](app/verification/phase-5.md)）。采用轻量 Specification-Driven Development（SDD）：需求编号 → 最小实现 → 对应验证 → 记录结果。
 
 后续开发均以本规格为准。[questions.md](questions.md) 保存当前已确认结论与待确认问题，[AGENTS.md](AGENTS.md) 规定执行流程。新增阻塞决策须先写入问题清单并等待用户回答，确认后同步本规格，再开展相关实现，不以实现替用户决定。
 
