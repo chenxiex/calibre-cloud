@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   build:
+    name: CI
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
