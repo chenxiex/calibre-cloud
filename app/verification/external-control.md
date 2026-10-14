@@ -48,7 +48,24 @@ adb shell am instrument -w -e class <下列测试类> io.github.chenxiex.calibre
 - 插件每次注册都生成新令牌，取消确认后旧登记仍在而插件已换令牌，请求被以 `UNREGISTERED` 拒绝。改为只生成一次令牌、此后注册重发同一令牌。
 - debug 包从未获得通知权限，拒绝通知不显示，而请求到达时用户在阅读器中无法再请求。改为确认登记后请求通知权限（已写入 R37）。
 
+## 标为已读后删除 KOReader 副本（Q93，2026-10-14）
+
+基于提交 `c8c7cb1` 的未提交改动。离线检查：
+
+| 检查 | 结果 |
+| --- | --- |
+| `luacheck --globals G_reader_settings --no-max-line-length` | 0 错误；5 条警告与改动前相同（未使用的循环变量、`_dir` 与 `self`） |
+| 桩模块 harness（luajit，KOReader 模块按 v2026.07.1 源码的签名打桩，真实文件放在临时目录） | 16 项全部通过：选项关闭时不删；开启前弹出含导入目录的中文确认框，确认后才开启；`.sdr` 选项在副本选项关闭时禁用；文件管理器标为读完后删除导入目录中的副本、清除缓存、更新历史与收藏、保留 `.sdr` 并刷新列表；导入目录外同名文件保留；开启 `.sdr` 选项后同时删除；关闭选项无需确认；打开中的书在 `CloseDocument` 的下一轮才删除；关闭前改回未读则不删；手动菜单标为已读同样在关闭后删除 |
+
+用户上手验收（2026-10-14）：重新构建的 debug 包（`aapt2` 核对为 `io.github.chenxiex.calibrecloud.debug`）与插件装到 PA6，开始前备份测试书库 `metadata.db`（`ff09b715…`）。用户在 KOReader 中选择 debug 包为目标、开启两个删除选项，以书 5《李尔王》（测试书）走完流程，结论为看起来正常。agent 随后经 ADB 核对：KOReader 设置中 `remove_copy`、`remove_sdr` 均为 `true`；导入目录 `/sdcard/Android/data/org.koreader.launcher.fdroid/files/` 中 `李尔王-5.epub` 与 `李尔王-5.sdr` 都已不存在，其它副本及 `.sdr` 未变；`.sdr` 位置为默认的书籍旁（`docsettings`、`hashdocsettings` 目录均不存在，没有其它位置的残留）；`history.lua` 仍有该书条目（未开启“自动移除已删除项”，按 KOReader 规则变灰）；测试书库中书 5 的 `read_status` 为 1。
+
+用户随后关闭“同时删除阅读数据”（设置中 `remove_sdr = false`）重试：从 debug 包再次打开书 5（22:21 重新导入），在阅读中标为已读并切到 debug 包（22:22:30 测试书库发生写回提交，`read_status` 为 1）。此时 KOReader 仍打开该书，副本保留；用户回到 KOReader 打开另一本书后，`李尔王-5.epub` 被删除，`李尔王-5.sdr` 保留（关闭时写入的 `metadata.epub.lua` 与 `.old`），与“打开中的书关闭后删除、只删副本”一致。保留的 `.sdr` 中书籍状态为 `reading`，用户确认这次经阅读菜单“在 Calibre Cloud 中标为已读”发送（该入口不改变 KOReader 的书籍状态），并认为这一结果可以接受。
+
+清理：测试书库 `metadata.db` 推回备份并核对哈希为 `ff09b715…`，已卸载 debug 包、删除插件目录，正式版未改动。保留项：KOReader 中的 `李尔王-5.sdr`、历史条目和 `settings.reader.lua` 中的 `calibrecloud` 设置项，属于用户的 KOReader 数据。
+
 ## 观察与未完成项
+
+- Q93 真机上未核对：导入目录外同名文件保留、关闭前改回未读取消删除，以及经书末提示／书籍状态页设为“已完成”时的删除。
 
 - 从其它应用回到 KOReader 后，PA6 上紧接着的几次 `input tap` 偶尔不被 KOReader 处理：一次在重装 debug 包后持续约 2 分钟无响应（日志有 `cannot blit: no window`），只能强停 KOReader；另一次稍后的点击恢复正常。期间 KOReader 的 Lua 线程处于休眠而不是忙于插件代码。这是否影响真实手指操作需用户体验确认。
 - 未在真机上执行：阅读中“书籍状态”页（`BookStatusWidget.onChangeBookStatus`）的切换、拒绝通知的点击跳转、“属于另一个书库”的拒绝（只有 JVM 测试）、多本书同时改状态。

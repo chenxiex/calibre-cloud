@@ -8,16 +8,24 @@ URIs `<scheme>://<operation>?token=…&file=…`, sent as an explicit broadcast 
 explicit VIEW intent (open Calibre Cloud). Registration sends a token this plugin generated; the app asks
 the user and remembers only its hash. Nothing here reads the reply: the app reports rejections itself.
 
+Optionally (Q93), once "mark as read" was sent, KOReader's own copy of the book in its import folder is deleted
+like KOReader deletes a file, with or without its sidecar (.sdr); a book that is open is deleted after it closes.
+
 @module koplugin.calibrecloud
 --]]
 
 local BookList = require("ui/widget/booklist")
 local BookStatusWidget = require("ui/widget/bookstatuswidget")
+local ConfirmBox = require("ui/widget/confirmbox")
 local Device = require("device")
+local DocSettings = require("docsettings")
 local InfoMessage = require("ui/widget/infomessage")
+local ReadCollection = require("readcollection")
+local ReadHistory = require("readhistory")
 local ReaderStatus = require("apps/reader/modules/readerstatus")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local ffiutil = require("ffi/util")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local logger = require("logger")
 local util = require("util")
@@ -49,6 +57,13 @@ local zh = {
     ["Only books opened from Calibre Cloud can be marked."] = "只能标记由 Calibre Cloud 打开的书。",
     ["Sent to Calibre Cloud."] = "已发送到 Calibre Cloud。",
     ["Could not reach Calibre Cloud."] = "无法联系 Calibre Cloud。",
+    ["Delete KOReader's copy after marking as read"] = "标为已读后删除 KOReader 中的副本",
+    ["Also delete reading data (.sdr)"] = "同时删除阅读数据（.sdr）",
+    ["Enable"] = "开启",
+    ["After a book is sent to Calibre Cloud as read, KOReader's copy of it will be deleted:\n%1/Title-ID.ext\n\nOnly books KOReader imported from Calibre Cloud into this folder are deleted. A book that is open is deleted when you close it, unless you mark it as unread first. As when deleting a file in KOReader, the book is also removed from collections and dimmed or removed in History.\n\nIts reading data (.sdr) is kept unless you also turn on deleting it, so progress and highlights come back when you open the book from Calibre Cloud again. The book stays in Calibre Cloud and in your Calibre library."]
+        = "在 KOReader 中把书标为已读并发送到 Calibre Cloud 后，将删除 KOReader 中的副本：\n%1/书名-ID.后缀\n\n只删除 KOReader 从 Calibre Cloud 导入到此文件夹的书。正在阅读的书在关闭后删除，关闭前标为未读则不删除。与在 KOReader 中删除文件一样，该书也会移出收藏，并在历史记录中变灰或移除。\n\n除非同时开启删除阅读数据，否则保留该书的阅读数据（.sdr），以后从 Calibre Cloud 再次打开时恢复进度和标注。该书仍保留在 Calibre Cloud 和 Calibre 书库中。",
+    ["When KOReader's copy is deleted, its reading data (.sdr) will be deleted too: reading progress, highlights, notes, bookmarks, book status, per-book settings, and any custom cover or metadata.\n\nOpening the book from Calibre Cloud again starts from scratch. This cannot be undone."]
+        = "删除 KOReader 中的副本时，将同时删除其阅读数据（.sdr）：阅读进度、高亮、笔记、书签、书籍状态、单书设置，以及自定义封面或元数据。\n\n以后从 Calibre Cloud 再次打开该书时从头开始。此操作无法撤销。",
 }
 
 local function _(text)
@@ -169,6 +184,71 @@ local function bookName(file)
     end
 end
 
+--- The folder KOReader copies `content://` books into (`getExternalFilesDir(null)`), resolved.
+local function importFolder()
+    if not Device:isAndroid() then
+        return nil
+    end
+    local ffi = require("ffi")
+    local path = require("android").app.activity.externalDataPath
+    return path ~= nil and ffiutil.realpath(ffi.string(path)) or nil
+end
+
+--- The resolved path of [file] when it is a copy KOReader imported from Calibre Cloud, else nil.
+local function importedCopy(file)
+    local path = file and bookName(file) and ffiutil.realpath(file)
+    local folder = importFolder()
+    if path and folder and util.splitFilePathName(path) == folder .. "/" then
+        return path
+    end
+end
+
+--- Deletes an imported copy as KOReader's file manager does; its sidecar only if the user chose so.
+local function deleteCopy(file)
+    if not os.remove(file) then
+        logger.warn("CalibreCloud: could not delete the imported copy", file)
+        return
+    end
+    BookList.resetBookInfoCache(file)
+    if setting("remove_sdr", false) then
+        DocSettings.updateLocation(file) -- deletes the sidecar
+    end
+    ReadHistory:fileDeleted(file)
+    ReadCollection:removeItem(file)
+    logger.info("CalibreCloud: deleted the imported copy", file)
+    local FileManager = require("apps/filemanager/filemanager")
+    if FileManager.instance then
+        FileManager.instance:onRefresh()
+    end
+end
+
+-- Open books whose copy is deleted once the reader closes them: deleting earlier would pull the book from
+-- under the reader, and closing it writes the sidecar again.
+local closing = {}
+
+--- Follows a request that was sent for [file]: deletes its imported copy after "read" when the user chose so.
+local function sent(file, read)
+    local path = importedCopy(file)
+    if not path then
+        return
+    end
+    if not read then
+        closing[path] = nil
+        return
+    end
+    if not setting("remove_copy", false) then
+        return
+    end
+    local ReaderUI = require("apps/reader/readerui")
+    local reader = ReaderUI.instance
+    local open = reader and reader.document and ffiutil.realpath(reader.document.file)
+    if open == path then
+        closing[path] = true
+    else
+        deleteCopy(path)
+    end
+end
+
 -- Status changes waiting for the next tick, so a multi-book change opens Calibre Cloud at most once.
 local queued = {}
 local scheduled = false
@@ -181,17 +261,23 @@ local function flush()
     if not token then
         return
     end
+    local function request(file, open)
+        local read = requests[file]
+        if send(read and "mark_read" or "mark_unread", { token = token, file = bookName(file) }, open) then
+            sent(file, read)
+        end
+    end
     local opener
-    for name, read in pairs(requests) do
+    for file, read in pairs(requests) do
         if setting(read and "open_on_read" or "open_on_unread", read) and not opener then
-            opener = name
+            opener = file
         else
-            send(read and "mark_read" or "mark_unread", { token = token, file = name }, false)
+            request(file, false)
         end
     end
     -- The request that opens the app goes last, after the broadcasts were handed over.
     if opener then
-        send(requests[opener] and "mark_read" or "mark_unread", { token = token, file = opener }, true)
+        request(opener, true)
     end
 end
 
@@ -208,11 +294,10 @@ local function statusChanged(file, before, after)
     else
         return
     end
-    local name = bookName(file)
-    if not name then
+    if not bookName(file) then
         return
     end
-    queued[name] = read
+    queued[file] = read
     if not scheduled then
         scheduled = true
         UIManager:nextTick(flush)
@@ -273,16 +358,28 @@ function CalibreCloud:markCurrent(read)
     if not token then
         return show(_("Register with Calibre Cloud first."))
     end
-    local name = bookName(self.ui.document and self.ui.document.file)
+    local file = self.ui.document and self.ui.document.file
+    local name = bookName(file)
     if not name then
         return show(_("Only books opened from Calibre Cloud can be marked."))
     end
     local open = setting(read and "open_on_read" or "open_on_unread", read)
     local ok, problem = send(read and "mark_read" or "mark_unread", { token = token, file = name }, open)
     if not ok then
-        show(problem)
-    elseif not open then
+        return show(problem)
+    end
+    sent(file, read)
+    if not open then
         show(_("Sent to Calibre Cloud."))
+    end
+end
+
+function CalibreCloud:onCloseDocument()
+    local path = importedCopy(self.ui.document and self.ui.document.file)
+    if path and closing[path] then
+        closing[path] = nil
+        -- ReaderUI saves the sidecar after this event; delete once it is done.
+        UIManager:nextTick(function() deleteCopy(path) end)
     end
 end
 
@@ -339,6 +436,29 @@ local function afterChoice(key, default)
     }
 end
 
+--- A deletion option that asks before it is turned on; turning it off needs no confirmation.
+local function deletionChoice(key, text, explanation, enabled_func)
+    return {
+        text = text,
+        enabled_func = enabled_func,
+        keep_menu_open = true,
+        checked_func = function() return setting(key, false) end,
+        callback = function(touchmenu_instance)
+            if setting(key, false) then
+                return saveSetting(key, false)
+            end
+            UIManager:show(ConfirmBox:new{
+                text = explanation(),
+                ok_text = _("Enable"),
+                ok_callback = function()
+                    saveSetting(key, true)
+                    touchmenu_instance:updateItems()
+                end,
+            })
+        end,
+    }
+end
+
 function CalibreCloud:addToMainMenu(menu_items)
     local items = {}
     if self.ui.document then
@@ -359,6 +479,13 @@ function CalibreCloud:addToMainMenu(menu_items)
     })
     table.insert(items, afterChoice("open_on_read", true))
     table.insert(items, afterChoice("open_on_unread", false))
+    table.insert(items, deletionChoice("remove_copy", _("Delete KOReader's copy after marking as read"), function()
+        return ffiutil.template(_("After a book is sent to Calibre Cloud as read, KOReader's copy of it will be deleted:\n%1/Title-ID.ext\n\nOnly books KOReader imported from Calibre Cloud into this folder are deleted. A book that is open is deleted when you close it, unless you mark it as unread first. As when deleting a file in KOReader, the book is also removed from collections and dimmed or removed in History.\n\nIts reading data (.sdr) is kept unless you also turn on deleting it, so progress and highlights come back when you open the book from Calibre Cloud again. The book stays in Calibre Cloud and in your Calibre library."),
+            importFolder() or "Android/data/…/files")
+    end))
+    table.insert(items, deletionChoice("remove_sdr", _("Also delete reading data (.sdr)"), function()
+        return _("When KOReader's copy is deleted, its reading data (.sdr) will be deleted too: reading progress, highlights, notes, bookmarks, book status, per-book settings, and any custom cover or metadata.\n\nOpening the book from Calibre Cloud again starts from scratch. This cannot be undone.")
+    end, function() return setting("remove_copy", false) end))
     table.insert(items, {
         text = _("Register with Calibre Cloud"),
         help_text = _("Register again if Calibre Cloud was reinstalled or the registration was removed."),

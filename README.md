@@ -54,6 +54,7 @@ KOReader 插件让你读完书后直接在 KOReader 里标记，结果同样写�
 2. 在 KOReader 中打开菜单的“工具 → Calibre Cloud”，选择“注册到 Calibre Cloud”。Calibre Cloud 会弹出确认框，点击“允许”；如果外部阅读器控制尚未开启，会同时开启。
 3. 之后用 Calibre Cloud 打开的书，在 KOReader 中设为“读完”（包括读到最后一页时选择“标记为读完”）就会标为已读，改回“在读”或“搁置”就会标为未读。也可以在同一菜单里手动选择“在 Calibre Cloud 中标为已读／未读”。
 4. 默认标为已读后切到 Calibre Cloud 的图书馆，标为未读后留在 KOReader；可以在插件菜单中分别修改，也可以关闭“自动跟随书籍状态”，只用手动菜单。
+5. 如果不想让读完的书留在 KOReader 里，可以开启“标为已读后删除 KOReader 中的副本”：标为已读后，KOReader 从 Calibre Cloud 导入的那份文件会被删除（正在阅读的书在关闭后删除），书仍在 Calibre Cloud 和书库中。阅读进度和标注默认保留，下次从 Calibre Cloud 打开时恢复；如果也不需要，再开启“同时删除阅读数据（.sdr）”。开启前都会弹窗说明具体删除哪些数据。
 
 在 Calibre Cloud 的“更多 → 外部阅读器控制”中可以关闭这项功能，或移除已登记的应用。只有由 Calibre Cloud 在当前书库中打开过的书才能这样标记；请求没有执行时，Calibre Cloud 会发送一条通知说明原因。如果重装了 Calibre Cloud 或移除了登记，请在插件中再次注册。
 
