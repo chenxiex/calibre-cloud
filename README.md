@@ -20,6 +20,7 @@ Calibre Cloud 是一款为墨水屏设备打造的 Android 书库应用。它直
 - **用你喜欢的阅读器**：书籍通过系统交给 KOReader 等已安装的阅读器打开，不绑定内置阅读器。底栏的“继续阅读”可一键回到上次打开的书。
 - **按需下载，省空间**：只有打开的书才会下载到本机，你也可以多选下载，或随时按格式移除已下载的副本，书库中的源文件不受影响。
 - **已读状态与 Calibre 同步**：选好书库中记录已读状态的“是／否”栏目后，可以在手机上批量标为已读或未读，结果写回书库，回到电脑上的 Calibre 也能看到。
+- **在阅读器里直接标为已读**：安装 KOReader 插件后，在 KOReader 中把书设为“读完”，Calibre Cloud 就会把它标为已读，不必再切回来操作。
 
 ## 功能一览
 
@@ -44,6 +45,17 @@ Calibre Cloud 是一款为墨水屏设备打造的 Android 书库应用。它直
 3. 选中 Calibre 书库所在目录（也就是包含 `metadata.db` 的目录）并点击“完成”，应用会自动同步书库。
 4. 在图书馆中轻点一本书，下载完成后会用你的阅读器打开。
 5. 如需同步已读状态，可在“更多 → 已读栏目”中选择书库里用来记录已读的“是／否”栏目。
+
+## 在 KOReader 中标记已读
+
+KOReader 插件让你读完书后直接在 KOReader 里标记，结果同样写回 Calibre 书库。目前只支持与 Calibre Cloud 安装在同一台 Android 设备上的 KOReader。
+
+1. 从 [Releases](https://github.com/chenxiex/calibre-cloud/releases/latest) 下载 `calibrecloud-koreader-plugin-<版本>.zip`，把其中的 `calibrecloud.koplugin` 文件夹放进 KOReader 数据目录下的 `plugins` 文件夹（通常是 `/sdcard/koreader/plugins/`），然后重启 KOReader。
+2. 在 KOReader 中打开菜单的“工具 → Calibre Cloud”，选择“注册到 Calibre Cloud”。Calibre Cloud 会弹出确认框，点击“允许”；如果外部阅读器控制尚未开启，会同时开启。
+3. 之后用 Calibre Cloud 打开的书，在 KOReader 中设为“读完”（包括读到最后一页时选择“标记为读完”）就会标为已读，改回“在读”或“搁置”就会标为未读。也可以在同一菜单里手动选择“在 Calibre Cloud 中标为已读／未读”。
+4. 默认标为已读后切到 Calibre Cloud 的图书馆，标为未读后留在 KOReader；可以在插件菜单中分别修改，也可以关闭“自动跟随书籍状态”，只用手动菜单。
+
+在 Calibre Cloud 的“更多 → 外部阅读器控制”中可以关闭这项功能，或移除已登记的应用。只有由 Calibre Cloud 在当前书库中打开过的书才能这样标记；请求没有执行时，Calibre Cloud 会发送一条通知说明原因。如果重装了 Calibre Cloud 或移除了登记，请在插件中再次注册。
 
 ## 使用提示
 

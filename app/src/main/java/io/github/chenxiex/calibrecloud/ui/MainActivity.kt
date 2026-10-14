@@ -10,12 +10,18 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModelProvider
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** Shows the library tab, as an accepted external request that opens this app does (R37, Q91). */
+        const val EXTRA_SHOW_LIBRARY = "io.github.chenxiex.calibrecloud.extra.SHOW_LIBRARY"
+    }
+
     private val librariesModel by lazy {
         ViewModelProvider(this, LibraryListViewModel.factory(applicationContext))[LibraryListViewModel::class.java]
     }
@@ -42,6 +48,9 @@ class MainActivity : ComponentActivity() {
     private val openModel by lazy {
         ViewModelProvider(this, OpenViewModel.factory(applicationContext))[OpenViewModel::class.java]
     }
+    private val externalControlModel by lazy {
+        ViewModelProvider(this, ExternalControlViewModel.factory(applicationContext))[ExternalControlViewModel::class.java]
+    }
     private val taskModel by lazy {
         ViewModelProvider(this, TaskViewModel.factory(applicationContext))[TaskViewModel::class.java]
     }
@@ -54,6 +63,8 @@ class MainActivity : ComponentActivity() {
     private var pendingNotice: (() -> Unit)? = null
     /** The [MoreTarget] a tapped open notification asks for. */
     private var moreRequest by mutableStateOf<Int?>(null)
+    /** Counts requests to show the library tab; each new value shows it once. */
+    private var libraryRequest by mutableIntStateOf(0)
     private var pickerOpen by mutableStateOf(false)
     private val picker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         pickerOpen = false
@@ -67,14 +78,17 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         pickerOpen = savedInstanceState?.getBoolean("picker_open") ?: false
         intent.data?.toString()?.let { oneDriveModel.callback(it); intent.data = null }
-        if (savedInstanceState == null) takeMoreRequest(intent)
+        if (savedInstanceState == null) {
+            takeMoreRequest(intent)
+            takeLibraryRequest(intent)
+        }
         val dependencies = (application as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies
         dependencies.applicationScope.launch { dependencies.backgroundTasks.onMainOpened() }
         enableEdgeToEdge()
         setContent {
             CalibreCloudTheme {
                 val models = MoreModels(librariesModel, oneDriveModel, oneDriveLibraryModel, metadataModel, downloadModel,
-                    cleanupModel, taskModel, openModel)
+                    cleanupModel, taskModel, openModel, externalControlModel)
                 val actions = MoreActions(
                     selectDirectory = {
                         pickerOpen = true
@@ -90,7 +104,7 @@ class MainActivity : ComponentActivity() {
                 )
                 MainScreen(libraryModel, openModel, { launchReader(this, it.copy) }, ::notify, ::notifyBatch, ::notifyReadFailure, moreRequest,
                     { moreRequest = null },
-                    librariesModel.revision) { request, handled, showLibrary ->
+                    librariesModel.revision, libraryRequest) { request, handled, showLibrary ->
                     MoreScreen(models, actions, pickerOpen, request, handled, showLibrary)
                 }
             }
@@ -102,6 +116,13 @@ class MainActivity : ComponentActivity() {
         intent.data?.toString()?.let { oneDriveModel.callback(it) }
         intent.data = null
         takeMoreRequest(intent)
+        takeLibraryRequest(intent)
+    }
+
+    private fun takeLibraryRequest(intent: Intent) {
+        if (!intent.getBooleanExtra(EXTRA_SHOW_LIBRARY, false)) return
+        libraryRequest++
+        intent.removeExtra(EXTRA_SHOW_LIBRARY)
     }
 
     private fun takeMoreRequest(intent: Intent) {

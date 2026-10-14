@@ -10,6 +10,7 @@
 - [AGENTS.md](AGENTS.md)：轻量 SDD 流程、协作、文件写入和验证约定。
 - [questions.md](questions.md)：当前已确认结论，以及后续需要填写的阻塞问题。
 - [Android 真机操作技能](.agents/skills/android-device-verification/SKILL.md)：可复用 ADB helper、页面流程与轻量设备操作 agent。
+- [external/](external/AGENTS.md)：第三方阅读器调用外部控制接口（R37）的适配，目前有 [KOReader 插件](external/koreader/AGENTS.md)，随应用版本打包发布。
 
 ## OneDrive 应用注册
 

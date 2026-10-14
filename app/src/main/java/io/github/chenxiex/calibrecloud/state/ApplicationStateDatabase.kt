@@ -33,6 +33,8 @@ import org.json.JSONObject
  * queued_tasks records whether a task has started and the sync that followed a write, and
  * dispatch_next names the task the next selection must take. Payloads keep their ignored commit field.
  * Version 15 adds application_settings.library_view, the library page's saved view and filters.
+ * Version 16 adds the external control interface: the copies handed to readers by name, the switch
+ * and the registered callers.
  * Future upgrades must migrate in a transaction and preserve manifests, tasks and recovery evidence.
  * Unsupported upgrades fail closed instead of dropping tables; downgrade is also rejected by SQLiteOpenHelper.
  * Raising [VERSION] also requires its reversal in the androidTest StateSchemaHistory fixture.
@@ -40,7 +42,7 @@ import org.json.JSONObject
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
     SQLiteOpenHelper(context.applicationContext, name, null, VERSION) {
     companion object {
-        const val VERSION = 15
+        const val VERSION = 16
     }
 
     private val privateFiles = context.applicationContext.filesDir
@@ -65,6 +67,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createLibraryList(db)
         createReadStatusChanges(db)
         createLibraryView(db)
+        createExternalControl(db)
     }
 
     /**
@@ -406,6 +409,31 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
             createReadStatusChanges(db)
         }
         if (oldVersion <= 14) createLibraryView(db)
+        if (oldVersion <= 15) createExternalControl(db)
+    }
+
+    /**
+     * R37: [opened_copies] keeps, per library, the copy last handed to a reader under each display name,
+     * so a reader's request naming its file finds the book. [external_control] is the global switch and
+     * [external_clients] the callers the user allowed, by the SHA-256 of their token; a name registers once.
+     */
+    private fun createExternalControl(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE opened_copies (
+            library_id TEXT NOT NULL REFERENCES library_bindings(library_id),
+            reader_name TEXT NOT NULL,
+            source_id INTEGER NOT NULL CHECK(source_id > 0),
+            source_uuid TEXT NOT NULL,
+            format TEXT NOT NULL,
+            opened_at INTEGER NOT NULL,
+            PRIMARY KEY(library_id, reader_name)
+        )""".trimIndent())
+        db.execSQL("CREATE INDEX opened_copy_name ON opened_copies(reader_name)")
+        db.execSQL("ALTER TABLE application_settings ADD COLUMN external_control INTEGER NOT NULL DEFAULT 0 CHECK(external_control IN (0, 1))")
+        db.execSQL("""CREATE TABLE external_clients (
+            name TEXT PRIMARY KEY NOT NULL CHECK(length(name) > 0),
+            token_hash TEXT NOT NULL UNIQUE,
+            registered_at INTEGER NOT NULL
+        )""".trimIndent())
     }
 
     /**

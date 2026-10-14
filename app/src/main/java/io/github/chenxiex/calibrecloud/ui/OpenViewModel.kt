@@ -78,7 +78,8 @@ interface BookOpening {
 
     suspend fun lastOpened(libraryId: LibraryId): LastOpened?
 
-    suspend fun saveLastOpened(value: LastOpened)
+    /** Saves [value] and records [copy] under the name the reader was given, which R37 requests name. */
+    suspend fun saveLastOpened(value: LastOpened, copy: DownloadedCopy)
 }
 
 /** Why a book could not be handed to a reader. Pages resolve the text from resources. */
@@ -293,7 +294,7 @@ class OpenViewModel(
                 lastOpened = value
                 viewModelScope.launch {
                     try {
-                        port.saveLastOpened(value)
+                        port.saveLastOpened(value, started.copy)
                     } catch (failure: CancellationException) {
                         throw failure
                     } catch (_: Exception) {
@@ -490,14 +491,14 @@ class OpenViewModel(
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val dependencies = (context.applicationContext as CalibreCloudApplication).dependencies
-                return modelClass.cast(OpenViewModel(QueueBookOpening(dependencies)))!!
+                return modelClass.cast(OpenViewModel(QueueBookOpening(dependencies, context.applicationContext)))!!
             }
         }
     }
 }
 
 /** Production port: the shared copy reader, user downloads through the copy service, and the state database. */
-class QueueBookOpening(private val dependencies: ApplicationDependencies) : BookOpening {
+class QueueBookOpening(private val dependencies: ApplicationDependencies, private val context: Context) : BookOpening {
     override suspend fun selection() = dependencies.state.current()
 
     override suspend fun locate(key: CopyKey): LocatedCopy = when (val read = dependencies.copyReader.read(key)) {
@@ -555,7 +556,8 @@ class QueueBookOpening(private val dependencies: ApplicationDependencies) : Book
 
     override suspend fun lastOpened(libraryId: LibraryId) = dependencies.lastOpened.get(libraryId)
 
-    override suspend fun saveLastOpened(value: LastOpened) = dependencies.lastOpened.save(value)
+    override suspend fun saveLastOpened(value: LastOpened, copy: DownloadedCopy) =
+        dependencies.lastOpened.save(value, BookUris.displayName(context, copy))
 }
 
 /** Hands [copy] to the system's reader chooser for its MIME type with a read-only grant. */

@@ -37,6 +37,28 @@
             </intent-filter>
         </activity>
         <activity android:name="net.openid.appauth.RedirectUriReceiverActivity" tools:node="remove" />
+        <!--
+            R37 external control. Both entries are exported to any caller; a request is carried out only
+            while the user's switch is on and its token is registered. The receiver keeps the caller in
+            front (explicit broadcasts only, so no filter); the Activity opens this app or asks the user
+            in a task of its own, which returns to the caller when it finishes, even when the caller
+            starts it as a new task (as KOReader does); it also answers the link scheme of this variant.
+        -->
+        <receiver
+            android:name=".control.ExternalControlReceiver"
+            android:exported="true" />
+        <activity
+            android:name=".control.ExternalControlActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.CalibreCloud.Prompt">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="${externalControlScheme}" />
+            </intent-filter>
+        </activity>
         <!-- Serves only published book generations, read-only, through per-URI grants. -->
         <provider
             android:name=".files.BookFileProvider"

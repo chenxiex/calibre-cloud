@@ -1,6 +1,7 @@
 package io.github.chenxiex.calibrecloud.state
 
 import android.content.ContentValues
+import android.database.sqlite.SQLiteDatabase
 import io.github.chenxiex.calibrecloud.model.BookFormat
 import io.github.chenxiex.calibrecloud.model.BookKey
 import io.github.chenxiex.calibrecloud.model.CopyKey
@@ -16,17 +17,22 @@ data class LastOpened(val key: CopyKey, val title: String)
 interface LastOpenedStore {
     suspend fun get(libraryId: LibraryId): LastOpened?
 
-    /** Replaces the record of the copy's library. Call only after the system accepted the open request. */
-    suspend fun save(value: LastOpened)
+    /**
+     * Replaces the record of the copy's library and records the copy under [readerName], the display name
+     * the reader was given (R29, R37). Call only after the system accepted the open request.
+     */
+    suspend fun save(value: LastOpened, readerName: String)
 }
 
 /**
- * Last opened book per library binding. Clearing metadata, removing copies or clearing other
- * libraries' caches keeps it; it never implies that the book was read and never touches the source.
+ * Last opened book per library binding, and every copy handed to a reader by its display name (R37).
+ * Clearing metadata, removing copies or clearing other libraries' caches keeps both; removing the
+ * library deletes them. Neither implies that the book was read, and neither touches the source.
  */
 class LastOpenedRepository(
     private val database: ApplicationStateDatabase,
     private val ioDispatcher: CoroutineDispatcher,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : LastOpenedStore {
     override suspend fun get(libraryId: LibraryId): LastOpened? = withContext(ioDispatcher) {
         database.readableDatabase.rawQuery(
@@ -40,13 +46,43 @@ class LastOpenedRepository(
         }
     }
 
-    override suspend fun save(value: LastOpened): Unit = withContext(ioDispatcher) {
-        database.writableDatabase.insertWithOnConflict("last_opened", null, ContentValues().apply {
-            put("library_id", value.key.book.libraryId.value.toString())
-            put("source_id", value.key.book.sourceId)
-            put("source_uuid", value.key.book.sourceUuid.toString())
-            put("format", value.key.format.value)
-            put("title", value.title)
-        }, android.database.sqlite.SQLiteDatabase.CONFLICT_REPLACE)
+    override suspend fun save(value: LastOpened, readerName: String): Unit = withContext(ioDispatcher) {
+        val db = database.writableDatabase
+        db.beginTransaction()
+        try {
+            db.insertWithOnConflict("last_opened", null, ContentValues().apply {
+                put("library_id", value.key.book.libraryId.value.toString())
+                put("source_id", value.key.book.sourceId)
+                put("source_uuid", value.key.book.sourceUuid.toString())
+                put("format", value.key.format.value)
+                put("title", value.title)
+            }, SQLiteDatabase.CONFLICT_REPLACE)
+            db.insertWithOnConflict("opened_copies", null, ContentValues().apply {
+                put("library_id", value.key.book.libraryId.value.toString())
+                put("reader_name", readerName)
+                put("source_id", value.key.book.sourceId)
+                put("source_uuid", value.key.book.sourceUuid.toString())
+                put("format", value.key.format.value)
+                put("opened_at", clock())
+            }, SQLiteDatabase.CONFLICT_REPLACE)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
+     * The copies handed to a reader as [readerName], in any library (R37). A library keeps one per name,
+     * the latest; the caller decides what a record of another library means.
+     */
+    suspend fun opened(readerName: String): List<CopyKey> = withContext(ioDispatcher) {
+        database.readableDatabase.rawQuery(
+            "SELECT library_id, source_id, source_uuid, format FROM opened_copies WHERE reader_name = ?", arrayOf(readerName),
+        ).use {
+            buildList {
+                while (it.moveToNext()) add(CopyKey(BookKey(LibraryId(UUID.fromString(it.getString(0))), it.getLong(1),
+                    UUID.fromString(it.getString(2))), BookFormat.parse(it.getString(3))))
+            }
+        }
     }
 }

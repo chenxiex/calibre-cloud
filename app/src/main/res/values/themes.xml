@@ -8,4 +8,10 @@
         <item name="android:colorAccent">#000000</item>
         <item name="android:windowBackground">#FFFFFF</item>
     </style>
+
+    <!-- The external control prompt over the caller (R37): no window background or animation of its own. -->
+    <style name="Theme.CalibreCloud.Prompt">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
 </resources>

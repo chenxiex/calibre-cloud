@@ -18,12 +18,14 @@
 - [图书馆查询约束](src/main/java/io/github/chenxiex/calibrecloud/library/AGENTS.md)：本地索引、搜索、筛选、分类、排序与默认格式。
 - [界面约束](src/main/java/io/github/chenxiex/calibrecloud/ui/AGENTS.md)：分页容器、无动画、测试标签与图书馆页面状态。
 - [应用状态约束](src/main/java/io/github/chenxiex/calibrecloud/state/AGENTS.md)：原生 SQLite、候选配置、身份绑定、最小清单及事务。
+- [外部控制约束](src/main/java/io/github/chenxiex/calibrecloud/control/AGENTS.md)：外部阅读器请求格式、两个导出入口、登记与打开记录匹配。
 
 ## Manifest 与入口
 
 - debug 使用 `.debug` application ID 后缀和可辨认名称，AndroidTest 使用独立测试包。provider authority 均由 `${applicationId}` 派生；书籍 provider 使用 `${applicationId}.books`，只提供下载清单中已发布的完整副本。
 - OAuth 配置与回调地址验证见 [授权模块](src/main/java/io/github/chenxiex/calibrecloud/auth/AGENTS.md)。缺少完整配置时回调接收器显式禁用，使用各变体独立的 `.disabled` scheme；不能阻止本地构建、发起登录或显示虚构成功。
 - 当前入口已接入本地目录授权，开发约束见 [本地授权](src/main/java/io/github/chenxiex/calibrecloud/storage/local/AGENTS.md)。本地授权恢复只检查平台授权与私有配置，显式“验证／同步元数据”经持久候选任务调用只读 SAF 后端，快照交给同一元数据导入器原子发布；OneDrive 通过持久候选任务调用个人文件后端，完整目录浏览和只读快照均不在 UI 中直接访问 Graph，目录翻页只操作本地完整结果；授权与有效令牌刷新由应用容器共享组件管理。注册一次性 `QueueWorker`，提交与控制后经 WorkManager 唤醒同一持久队列和执行锁，不创建周期任务。保留默认 initializer 的移除配置，由 Application 的 `Configuration.Provider` 支持按需初始化；配置遵循[官方初始化说明](https://developer.android.com/develop/background-work/background-tasks/persistent/configuration/custom-configuration)。长任务使用 `dataSync` 前台服务与静态通知，权限及类型遵循[官方长任务说明](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/long-running)，平台启动限制和任务配额不能靠注册 worker 消除。
+- 导出组件只有启动 Activity、OAuth 回调和 R37 的 `ExternalControlReceiver`／`ExternalControlActivity`；后两者对任意调用方开放，由开关与登记令牌把关，见[外部控制约束](src/main/java/io/github/chenxiex/calibrecloud/control/AGENTS.md)。
 - 只申请已实现路径需要的权限；检查依赖合并的 Manifest，不因声明依赖而开放网络、广泛存储或后台权限。网络入口使用 HTTPS。
 - 凭据和授权数据不能进入备份／设备迁移；禁用备份并排除普通应用数据域；授权密文置于 noBackupFilesDir，使用不可导出的 Keystore AES-GCM 密钥，不能移至普通 files/cache。
 - 应用控制的页面遵循 R20：不通过滚动遍历内容、不添加过渡或加载动画，状态在灰度下可辨认。静态占位入口使用文字和布局，避免默认点击效果；内容超出一页时采用显式分页。新页面使用共享主题与组件，不各自实现同用途控件或直接写样式值，见[界面约束](src/main/java/io/github/chenxiex/calibrecloud/ui/AGENTS.md)。
@@ -36,7 +38,7 @@
 - 设备测试的 runner 是 androidTest 中的 `io.github.chenxiex.calibrecloud.AwakeTestRunner`，手动 `am instrument` 也要指定它。它在整轮测试期间持有 partial wake lock：PA6 亮屏时若无 wake lock 也会挂起 CPU，每分钟只醒约 7 秒，测试进程会随之冻结。
 - 经 Gradle 运行设备测试（如 `connectedDebugAndroidTest`）前，先读取环境中的 `ADB_SERVER_SOCKET`：其值为 `tcp:<主机>:<端口>` 且主机不是本机回环地址时，Gradle 的 ddmlib 不读取该变量、只连接 `127.0.0.1`，须先在后台启动 `socat TCP-LISTEN:<端口>,bind=127.0.0.1,fork,reuseaddr TCP:<主机>:<端口>`（端口不是 5037 时同时设置 `ANDROID_ADB_SERVER_PORT`），确认转发进程在运行后再启动 Gradle；转发建立前已启动的测试结果作废重跑，测试结束后停止 socat。变量为空或已指向本机时不需要转发。背景见[开发容器说明](../.github/.devcontainer/README.md)。
 - ADB 安装前先从 APK 核对 debug application ID，只使用测试书库副本；记录结果后卸载 debug 与测试包，不覆盖正式应用或访问正式数据。
-- 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md)、[第二阶段记录](verification/phase-2.md)、[第三阶段记录](verification/phase-3.md)、[第四阶段记录](verification/phase-4.md) 与 [第五阶段记录](verification/phase-5.md)。构建及模拟平台／服务响应不能替代对应阶段的真实设备／上游验证；在目标真机自动执行的测试或 ADB 操作按其实际覆盖范围计为真机证据。
+- 实际命令、结果和未完成的验收分别写入 [第一阶段记录](verification/phase-1.md)、[第二阶段记录](verification/phase-2.md)、[第三阶段记录](verification/phase-3.md)、[第四阶段记录](verification/phase-4.md) 与 [第五阶段记录](verification/phase-5.md)；首版之后的功能另有专题记录，如 [外部控制记录](verification/external-control.md)。构建及模拟平台／服务响应不能替代对应阶段的真实设备／上游验证；在目标真机自动执行的测试或 ADB 操作按其实际覆盖范围计为真机证据。
 
 ## 测试设计与共同验收
 
