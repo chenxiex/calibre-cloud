@@ -14,6 +14,7 @@ ARG CALIBRE_SHA512=d1a162d472dfbc3b74946809a979197121277150efe9e2172786843573c89
 
 # Google's Linux SDK binaries require x86-64. The devcontainer selects this platform.
 # Android builds use Trixie's JDK 21; the Java editor extension bundles its own runtime.
+# KOReader plugins run on LuaJIT (Lua 5.1 API); busted and luacheck mirror KOReader's own checks.
 RUN test "$(dpkg --print-architecture)" = amd64 \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -29,6 +30,11 @@ RUN test "$(dpkg --print-architecture)" = amd64 \
         libxkbcommon0 \
         libxrandr2 \
         libxtst6 \
+        lua-busted \
+        lua-check \
+        lua5.1 \
+        luajit \
+        luarocks \
         openjdk-21-jdk-headless \
         python3 \
         ripgrep \

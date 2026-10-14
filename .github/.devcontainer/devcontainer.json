@@ -19,6 +19,7 @@
             "extensions": [
                 "mathiasfrohlich.Kotlin",
                 "redhat.java",
+                "sumneko.lua",
                 "vscjava.vscode-gradle"
             ],
             "settings": {
