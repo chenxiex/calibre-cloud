@@ -65,6 +65,8 @@ internal fun MainScreen(
     onMoreRequestHandled: () -> Unit = {},
     /** Changes whenever the current library may have changed on the more page, which keeps the tab. */
     libraryRevision: Int = 0,
+    /** Each new positive value shows the library tab once, for an external request that opens this app. */
+    libraryRequest: Int = 0,
     /** The "更多" tab; its last argument shows the library tab, as finishing the add-library wizard does. */
     more: @Composable (request: Int?, onRequestHandled: () -> Unit, showLibrary: () -> Unit) -> Unit,
 ) {
@@ -103,6 +105,7 @@ internal fun MainScreen(
             library.readFailureHandled(readFailure)
         }
     }
+    LaunchedEffect(libraryRequest) { if (libraryRequest > 0) select(TAB_LIBRARY) }
     LaunchedEffect(moreRequest) {
         if (moreRequest != null) {
             openMore(moreRequest)

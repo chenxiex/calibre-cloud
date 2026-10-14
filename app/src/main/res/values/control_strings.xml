@@ -1,0 +1,33 @@
+<resources>
+    <!-- R37: the external reader control interface. -->
+    <string name="more_external_control">外部阅读器控制</string>
+    <string name="external_control_explanation">允许已登记的阅读器（如安装了 Calibre Cloud 插件的 KOReader）把由本应用打开的书标为已读或未读，效果与图书馆页的按钮相同。阅读器在插件设置中选择“注册”并经你确认后即可使用。</string>
+    <string name="external_control_switch">允许外部应用标记阅读状态</string>
+    <string name="external_control_clients">已登记的应用</string>
+    <string name="external_control_no_clients">尚未登记任何应用。</string>
+    <string name="external_control_registered_at">登记于 %1$s，点击移除</string>
+    <string name="external_control_failed">无法读取或保存外部阅读器控制设置，请稍后再试。</string>
+    <string name="external_control_remove_title">移除“%1$s”？</string>
+    <string name="external_control_remove_text">移除后该应用的请求都会被拒绝，需要在阅读器中重新注册。</string>
+
+    <string name="external_register_title">允许外部应用标记阅读状态？</string>
+    <string name="external_register_text">“%1$s”请求把由 Calibre Cloud 打开的书标为已读或未读。该名称由对方提供，Android 无法验证。</string>
+    <string name="external_register_replaces">同名应用已经登记，允许后将以新的登记替换。</string>
+    <string name="external_register_disabled">外部阅读器控制尚未开启，允许后将同时开启。</string>
+    <string name="external_register_allow">允许</string>
+    <string name="external_register_failed">无法保存登记，请再次注册。</string>
+
+    <string name="external_channel">外部阅读器的请求</string>
+    <string name="external_rejected_title">外部阅读器的请求未执行</string>
+    <string name="external_rejected_book">%1$s：%2$s</string>
+    <string name="external_rejected_disabled">外部阅读器控制未开启。可在“更多 → 外部阅读器控制”中开启，或在阅读器中重新注册。</string>
+    <string name="external_rejected_unregistered">该应用尚未登记或已被移除，请在阅读器插件中重新注册。</string>
+    <string name="external_rejected_unknown">不支持的请求，请更新 Calibre Cloud 或阅读器插件。</string>
+    <string name="external_rejected_malformed">请求缺少必要内容或格式不正确。</string>
+    <string name="external_rejected_no_library">尚未选择书库，或当前书库还没有元数据。</string>
+    <string name="external_rejected_not_opened">当前书库中没有以此文件名交给阅读器的书。只能标记由 Calibre Cloud 打开的书。</string>
+    <string name="external_rejected_other_library">这本书属于另一个书库，请先在 Calibre Cloud 中切换到该书库。</string>
+    <string name="external_rejected_not_in_library">这本书已不在当前书库的元数据中，请同步元数据后再试。</string>
+    <string name="external_rejected_no_column">已读栏目未配置或已失效，无法标记阅读状态。可在设置中选择已读栏目。</string>
+    <string name="external_rejected_not_writable">当前书库暂时无法写回阅读状态，请打开 Calibre Cloud 查看原因。</string>
+</resources>

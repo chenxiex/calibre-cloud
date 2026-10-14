@@ -43,6 +43,8 @@ internal object MoreTarget {
     const val DOWNLOAD_LIST = 4
     /** The task queue, where a failed read-state write can be retried. */
     const val TASKS = 5
+    /** The external reader control settings, where a rejected request can be enabled (R37). */
+    const val EXTERNAL_CONTROL = 6
 }
 
 /** A page of "更多": the grouped menu or one of its sub-pages; back returns to [parent]. */
@@ -57,6 +59,7 @@ internal enum class MorePage(val parent: MorePage?, val title: Int) {
     BACKGROUND(MENU, R.string.more_background),
     FORMATS(MENU, R.string.more_formats),
     READ_COLUMN(MENU, R.string.more_read_column),
+    EXTERNAL_CONTROL(MENU, R.string.more_external_control),
     ABOUT(MENU, R.string.more_about),
     PROJECT_LICENSE(ABOUT, R.string.about_project_license),
     NOTICES(ABOUT, R.string.about_notices),
@@ -67,6 +70,7 @@ internal enum class MorePage(val parent: MorePage?, val title: Int) {
             MoreTarget.LOCATION, MoreTarget.LOCAL_AUTHORIZATION, MoreTarget.ONEDRIVE_LOGIN -> LIBRARIES
             MoreTarget.DOWNLOAD_LIST -> DOWNLOADS
             MoreTarget.TASKS -> TASKS
+            MoreTarget.EXTERNAL_CONTROL -> EXTERNAL_CONTROL
             else -> MENU
         }
     }
@@ -82,6 +86,7 @@ internal class MoreModels(
     val cleanup: CleanupViewModel,
     val tasks: TaskViewModel,
     val open: OpenViewModel,
+    val externalControl: ExternalControlViewModel,
 )
 
 /**
@@ -180,6 +185,7 @@ internal fun MoreScreen(
                 MorePage.BACKGROUND -> BackgroundSettings(models.tasks, actions.requestNotifications)
                 MorePage.FORMATS -> FormatPriorityPage(metadata)
                 MorePage.READ_COLUMN -> ReadColumnPage(metadata)
+                MorePage.EXTERNAL_CONTROL -> ExternalControlPage(models.externalControl)
                 MorePage.ABOUT -> AboutPage(show)
                 MorePage.PROJECT_LICENSE -> LicenseTextPage(R.raw.license_gpl_3_0, "project_license")
                 MorePage.NOTICES -> NoticesPage { licenseId = it; show(MorePage.NOTICE_LICENSE) }
@@ -299,6 +305,7 @@ private fun menuEntries(models: MoreModels, show: (MorePage) -> Unit, includeCon
             enabled = tasks.settingsLoaded) { tasks.toggleStartup() })
         add(MenuEntry.Choice("more_formats", stringResource(R.string.more_formats)) { show(MorePage.FORMATS) })
         add(MenuEntry.Choice("more_read_column", stringResource(R.string.more_read_column)) { show(MorePage.READ_COLUMN) })
+        add(MenuEntry.Choice("more_external_control", stringResource(R.string.more_external_control)) { show(MorePage.EXTERNAL_CONTROL) })
         add(MenuEntry.Rule)
         add(MenuEntry.Heading(stringResource(R.string.more_group_about)))
         add(MenuEntry.Choice("more_about", stringResource(R.string.more_about)) { show(MorePage.ABOUT) })

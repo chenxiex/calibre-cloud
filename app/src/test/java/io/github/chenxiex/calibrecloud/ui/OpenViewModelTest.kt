@@ -85,7 +85,7 @@ class OpenViewModelTest {
         override fun downloads() = active
         override suspend fun cancel(task: TaskId) { cancelled += task }
         override suspend fun lastOpened(libraryId: LibraryId) = records[libraryId]
-        override suspend fun saveLastOpened(value: LastOpened) { records[value.key.book.libraryId] = value }
+        override suspend fun saveLastOpened(value: LastOpened, copy: DownloadedCopy) { records[value.key.book.libraryId] = value }
 
         fun complete(key: CopyKey) {
             copies[key] = copyOf(key)

@@ -62,9 +62,9 @@ class LastOpenedRepositoryTest {
     fun eachLibraryKeepsOnlyItsNewestRecordAcrossRestarts() = runBlocking<Unit> {
         val first = bound("first")
         val second = bound("second")
-        records.save(opened(first, 1, "EPUB", "旧书"))
-        records.save(opened(first, 2, "PDF", "新书"))
-        records.save(opened(second, 1, "EPUB", "other"))
+        records.save(opened(first, 1, "EPUB", "旧书"), "旧书-1.epub")
+        records.save(opened(first, 2, "PDF", "新书"), "新书-2.pdf")
+        records.save(opened(second, 1, "EPUB", "other"), "other-1.epub")
 
         database.close()
         reopen()
@@ -84,7 +84,39 @@ class LastOpenedRepositoryTest {
         assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
         assertEquals(listOf("kept"), SearchHistoryRepository(database, Dispatchers.IO).list(library))
         assertNull(records.get(library))
-        records.save(opened(library, 3, "EPUB", "after"))
+        records.save(opened(library, 3, "EPUB", "after"), "after-3.epub")
         assertEquals(opened(library, 3, "EPUB", "after"), records.get(library))
+    }
+
+    @Test
+    fun openedCopiesAreFoundByReaderNameInEveryLibrary() = runBlocking<Unit> {
+        val first = bound("first")
+        val second = bound("second")
+        records.save(opened(first, 4, "EPUB", "哈姆莱特"), "哈姆莱特-4.epub")
+        records.save(opened(first, 5, "PDF", "other"), "other-5.pdf")
+        records.save(opened(second, 4, "EPUB", "哈姆莱特"), "哈姆莱特-4.epub")
+        // A later open of the same name in one library replaces that library's record only.
+        records.save(opened(first, 4, "EPUB", "哈姆莱特"), "哈姆莱特-4.epub")
+
+        database.close()
+        reopen()
+        assertEquals(setOf(opened(first, 4, "EPUB", "").key, opened(second, 4, "EPUB", "").key), records.opened("哈姆莱特-4.epub").toSet())
+        assertEquals(listOf(opened(first, 5, "PDF", "").key), records.opened("other-5.pdf"))
+        assertTrue(records.opened("missing-1.epub").isEmpty())
+    }
+
+    @Test
+    fun versionFifteenMigrationKeepsLastOpenedAndStartsWithoutOpenedCopies() = runBlocking<Unit> {
+        val library = bound("migrated")
+        records.save(opened(library, 3, "EPUB", "before"), "before-3.epub")
+        StateSchemaHistory.downgrade(database.writableDatabase, 15)
+        database.close()
+        reopen()
+        assertEquals(ApplicationStateDatabase.VERSION, database.readableDatabase.version)
+        assertEquals(opened(library, 3, "EPUB", "before"), records.get(library))
+        assertTrue(records.opened("before-3.epub").isEmpty())
+        val control = ExternalControlRepository(database, Dispatchers.IO)
+        assertEquals(false, control.enabled())
+        assertTrue(control.clients().isEmpty())
     }
 }

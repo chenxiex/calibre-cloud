@@ -69,8 +69,20 @@ object StateSchemaHistory {
         startup_sync INTEGER NOT NULL DEFAULT 0 CHECK(startup_sync IN (0, 1)),
         format_priority TEXT NOT NULL DEFAULT 'EPUB')"""
 
+    private const val SETTINGS_V15 = """CREATE TABLE application_settings (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        startup_sync INTEGER NOT NULL DEFAULT 0 CHECK(startup_sync IN (0, 1)),
+        format_priority TEXT NOT NULL DEFAULT 'EPUB',
+        library_view TEXT)"""
+
     /** Key: a version; value: turns that version's schema into the previous version's. */
     private val reversals: Map<Int, (SQLiteDatabase) -> Unit> = mapOf(
+        16 to { db ->
+            // Version 15 had no external control: no opened copies, switch or registered callers.
+            db.execSQL("DROP TABLE opened_copies")
+            db.execSQL("DROP TABLE external_clients")
+            rebuild(db, "application_settings", SETTINGS_V15)
+        },
         15 to { db -> rebuild(db, "application_settings", SETTINGS_V14) },
         14 to { db ->
             // Version 13 kept no change lists, start marks, follow-up syncs or next selection.

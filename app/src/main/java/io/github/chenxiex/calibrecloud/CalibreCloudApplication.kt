@@ -117,6 +117,7 @@ class ApplicationDependencies(context: Context) {
     val copyReader by lazy { PrivateCopyReader(state, bookFiles, Dispatchers.IO, state.copyAccess) }
     val bookCatalog by lazy { io.github.chenxiex.calibrecloud.files.StateBookCatalog(state, applicationContext.filesDir) }
     val lastOpened by lazy { io.github.chenxiex.calibrecloud.state.LastOpenedRepository(database, Dispatchers.IO) }
+    val externalControl by lazy { io.github.chenxiex.calibrecloud.state.ExternalControlRepository(database, Dispatchers.IO) }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }
     val localAuthorization by lazy { LocalDirectoryAuthorization(localPermissions, Dispatchers.IO) }
 }

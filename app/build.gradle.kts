@@ -125,6 +125,8 @@ android {
         sourceSets.getByName(name).manifest.srcFile(
             "oauth-manifests/${if (callback?.host != null) "hosted" else "hostless"}.xml",
         )
+        // R37 link entry; distinct from every OAuth callback scheme, which uses the application ID.
+        manifestPlaceholders["externalControlScheme"] = if (name == "debug") "calibrecloud-debug" else "calibrecloud"
         manifestPlaceholders["appAuthRedirectScheme"] = callback?.scheme ?: disabledScheme
         manifestPlaceholders["appAuthRedirectHost"] = callback?.host.orEmpty()
         manifestPlaceholders["appAuthRedirectPath"] = if (callback?.host != null) callback.path else ""

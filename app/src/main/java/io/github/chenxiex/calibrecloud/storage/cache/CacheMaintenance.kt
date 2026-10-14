@@ -159,7 +159,7 @@ class CacheMaintenance(
             if (plan.kind == CleanupKind.LIBRARY) {
                 plan.libraries.forEach { library ->
                     val args = arrayOf(library.value.toString())
-                    listOf("library_preferences", "search_history", "last_opened").forEach { db.delete(it, "library_id = ?", args) }
+                    listOf("library_preferences", "search_history", "last_opened", "opened_copies").forEach { db.delete(it, "library_id = ?", args) }
                 }
                 val location = requireNotNull(plan.location)
                 db.delete("configured_libraries", "backend = ? AND location_key = ?", state.locationArgs(location))

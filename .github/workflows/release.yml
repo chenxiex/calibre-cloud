@@ -22,6 +22,11 @@ jobs:
               echo "Tag $GITHUB_REF_NAME does not match versionName $version" >&2
               exit 1
           fi
+          plugin=$(sed -n 's/^ *version = "\(.*\)",/\1/p' external/koreader/calibrecloud.koplugin/_meta.lua)
+          if [ "$plugin" != "$version" ]; then
+              echo "KOReader plugin version $plugin does not match versionName $version" >&2
+              exit 1
+          fi
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -45,5 +50,8 @@ jobs:
         run: |
           apk=$(ls app/build/outputs/apk/release/*.apk)
           cp "$apk" "$RUNNER_TEMP/calibre-cloud-$GITHUB_REF_NAME.apk"
+          # The zip holds the plugin folder itself, to be extracted into KOReader's plugins directory.
+          (cd external/koreader && zip -r "$RUNNER_TEMP/calibrecloud-koreader-plugin-$GITHUB_REF_NAME.zip" calibrecloud.koplugin)
           gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP/calibre-cloud-$GITHUB_REF_NAME.apk" \
+              "$RUNNER_TEMP/calibrecloud-koreader-plugin-$GITHUB_REF_NAME.zip" \
               --title "$GITHUB_REF_NAME" --generate-notes
