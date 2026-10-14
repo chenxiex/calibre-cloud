@@ -1,6 +1,6 @@
 # Android 开发容器
 
-本配置提供命令行编译、静态检查、SQLite 数据检查和 ADB 工具，适用于 Kotlin + Jetpack Compose + AppAuth-Android + OkHttp + 原生 SQLite + WorkManager。初始化容器不会创建工程、下载应用依赖或执行应用构建；应用工程的构建说明见 [Android 工程](../../app/README.md#构建)。
+本配置提供命令行编译、静态检查、SQLite 数据检查、ADB 工具和 KOReader 插件所需的 Lua 环境，适用于 Kotlin + Jetpack Compose + AppAuth-Android + OkHttp + 原生 SQLite + WorkManager。初始化容器不会创建工程、下载应用依赖或执行应用构建；应用工程的构建说明见 [Android 工程](../../app/README.md#构建)。
 
 ## 镜像内的工具
 
@@ -14,6 +14,7 @@
 | Android Build Tools | 36.0.0 | `aapt2`、`apksigner`、`zipalign` 等工具 |
 | Android Platform Tools | 构建镜像时的稳定版本 | `adb`，在日常创建容器时不重新下载 |
 | Calibre | 9.14.0 官方 Linux 二进制包，安装在 `/opt/calibre` | `calibredb`、`ebook-meta` 等命令行工具，用于制作测试书库；`QT_QPA_PLATFORM=offscreen` 使其无需图形界面 |
+| LuaJIT、Lua 5.1、LuaRocks、busted、luacheck | Debian 仓库版本 | 开发和检查 KOReader 插件：KOReader 运行在 LuaJIT（Lua 5.1 API）上，`busted` 运行单元测试，`luacheck` 做静态检查；其他 Lua 模块可通过 `luarocks --local` 安装到用户目录 |
 | `sqlite3`、`jq`、`curl` | Debian 仓库版本 | 检查 Calibre 的 `metadata.db` 和 API 响应 |
 | Python 3、`rsync`、`ripgrep`、`shellcheck`、`zip`、`unzip` | Debian 仓库版本 | 初始化缓存、搜索和脚本检查 |
 
@@ -58,7 +59,7 @@ devcontainer build --workspace-folder . --config .github/.devcontainer/devcontai
 
 容器固定使用 `linux/amd64`，因为本配置中的 Google Linux SDK 原生工具使用 x86-64。ARM 宿主机需要容器运行时支持 amd64 模拟。配置使用非 root 用户开发，自动等待缓存初始化结束后再连接编辑器。
 
-VS Code 配置包含 Kotlin 语法支持、Java 和 Gradle 扩展。Java 的 `linux-x64` 平台扩展自带语言服务器运行时，构建 JVM 固定为镜像中的 JDK 21，参考 [扩展官方说明](https://github.com/redhat-developer/vscode-java#java-tooling-jdk)。这些扩展提供基础编辑支持；Compose Preview、Layout Inspector 等 Android Studio 功能需要在宿主机使用 Android Studio。
+VS Code 配置包含 Kotlin 语法支持、Java、Gradle 和 Lua 扩展。Lua 扩展自带语言服务器，编辑 KOReader 插件时应在插件目录的 `.luarc.json` 中将运行时设为 `LuaJIT`。Java 的 `linux-x64` 平台扩展自带语言服务器运行时，构建 JVM 固定为镜像中的 JDK 21，参考 [扩展官方说明](https://github.com/redhat-developer/vscode-java#java-tooling-jdk)。这些扩展提供基础编辑支持；Compose Preview、Layout Inspector 等 Android Studio 功能需要在宿主机使用 Android Studio。
 
 仓库已包含项目 Wrapper，维护规则见 [Gradle 配置维护](../../gradle/AGENTS.md)。镜像里的 Gradle 仅用于初始化或重新生成匹配版本的 Wrapper：
 
