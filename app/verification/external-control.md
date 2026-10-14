@@ -1,6 +1,6 @@
 # 外部控制接口验证记录
 
-范围为 [R37](../../spec.md#r37--外部阅读器控制接口) 与 AC11（Q84–Q92）：应用侧的两个导出入口、登记、打开记录匹配和拒绝通知，以及 [KOReader 插件](../../external/koreader/AGENTS.md)。本记录只保存本轮实际执行的检查；未执行或未通过的项单列在末尾。
+范围为 [R37](../../spec.md#r37--外部阅读器控制接口) 与 AC11（Q84–Q96）：应用侧的两个导出入口、登记、打开记录匹配和拒绝通知，以及 [KOReader 插件](../../external/koreader/AGENTS.md)。本记录只保存本轮实际执行的检查；未执行或未通过的项单列在末尾。
 
 ## 被验证的版本
 
@@ -62,6 +62,25 @@ adb shell am instrument -w -e class <下列测试类> io.github.chenxiex.calibre
 用户随后关闭“同时删除阅读数据”（设置中 `remove_sdr = false`）重试：从 debug 包再次打开书 5（22:21 重新导入），在阅读中标为已读并切到 debug 包（22:22:30 测试书库发生写回提交，`read_status` 为 1）。此时 KOReader 仍打开该书，副本保留；用户回到 KOReader 打开另一本书后，`李尔王-5.epub` 被删除，`李尔王-5.sdr` 保留（关闭时写入的 `metadata.epub.lua` 与 `.old`），与“打开中的书关闭后删除、只删副本”一致。保留的 `.sdr` 中书籍状态为 `reading`，用户确认这次经阅读菜单“在 Calibre Cloud 中标为已读”发送（该入口不改变 KOReader 的书籍状态），并认为这一结果可以接受。
 
 清理：测试书库 `metadata.db` 推回备份并核对哈希为 `ff09b715…`，已卸载 debug 包、删除插件目录，正式版未改动。保留项：KOReader 中的 `李尔王-5.sdr`、历史条目和 `settings.reader.lua` 中的 `calibrecloud` 设置项，属于用户的 KOReader 数据。
+
+## 标为已读后退出 KOReader 并打开 Calibre Cloud（Q94–Q96，2026-10-14）
+
+基于提交 `6c28d8a` 的未提交改动，只改插件；debug 包由该提交构建（`aapt2` 核对为 `io.github.chenxiex.calibrecloud.debug`）。退出流程参照 KOReader v2026.07.1 源码中的 `ReaderUI:onClose`、`FileManager:onClose`、`UIManager:quit` 与 Android `Device:exit`。
+
+| 检查 | 结果 |
+| --- | --- |
+| `luacheck --no-global --no-max-line-length` | 0 错误；5 条警告与改动前相同 |
+| 桩模块 harness（luajit） | 12 项通过：开关开启时手动标为已读先关闭书籍再 `quit`、不提示“已发送”；开关关闭时与标为未读时停留并提示；发送失败时提示且不退出；开启删除选项时正在阅读的书在退出前删除副本、保留 `.sdr`；不退出时仍在关闭后的下一轮删除；文件管理器设为读完时关闭文件管理器并退出 |
+
+真机（PA6，测试书库 `/sdcard/Download/calibre-step04-test-library`，开始前备份 `metadata.db`，哈希 `ff09b715…`）：用户添加书库、注册并在 KOReader 中手动操作，agent 经 ADB 核对日志与书库。
+
+- Q94 的中间版本（独立退出开关与打开／停留组合）：两种组合用户确认正常，返回不再回到 KOReader。书 5 与书 1 写回为 1；KOReader 日志依次为删除导入副本、`Preparing to quit UIManager`、`Stopping KOReader main activity`。用户随后指出“停留 + 退出”文案矛盾，改为 Q95 的方案。
+- Q95／Q96 的最终版本：开关开启时书 288 标为已读经 Activity 入口 `Accepted`，删除副本后 KOReader 退出，切到 debug 包；开关关闭时的标为已读及标为未读都只经广播 `Accepted`（无 Activity 启动），留在 KOReader。用户确认两个结果符合预期。
+- 书库：两轮只有被测书籍的 `read_status` 改变，`integrity_check` 为 `ok`。logcat 中含 `token=` 的行都来自系统窗口管理，没有插件令牌或请求 URI。
+
+清理：测试书库 `metadata.db` 推回备份并核对哈希为 `ff09b715…`，已卸载 debug 包、删除插件目录，正式版未改动。保留项：KOReader `settings.reader.lua` 的 `calibrecloud` 设置（含已不再读取的 `open_on_read`、`exit_on_read`）、导入目录中其它书的 `.sdr`，属于用户的 KOReader 数据。应用户要求，已强停 KOReader 后删除导入目录中的 `李尔王-5.epub` 与 `李尔王-5.sdr`（只含 `metadata.epub.lua` 及 `.old`）。
+
+未执行：书末提示与书籍状态页设为“读完”时的退出（自动发送路径只经桩测试覆盖）、多本书同时设为读完时的退出。
 
 ## 观察与未完成项
 

@@ -10,6 +10,8 @@ the user and remembers only its hash. Nothing here reads the reply: the app repo
 
 Optionally (Q93), once "mark as read" was sent, KOReader's own copy of the book in its import folder is deleted
 like KOReader deletes a file, with or without its sidecar (.sdr); a book that is open is deleted after it closes.
+"Mark as unread" always stays in KOReader. "Mark as read" stays too, or optionally (Q94, Q95) opens Calibre Cloud and
+exits KOReader, so going back from Calibre Cloud does not return to KOReader.
 
 @module koplugin.calibrecloud
 --]]
@@ -43,10 +45,7 @@ local zh = {
     ["Mark as read in Calibre Cloud"] = "在 Calibre Cloud 中标为已读",
     ["Mark as unread in Calibre Cloud"] = "在 Calibre Cloud 中标为未读",
     ["Follow book status automatically"] = "自动跟随书籍状态",
-    ["After marking as read"] = "标为已读后",
-    ["After marking as unread"] = "标为未读后",
-    ["Open Calibre Cloud"] = "打开 Calibre Cloud",
-    ["Stay in KOReader"] = "停留在 KOReader",
+    ["Exit KOReader and open Calibre Cloud after marking as read"] = "标为已读后退出 KOReader 并打开 Calibre Cloud",
     ["Register with Calibre Cloud"] = "注册到 Calibre Cloud",
     ["Register again if Calibre Cloud was reinstalled or the registration was removed."] = "如果重装了 Calibre Cloud 或移除了登记，请再次注册。",
     ["Calibre Cloud is not installed."] = "未安装 Calibre Cloud。",
@@ -89,6 +88,11 @@ local function setting(key, default)
         return default
     end
     return value
+end
+
+--- Whether "mark as read" opens Calibre Cloud and exits KOReader instead of staying in KOReader.
+local function openAndExit()
+    return setting("open_and_exit", false)
 end
 
 --- The installed Calibre Cloud: the chosen build (release by default), else whichever one is installed.
@@ -225,6 +229,15 @@ end
 -- Open books whose copy is deleted once the reader closes them: deleting earlier would pull the book from
 -- under the reader, and closing it writes the sidecar again.
 local closing = {}
+-- Copies of books that have just closed, deleted on the next tick or right before KOReader exits.
+local closed = {}
+
+local function deleteClosed()
+    for path in pairs(closed) do
+        closed[path] = nil
+        deleteCopy(path)
+    end
+end
 
 --- Follows a request that was sent for [file]: deletes its imported copy after "read" when the user chose so.
 local function sent(file, read)
@@ -249,7 +262,26 @@ local function sent(file, read)
     end
 end
 
--- Status changes waiting for the next tick, so a multi-book change opens Calibre Cloud at most once.
+--- Exits KOReader as its own Exit does, after the current event: closes the open book or the file manager (which
+--- saves the progress and settings), deletes copies of books that just closed, then quits. Quitting drops the other
+--- queued ticks, so a second exit queued meanwhile never runs.
+local function exit()
+    UIManager:nextTick(function()
+        local ReaderUI = require("apps/reader/readerui")
+        local FileManager = require("apps/filemanager/filemanager")
+        if ReaderUI.instance then
+            ReaderUI.instance:onClose()
+        end
+        if FileManager.instance then
+            FileManager.instance:onClose()
+        end
+        -- Quitting drops the queued ticks, so the deletions run now; the sidecar was written by onClose.
+        deleteClosed()
+        UIManager:quit()
+    end)
+end
+
+-- Status changes waiting for the next tick, so a multi-book change opens Calibre Cloud and exits at most once.
 local queued = {}
 local scheduled = false
 
@@ -265,19 +297,20 @@ local function flush()
         local read = requests[file]
         if send(read and "mark_read" or "mark_unread", { token = token, file = bookName(file) }, open) then
             sent(file, read)
+            return true
         end
     end
     local opener
     for file, read in pairs(requests) do
-        if setting(read and "open_on_read" or "open_on_unread", read) and not opener then
+        if read and openAndExit() and not opener then
             opener = file
         else
             request(file, false)
         end
     end
     -- The request that opens the app goes last, after the broadcasts were handed over.
-    if opener then
-        request(opener, true)
+    if opener and request(opener, true) then
+        exit()
     end
 end
 
@@ -363,13 +396,15 @@ function CalibreCloud:markCurrent(read)
     if not name then
         return show(_("Only books opened from Calibre Cloud can be marked."))
     end
-    local open = setting(read and "open_on_read" or "open_on_unread", read)
+    local open = read and openAndExit()
     local ok, problem = send(read and "mark_read" or "mark_unread", { token = token, file = name }, open)
     if not ok then
         return show(problem)
     end
     sent(file, read)
-    if not open then
+    if open then
+        exit()
+    else
         show(_("Sent to Calibre Cloud."))
     end
 end
@@ -378,8 +413,9 @@ function CalibreCloud:onCloseDocument()
     local path = importedCopy(self.ui.document and self.ui.document.file)
     if path and closing[path] then
         closing[path] = nil
+        closed[path] = true
         -- ReaderUI saves the sidecar after this event; delete once it is done.
-        UIManager:nextTick(function() deleteCopy(path) end)
+        UIManager:nextTick(deleteClosed)
     end
 end
 
@@ -410,30 +446,6 @@ function CalibreCloud:register()
     if not ok then
         show(problem)
     end
-end
-
-local function afterChoice(key, default)
-    return {
-        text_func = function()
-            local open = setting(key, default)
-            return (key == "open_on_read" and _("After marking as read") or _("After marking as unread")) .. ": "
-                .. (open and _("Open Calibre Cloud") or _("Stay in KOReader"))
-        end,
-        sub_item_table = {
-            {
-                text = _("Open Calibre Cloud"),
-                radio = true,
-                checked_func = function() return setting(key, default) end,
-                callback = function() saveSetting(key, true) end,
-            },
-            {
-                text = _("Stay in KOReader"),
-                radio = true,
-                checked_func = function() return not setting(key, default) end,
-                callback = function() saveSetting(key, false) end,
-            },
-        },
-    }
 end
 
 --- A deletion option that asks before it is turned on; turning it off needs no confirmation.
@@ -477,8 +489,11 @@ function CalibreCloud:addToMainMenu(menu_items)
         checked_func = function() return setting("auto", true) end,
         callback = function() saveSetting("auto", not setting("auto", true)) end,
     })
-    table.insert(items, afterChoice("open_on_read", true))
-    table.insert(items, afterChoice("open_on_unread", false))
+    table.insert(items, {
+        text = _("Exit KOReader and open Calibre Cloud after marking as read"),
+        checked_func = openAndExit,
+        callback = function() saveSetting("open_and_exit", not openAndExit()) end,
+    })
     table.insert(items, deletionChoice("remove_copy", _("Delete KOReader's copy after marking as read"), function()
         return ffiutil.template(_("After a book is sent to Calibre Cloud as read, KOReader's copy of it will be deleted:\n%1/Title-ID.ext\n\nOnly books KOReader imported from Calibre Cloud into this folder are deleted. A book that is open is deleted when you close it, unless you mark it as unread first. As when deleting a file in KOReader, the book is also removed from collections and dimmed or removed in History.\n\nIts reading data (.sdr) is kept unless you also turn on deleting it, so progress and highlights come back when you open the book from Calibre Cloud again. The book stays in Calibre Cloud and in your Calibre library."),
             importFolder() or "Android/data/…/files")
