@@ -7,5 +7,6 @@
 - 只有开关开启且令牌已登记才执行；书籍只从当前书库的打开记录（`LastOpenedRepository.opened`，由打开阅读器成功时写入）按显示名查找，其它书库的记录只用于给出“属于另一个书库”的原因。接受的请求经 `ReadStatusService.submit` 提交，与图书馆页按钮相同，不另建已读数据、不访问源。
 - 登记只保存令牌的 SHA-256，同名或同令牌再次登记时替换；确认登记时开关关闭则一并开启（Q92）。确认后若缺少通知权限即请求，因为拒绝只以 `ExternalNotifications` 的可替换通知告知（Q88），而请求到达时用户通常在阅读器中，无法再请求权限。
 - 日志只写结果（如 `Rejected(reason=…)`），`ExternalRequest.toString()` 不含令牌和文件名；令牌也不能出现在通知中（R33）。
+- KOReader 插件安装（Q97、Q98）由 [KoreaderPluginInstaller](KoreaderPlugin.kt) 负责，平台部分在 [KoreaderPluginAndroid](KoreaderPluginAndroid.kt)：插件文件来自 APK assets（构建时由 `external/koreader` 复制）；目录经系统选择器选择，只接受系统 external-storage 提供方且带读写持久授权，tree URI 存于 `application_settings.koreader_folder`。只在含 `plugins` 或 `settings.reader.lua` 的目录中写 `plugins/calibrecloud.koplugin/`，`_meta.lua` 最后写，中断后状态仍为需要更新；按名称查找子项，不读其它文件内容。被拒绝的目录及被替换的旧目录释放授权，但仍被书库使用的不释放；`accessKeyInUse` 也把该目录算作在用，移除书库时不会释放它。只在用户点击时写入；启动检查每个进程只做一次，需要更新时发可替换通知（ID 14），安装成功时撤回。日志不含目录 URI。
 
-验证：JVM 的 `ExternalControlTest` 覆盖解析、开关／登记、打开记录匹配和提交拒绝的映射；平台测试 `ExternalControlRepositoryTest`、`LastOpenedRepositoryTest` 覆盖真实 SQLite 与 v15 迁移。真机结果见 [外部控制验证记录](../../../../../../../../verification/external-control.md)。
+验证：JVM 的 `KoreaderPluginInstallerTest` 覆盖插件安装的写入、拒绝、版本状态与授权释放；JVM 的 `ExternalControlTest` 覆盖解析、开关／登记、打开记录匹配和提交拒绝的映射；平台测试 `ExternalControlRepositoryTest`、`LastOpenedRepositoryTest` 覆盖真实 SQLite 与 v15 迁移。真机结果见 [外部控制验证记录](../../../../../../../../verification/external-control.md)。

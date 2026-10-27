@@ -28,6 +28,14 @@ interface ExternalControlStore {
     suspend fun registered(tokenHash: String): Boolean
 }
 
+/** The KOReader data folder the plugin is installed into (R37, Q98); replaceable in tests. */
+interface KoreaderFolderSetting {
+    /** The folder's tree URI; null when none was chosen. */
+    suspend fun koreaderFolder(): String?
+
+    suspend fun setKoreaderFolder(treeUri: String)
+}
+
 /**
  * Global like the other settings: no cache cleanup or library removal touches it. Only token hashes are
  * stored, so the database never holds a usable token.
@@ -36,7 +44,7 @@ class ExternalControlRepository(
     private val database: ApplicationStateDatabase,
     private val ioDispatcher: CoroutineDispatcher,
     private val clock: () -> Long = System::currentTimeMillis,
-) : ExternalControlStore {
+) : ExternalControlStore, KoreaderFolderSetting {
     override suspend fun enabled(): Boolean = withContext(ioDispatcher) { enabled(database.readableDatabase) }
 
     override suspend fun setEnabled(enabled: Boolean): Unit = withContext(ioDispatcher) {
@@ -78,4 +86,14 @@ class ExternalControlRepository(
 
     private fun enabled(db: SQLiteDatabase) =
         db.rawQuery("SELECT external_control FROM application_settings WHERE singleton = 1", null).use { it.moveToFirst() && it.getInt(0) == 1 }
+
+    override suspend fun koreaderFolder(): String? = withContext(ioDispatcher) {
+        database.readableDatabase.rawQuery("SELECT koreader_folder FROM application_settings WHERE singleton = 1", null)
+            .use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+    }
+
+    override suspend fun setKoreaderFolder(treeUri: String): Unit = withContext(ioDispatcher) {
+        database.writableDatabase.update("application_settings", ContentValues().apply { put("koreader_folder", treeUri) },
+            "singleton = 1", null)
+    }
 }

@@ -1,6 +1,7 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.net.URI
 import java.util.Properties
+import javax.inject.Inject
 
 plugins {
     alias(libs.plugins.android.application)
@@ -153,6 +154,33 @@ android {
 kotlin {
     compilerOptions {
         jvmTarget = JvmTarget.JVM_17
+    }
+}
+
+/** Copies the KOReader plugin's Lua files into assets for the in-app install (R37, Q97). */
+abstract class KoreaderPluginAssets @Inject constructor(private val files: FileSystemOperations) : DefaultTask() {
+    @get:InputFiles
+    abstract val plugin: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val output: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        files.sync {
+            into(output)
+            from(plugin) { into("koreader/calibrecloud.koplugin") }
+        }
+    }
+}
+
+val koreaderPluginAssets = tasks.register<KoreaderPluginAssets>("koreaderPluginAssets") {
+    plugin.from(rootProject.fileTree("external/koreader/calibrecloud.koplugin") { include("*.lua") })
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(koreaderPluginAssets, KoreaderPluginAssets::output)
     }
 }
 

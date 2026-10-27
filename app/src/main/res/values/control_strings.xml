@@ -10,6 +10,25 @@
     <string name="external_control_remove_title">移除“%1$s”？</string>
     <string name="external_control_remove_text">移除后该应用的请求都会被拒绝，需要在阅读器中重新注册。</string>
 
+    <!-- R37, Q97, Q98: installing the bundled KOReader plugin. -->
+    <string name="koreader_plugin_heading">KOReader 插件</string>
+    <string name="koreader_plugin_not_installed">未安装</string>
+    <string name="koreader_plugin_install_hint">点击右侧的下载图标安装，在系统文件夹选择器中选择 KOReader 数据目录（通常是内部存储中的 koreader 文件夹）。</string>
+    <string name="koreader_plugin_installed">已安装 %1$s</string>
+    <string name="koreader_plugin_outdated">需要更新：%1$s → %2$s</string>
+    <string name="koreader_plugin_unknown_version">未知版本</string>
+    <string name="koreader_plugin_install">安装插件</string>
+    <string name="koreader_plugin_update">更新插件</string>
+    <string name="koreader_plugin_reinstall">重新安装插件</string>
+    <string name="koreader_plugin_choose">选择其他 KOReader 目录</string>
+    <string name="koreader_plugin_done">插件已写入。请重启 KOReader，然后在 KOReader 菜单“工具 → Calibre Cloud”中选择“注册到 Calibre Cloud”。</string>
+    <string name="koreader_plugin_folder_lost">无法访问之前选择的 KOReader 目录，请重新选择。</string>
+    <string name="koreader_plugin_not_koreader">所选文件夹不是 KOReader 数据目录（其中没有 plugins 文件夹或 settings.reader.lua），没有写入任何文件。请选择 KOReader 文件夹。</string>
+    <string name="koreader_plugin_failed">无法写入插件。请确认允许读写所选文件夹后重试。</string>
+    <string name="koreader_plugin_channel">KOReader 插件</string>
+    <string name="koreader_plugin_update_title">KOReader 插件需要更新</string>
+    <string name="koreader_plugin_update_text">KOReader 中的 Calibre Cloud 插件与本应用附带的版本（%1$s）不同，点击前往更新。</string>
+
     <string name="external_register_title">允许外部应用标记阅读状态？</string>
     <string name="external_register_text">“%1$s”请求把由 Calibre Cloud 打开的书标为已读或未读。该名称由对方提供，Android 无法验证。</string>
     <string name="external_register_replaces">同名应用已经登记，允许后将以新的登记替换。</string>

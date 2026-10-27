@@ -66,6 +66,11 @@ internal sealed interface MenuEntry {
         override val height get() = ROW_HEIGHT
     }
 
+    /** A row that only shows [label]; each of [actions] is an icon button at the row end, tagged by its own tag. */
+    class Actions(val tag: String, val label: String, val actions: List<RowAction>) : MenuEntry {
+        override val height get() = ROW_HEIGHT
+    }
+
     /**
      * An action, or an option when [selected] is set: a leading radio shows it (a check box when
      * [multiple] options may be chosen) and a chosen option is bold (Q65). [trailing] is drawn at the row
@@ -135,6 +140,9 @@ internal fun MenuRow(entry: MenuEntry, height: Dp = entry.height) {
             IconAction(R.drawable.ic_arrow_up, entry.upDescription, entry.canUp, Modifier.testTag("${entry.tag}_up"), onClick = entry.onUp)
             IconAction(R.drawable.ic_arrow_down, entry.downDescription, entry.canDown, Modifier.testTag("${entry.tag}_down"), onClick = entry.onDown)
         }
+        is MenuEntry.Actions -> ListItem(entry.label, Modifier.testTag(entry.tag), height, role = null) {
+            entry.actions.forEach { IconAction(it.icon, it.description, it.enabled, Modifier.testTag(it.tag), onClick = it.onClick) }
+        }
         is MenuEntry.Choice -> {
             val chosen = entry.selected == true
             val state = entry.trailingDescription?.takeIf { entry.trailing != null } ?: stringResource(R.string.library_menu_chosen)
@@ -157,6 +165,11 @@ internal fun MenuRow(entry: MenuEntry, height: Dp = entry.height) {
         }
     }
 }
+
+/** An icon button at the end of a [MenuEntry.Actions] row. */
+internal class RowAction(
+    val tag: String, @DrawableRes val icon: Int, val description: String, val enabled: Boolean = true, val onClick: () -> Unit,
+)
 
 /** The option's radio or check box, then its icon. */
 @Composable

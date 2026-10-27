@@ -95,6 +95,8 @@ internal class MoreModels(
  */
 internal class MoreActions(
     val selectDirectory: () -> Unit,
+    /** The system folder picker for the KOReader data folder (R37, Q97). */
+    val selectKoreaderFolder: () -> Unit,
     val login: (chooseAccount: Boolean) -> Unit,
     val requestNotifications: () -> Unit,
 )
@@ -185,7 +187,7 @@ internal fun MoreScreen(
                 MorePage.BACKGROUND -> BackgroundSettings(models.tasks, actions.requestNotifications)
                 MorePage.FORMATS -> FormatPriorityPage(metadata)
                 MorePage.READ_COLUMN -> ReadColumnPage(metadata)
-                MorePage.EXTERNAL_CONTROL -> ExternalControlPage(models.externalControl)
+                MorePage.EXTERNAL_CONTROL -> ExternalControlPage(models.externalControl, actions.selectKoreaderFolder)
                 MorePage.ABOUT -> AboutPage(show)
                 MorePage.PROJECT_LICENSE -> LicenseTextPage(R.raw.license_gpl_3_0, "project_license")
                 MorePage.NOTICES -> NoticesPage { licenseId = it; show(MorePage.NOTICE_LICENSE) }

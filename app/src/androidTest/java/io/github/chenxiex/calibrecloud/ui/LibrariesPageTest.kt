@@ -125,7 +125,7 @@ class LibrariesPageTest {
         files.deleteRecursively()
     }
 
-    private val actions = MoreActions(selectDirectory = { picks++ }, login = {}, requestNotifications = {})
+    private val actions = MoreActions(selectDirectory = { picks++ }, selectKoreaderFolder = {}, login = {}, requestNotifications = {})
 
     /** The wizard as "更多" shows it: its top bar over the page; back on the first step reports [onCancel]. */
     @Composable

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.provider.DocumentsContract
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -14,6 +15,8 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModelProvider
+import io.github.chenxiex.calibrecloud.control.KOREADER_INITIAL_URI
+import io.github.chenxiex.calibrecloud.control.KoreaderPluginNotifications
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -74,6 +77,13 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private val koreaderPicker = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        externalControlModel.pluginPicked(
+            if (result.resultCode == RESULT_OK) result.data?.data?.toString() else null,
+            result.data?.flags ?: 0,
+        )
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pickerOpen = savedInstanceState?.getBoolean("picker_open") ?: false
@@ -84,6 +94,10 @@ class MainActivity : ComponentActivity() {
         }
         val dependencies = (application as io.github.chenxiex.calibrecloud.CalibreCloudApplication).dependencies
         dependencies.applicationScope.launch { dependencies.backgroundTasks.onMainOpened() }
+        dependencies.applicationScope.launch {
+            val plugin = dependencies.koreaderPlugin
+            if (plugin.needsUpdateOnLaunch()) KoreaderPluginNotifications.post(applicationContext, plugin.bundledVersion())
+        }
         enableEdgeToEdge()
         setContent {
             CalibreCloudTheme {
@@ -96,6 +110,12 @@ class MainActivity : ComponentActivity() {
                             Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                                 Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
                         ))
+                    },
+                    selectKoreaderFolder = {
+                        koreaderPicker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                            .putExtra(DocumentsContract.EXTRA_INITIAL_URI, KOREADER_INITIAL_URI)
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION))
                     },
                     login = { chooseAccount -> oneDriveModel.login(chooseAccount) { startActivity(it) } },
                     requestNotifications = {

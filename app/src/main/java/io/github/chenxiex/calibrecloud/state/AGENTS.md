@@ -30,4 +30,5 @@
 - Schema v13 把任务等待的路径失效同步从 `queued_tasks.source_sync` 迁入 `task_dependencies`（要求 `awaited_sync`）；升级的数据库保留已清空的 `source_sync` 列（API 30 的 SQLite 不能删除列），新建数据库没有该列。
 - Schema v15 非破坏性为 `application_settings` 增加可空的 `library_view`，保存界面编码的图书馆视图与筛选（R21，Q82）；状态库不解析其内容。与其它设置一样全局、不随任何缓存清理删除。
 - Schema v16 非破坏性增加 R37 外部控制：`opened_copies`（书库、阅读器看到的显示名 → 书籍与格式、时间；同一书库同一显示名只保留最近一条），与上次打开记录在同一事务由 `LastOpenedRepository.save` 写入，移除书库时与上次打开一并删除，其它清理保留；`application_settings.external_control` 开关（默认关闭）和 `external_clients`（名称、令牌 SHA-256、登记时间），由 [ExternalControlRepository](ExternalControlRepository.kt) 读写，全局、不随任何清理删除，不保存令牌本身。
+- Schema v17 非破坏性为 `application_settings` 增加可空的 `koreader_folder`，保存 R37 插件安装所选 KOReader 数据目录的 tree URI（Q98），由 [ExternalControlRepository](ExternalControlRepository.kt) 读写；全局、不随任何清理删除，`accessKeyInUse` 把它视为在用的访问键。
 - Schema v6 非破坏性增加独立 `application_settings`，启动自动同步默认关闭；设置与书库代次无关，清元数据、移除副本和其它书库清理均保留它。读取／更新通过共享 repository 在 I/O dispatcher 上执行，不在 Activity 或 worker 另建状态库。

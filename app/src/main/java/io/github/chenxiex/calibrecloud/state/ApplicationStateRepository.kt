@@ -89,10 +89,12 @@ class ApplicationStateRepository(
         }
     }
 
-    /** Whether some listed library or the addition still uses [accessKey]. */
+    /** Whether some listed library, the addition or the KOReader plugin folder (R37) still uses [accessKey]. */
     suspend fun accessKeyInUse(accessKey: String): Boolean = withContext(ioDispatcher) {
         database.readableDatabase.rawQuery("""SELECT 1 FROM configured_libraries WHERE access_key = ?
-            UNION SELECT 1 FROM library_addition WHERE access_key = ?""", arrayOf(accessKey, accessKey)).use { it.moveToFirst() }
+            UNION SELECT 1 FROM library_addition WHERE access_key = ?
+            UNION SELECT 1 FROM application_settings WHERE koreader_folder = ?""", arrayOf(accessKey, accessKey, accessKey))
+            .use { it.moveToFirst() }
     }
 
     /** Makes a listed library current, as choosing it in the list does; null when it is not listed. */
