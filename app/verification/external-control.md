@@ -82,6 +82,28 @@ adb shell am instrument -w -e class <下列测试类> io.github.chenxiex.calibre
 
 未执行：书末提示与书籍状态页设为“读完”时的退出（自动发送路径只经桩测试覆盖）、多本书同时设为读完时的退出。
 
+## 应用内安装 KOReader 插件（Q97、Q98，2026-10-27）
+
+基于提交 `8663baf` 的未提交改动；debug 包 `aapt2` 核对为 `io.github.chenxiex.calibrecloud.debug`。
+
+| 检查 | 结果 |
+| --- | --- |
+| `./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest` | 通过；新增 `KoreaderPluginInstallerTest` 9 项通过（写入顺序与覆盖、缺少 `plugins` 时创建、非 KOReader 目录拒绝且不写入并释放授权、版本状态、启动检查每进程一次、授权／目录失效、写入失败、替换目录时的授权释放） |
+| 真机 `am instrument -e package io.github.chenxiex.calibrecloud.state` | 24 项通过（含 v16→v17 迁移） |
+| 真机 `TaskSchemaMigrationTest`、`CacheMaintenanceTest`、`LibrariesPageTest` | 28 项通过；`LibrariesPageTest` 首轮 3 项因屏幕处于 Dozing 报 “No compose hierarchies found”，唤醒屏幕后重跑通过 |
+
+真机（PA6，KOReader F-Droid 版，`/sdcard/koreader/plugins/calibrecloud.koplugin` 已有用户安装的 1.2.0，与仓库文件哈希相同；测试前拉取备份）：
+
+- 点击“安装插件”后系统选择器直接位于 `PA6 › koreader`（`EXTRA_INITIAL_URI` 生效）。
+- 选择 `koreader/plugins` 并允许：显示“不是 KOReader 数据目录”，插件文件时间未变；`dumpsys activity permissions` 中该 tree 的 `persisted=0x0`，持久授权已释放。
+- 选择 `koreader` 并允许：显示“已安装 1.2.0”和重启提示，两个文件被覆盖（时间更新、哈希与仓库一致），没有出现重命名的副本。
+- 删除本轮写出的插件目录后点击“重新安装插件”：不经选择器，重新创建目录与 `main.lua`、`_meta.lua`，名称与哈希正确。
+- 把 `_meta.lua` 改为 1.1.0、`pm grant` 通知权限后冷启动：发出通知“KOReader 插件需要更新”（渠道 `koreader-plugin`，ID 14）；点击通知进入外部阅读器控制页，显示“需要更新：已安装 1.1.0，本应用附带 1.2.0”。再次冷启动重新发出通知后点击“更新插件”：通知撤回，文件恢复为 1.2.0 的哈希；插件为最新时冷启动不发通知。
+- 用户查看 UI 后要求把安装按钮改为行尾图标：改为 `MenuEntry.Actions` 一行后重新安装 debug 包，截图核对“已安装 1.2.0”行尾显示刷新与文件夹图标。
+- 首轮真机发现返回页面时崩溃（`pluginEntries` 作为独立可重组函数向已完成的 `buildList` 追加），已改为在页面的 `buildList` 中内联后重测通过。
+
+清理：已卸载 debug 与测试包；KOReader 插件目录最终内容与测试前备份哈希一致。未执行：未重启 KOReader 核对应用写出的插件被加载（文件与此前手动安装并真机验收的插件逐字节相同、路径相同）；未在其它设备或其它 KOReader 安装路径上验证选择器的初始位置。
+
 ## 观察与未完成项
 
 - Q93 真机上未核对：导入目录外同名文件保留、关闭前改回未读取消删除，以及经书末提示／书籍状态页设为“已完成”时的删除。

@@ -42,7 +42,7 @@ import org.json.JSONObject
 class ApplicationStateDatabase(context: Context, name: String = "application-state.db") :
     SQLiteOpenHelper(context.applicationContext, name, null, VERSION) {
     companion object {
-        const val VERSION = 16
+        const val VERSION = 17
     }
 
     private val privateFiles = context.applicationContext.filesDir
@@ -68,6 +68,7 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         createReadStatusChanges(db)
         createLibraryView(db)
         createExternalControl(db)
+        createKoreaderFolder(db)
     }
 
     /**
@@ -410,6 +411,15 @@ class ApplicationStateDatabase(context: Context, name: String = "application-sta
         }
         if (oldVersion <= 14) createLibraryView(db)
         if (oldVersion <= 15) createExternalControl(db)
+        if (oldVersion <= 16) createKoreaderFolder(db)
+    }
+
+    /**
+     * The tree URI of the KOReader data folder the plugin was installed into (R37, Q97, Q98); null until
+     * one is chosen. Global like the other settings; a library removal does not release its grant.
+     */
+    private fun createKoreaderFolder(db: SQLiteDatabase) {
+        db.execSQL("ALTER TABLE application_settings ADD COLUMN koreader_folder TEXT")
     }
 
     /**

@@ -118,6 +118,11 @@ class ApplicationDependencies(context: Context) {
     val bookCatalog by lazy { io.github.chenxiex.calibrecloud.files.StateBookCatalog(state, applicationContext.filesDir) }
     val lastOpened by lazy { io.github.chenxiex.calibrecloud.state.LastOpenedRepository(database, Dispatchers.IO) }
     val externalControl by lazy { io.github.chenxiex.calibrecloud.state.ExternalControlRepository(database, Dispatchers.IO) }
+    val koreaderPlugin by lazy {
+        io.github.chenxiex.calibrecloud.control.KoreaderPluginInstaller({ io.github.chenxiex.calibrecloud.control.bundledPlugin(applicationContext) },
+            externalControl, io.github.chenxiex.calibrecloud.control.SafKoreaderFolders(applicationContext), state::accessKeyInUse,
+            Dispatchers.IO) { android.util.Log.i("KoreaderPlugin", it) }
+    }
     private val localPermissions by lazy { AndroidDirectoryPermissions(applicationContext) }
     val localAuthorization by lazy { LocalDirectoryAuthorization(localPermissions, Dispatchers.IO) }
 }
