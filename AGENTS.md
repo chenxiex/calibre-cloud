@@ -65,3 +65,14 @@ Android 工程的模块开发与验证约束见 [app/AGENTS.md](app/AGENTS.md)�
 - 按需求和风险划分接口回归、平台测试、真实上游集成与人工体验验收，优先由 agent 自动执行可客观校验的操作。确定性故障组合在接口边界注入，不要求用户每轮重复完整端到端操作；已通过且未受本次改动影响的证据可复用，新增差异或失败再定向补验。具体 Android 分工见 [模块验收约束](app/AGENTS.md#测试设计与共同验收)。
 - 存储授权、OneDrive 登录、外部阅读器、后台任务和墨水屏交互在对应阶段仍须真实设备／服务证据。真机自动测试与 ADB 操作可以提供这些客观证据；模拟接口响应不能证明真实上游或系统行为。人工只承担必要的登录／授权／测试环境准备、约定由用户执行的源文件变更，以及无法自动确认的体验。设备或服务暂不可用时可继续独立开发，但对应验收保持未完成。
 - 真机测试通过 ADB 使用独立 application ID 的 debug 包，其 provider authority 也须独立；仅使用测试书库副本。不得覆盖正式应用、使用正式应用数据或写入真实书库。记录测试结果后卸载该 debug 包，保留明确的未完成或失败项。
+
+## 发布流程
+
+版本号形如 `X.Y.Z`，标签为 `vX.Y.Z`。发布由推送标签触发 [release.yml](.github/workflows/release.yml)：它校验标签与 `versionName`、KOReader 插件版本一致，运行单元测试，用签名配置构建 release APK，并创建附带 APK 和插件 zip 的 GitHub Release。发布是对外操作，须在用户明确要求发布时才执行。
+
+1. 在 `main` 上确认工作区干净且已与 `origin/main` 同步（`git fetch` 后检查），待发布的功能均已合入；本地跑 `./gradlew :app:testDebugUnitTest` 通过。
+2. 版本提交只改三处，且三处必须一致：[app/build.gradle.kts](app/build.gradle.kts) 的 `versionName` 改为新版本、`versionCode` 加 1，[_meta.lua](external/koreader/calibrecloud.koplugin/_meta.lua) 的 `version` 改为新版本。若 README 的功能说明需随版本更新，一并放入该提交。
+3. 提交信息为 `chore: release X.Y.Z`（按提交约定附带 Co-Authored-By 行）。
+4. 对该提交创建附注标签，信息为标签名本身：`git tag -a vX.Y.Z -m vX.Y.Z`。
+5. 先推送 `main`，再推送标签：`git push origin main`，`git push origin vX.Y.Z`。不要用 `git push --tags`。
+6. 用 `gh run list --workflow=release.yml` 和 `gh release view vX.Y.Z` 确认工作流成功、Release 含 `calibre-cloud-vX.Y.Z.apk` 与 `calibrecloud-koreader-plugin-vX.Y.Z.zip`。失败时报告原因；未经用户同意不要删除或移动已推送的标签。
