@@ -75,4 +75,4 @@ Android 工程的模块开发与验证约束见 [app/AGENTS.md](app/AGENTS.md)�
 3. 提交信息为 `chore: release X.Y.Z`（按提交约定附带 Co-Authored-By 行）。
 4. 对该提交创建附注标签，信息为标签名本身：`git tag -a vX.Y.Z -m vX.Y.Z`。
 5. 先推送 `main`，再推送标签：`git push origin main`，`git push origin vX.Y.Z`。不要用 `git push --tags`。
-6. 用 `gh run list --workflow=release.yml` 和 `gh release view vX.Y.Z` 确认工作流成功、Release 含 `calibre-cloud-vX.Y.Z.apk` 与 `calibrecloud-koreader-plugin-vX.Y.Z.zip`。失败时报告原因；未经用户同意不要删除或移动已推送的标签。
+6. 推送后发布即告完成，不需要确认工作流或 Release 的状态；用户明确要求时才检查。未经用户同意不要删除或移动已推送的标签。
