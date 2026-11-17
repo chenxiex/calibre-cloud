@@ -108,10 +108,15 @@ class LibraryViewModelTest {
     }
 
     /** Book n is the nth added; tags alternate so folders hold different books. */
-    private fun library(count: Int, columns: List<io.github.chenxiex.calibrecloud.metadata.ImportedColumn> = emptyList()) = LibraryIndex(
-        ImportedLibrary(identity, UUID.randomUUID(), 1, ParsedLibrary(null, (1..count).map { n ->
+    private fun library(
+        count: Int,
+        columns: List<io.github.chenxiex.calibrecloud.metadata.ImportedColumn> = emptyList(),
+        libraryIdentity: LibraryIdentity = identity,
+        tag: (Int) -> String = { if (it % 2 == 0) "even" else "odd" },
+    ) = LibraryIndex(
+        ImportedLibrary(libraryIdentity, UUID.randomUUID(), 1, ParsedLibrary(null, (1..count).map { n ->
             ImportedBook(n.toLong(), UUID(0, n.toLong()), "Book %03d".format(n), listOf("Author"), "2026-01-01T00:%02d:00+00:00".format(n),
-                null, null, null, listOf(if (n % 2 == 0) "even" else "odd"), "", emptyList(), RelativeSourcePath("p$n"), true, emptyMap())
+                null, null, null, listOf(tag(n)), "", emptyList(), RelativeSourcePath("p$n"), true, emptyMap())
         }, columns), null, ReadColumnStatus.NOT_CONFIGURED))
 
     /** Newest first, like the database store. */
@@ -285,6 +290,109 @@ class LibraryViewModelTest {
         model.categorize(Categorization.Column(CustomColumnId(9, "#gone")))
         advanceUntilIdle()
         assertEquals(LibraryContent.Problem(LibraryProblem.CATEGORY_COLUMN_INVALID), model.content)
+    }
+
+    @Test
+    fun switchingLibrariesLeavesTheFolderAndStartsAtTheRootWithTheGlobalSettings() = runTest(dispatcher) {
+        val other = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.Local("a.documents", "other"), UUID.randomUUID())
+        for (sameFolder in listOf(false, true)) {
+            selection = LibrarySelection(token, identity.location, identity)
+            imported = library(30)
+            val model = model().also { it.onMeasured(1) }
+            model.showAs(LibraryViewMode.LIST)
+            model.sortBy(BookSortKey.TITLE)
+            model.updateFilters { it.copy(download = DownloadFilter.NOT_DOWNLOADED) }
+            model.categorize(Categorization.Tags)
+            model.reverseFolders()
+            advanceUntilIdle()
+            model.showPage(1); advanceUntilIdle()
+            model.openFolder(FolderKey("odd")); advanceUntilIdle()
+            model.sortBy(BookSortKey.RATING)
+            model.showPage(2); advanceUntilIdle()
+
+            // A new import in the same library preserves the folder, its sort and the current page.
+            imported = library(30)
+            model.refresh(); advanceUntilIdle()
+            assertEquals(FolderKey("odd"), model.folder)
+            assertEquals(2, (model.content as LibraryContent.Books).offset)
+            assertEquals(BookSort.of(BookSortKey.RATING), model.sort)
+            model.toggleBook((model.content as LibraryContent.Books).rows.single().key)
+            advanceUntilIdle()
+            assertNotNull(model.selected)
+
+            // Reproduce switching on the More tab and returning to the library.
+            model.setVisible(false)
+            selection = LibrarySelection(UUID.randomUUID(), other.location, other)
+            imported = library(6, libraryIdentity = other, tag = { if (sameFolder) "odd" else "new" })
+            model.setVisible(true); advanceUntilIdle()
+            assertNull(model.folder)
+            assertNull(model.selected)
+            assertEquals(0, model.firstVisible)
+            val folders = model.content as LibraryContent.Folders
+            assertEquals(0, folders.offset)
+            assertEquals(listOf(if (sameFolder) "odd" else "new"), folders.rows.map { it.key.name })
+            assertEquals(other.id, folders.rows.single().representative.key.libraryId)
+            assertEquals(LibraryViewMode.LIST, model.viewMode)
+            assertEquals(Categorization.Tags, model.categorization)
+            assertEquals(BookSort.of(BookSortKey.TITLE), model.sort)
+            assertFalse(model.foldersAscending)
+            assertEquals(LibraryFilters(download = DownloadFilter.NOT_DOWNLOADED), model.filters)
+            assertFalse(model.closeFolder())
+
+            selection = LibrarySelection(UUID.randomUUID(), identity.location, identity)
+            imported = library(30)
+            model.refresh(); advanceUntilIdle()
+            assertNull(model.folder)
+            assertEquals(0, (model.content as LibraryContent.Folders).offset)
+            model.setVisible(false)
+        }
+    }
+
+    @Test
+    fun switchingWithoutMetadataClearsTheSearchSessionBeforeAnImportIsAvailable() = runTest(dispatcher) {
+        val other = LibraryIdentity(LibraryId(UUID.randomUUID()), LibraryLocation.Local("a.documents", "other"), UUID.randomUUID())
+        // Cover both early exits: removing the current library, and selecting one without metadata.
+        for (removeCurrent in listOf(false, true)) {
+            selection = LibrarySelection(token, identity.location, identity)
+            imported = library(30)
+            val model = model().also { it.onMeasured(1) }
+            model.showAs(LibraryViewMode.LIST)
+            model.categorize(Categorization.Tags); advanceUntilIdle()
+            model.showPage(1); advanceUntilIdle()
+            model.openFolder(FolderKey("odd")); advanceUntilIdle()
+            model.showPage(2); advanceUntilIdle()
+            model.openSearch()
+            model.editSearch("Book")
+            if (removeCurrent) model.submitSearch("Book")
+            model.showAs(LibraryViewMode.GRID)
+            model.updateFilters { it.copy(download = DownloadFilter.DOWNLOADED) }
+            advanceUntilIdle()
+
+            selection = if (removeCurrent) null else LibrarySelection(UUID.randomUUID(), other.location, other)
+            imported = null
+            model.refresh(); advanceUntilIdle()
+            assertEquals(if (removeCurrent) LibraryContent.Unconfigured else LibraryContent.NoMetadata, model.content)
+            assertNull(model.search)
+            assertNull(model.folder)
+            assertEquals("", model.searchInput)
+            assertTrue(model.history.isEmpty())
+            assertEquals(0, model.firstVisible)
+            assertEquals(LibraryViewMode.LIST, model.viewMode)
+            assertEquals(LibraryFilters(), model.filters)
+            assertFalse(model.closeSearch())
+
+            if (removeCurrent) selection = LibrarySelection(UUID.randomUUID(), other.location, other)
+            imported = library(6, libraryIdentity = other)
+            model.refresh(); advanceUntilIdle()
+            assertEquals(0, (model.content as LibraryContent.Folders).offset)
+            assertNull(model.folder)
+            model.openSearch(); advanceUntilIdle()
+            assertTrue(model.history.isEmpty())
+            assertEquals("", model.searchInput)
+            model.closeSearch(); advanceUntilIdle()
+            assertEquals(0, (model.content as LibraryContent.Folders).offset)
+            model.setVisible(false)
+        }
     }
 
     @Test

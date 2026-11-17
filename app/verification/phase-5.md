@@ -97,3 +97,12 @@ adb shell am instrument -w -r io.github.chenxiex.calibrecloud.debug.test/io.gith
 | 人工体验（PA6） | 用户安装 debug 包：设置视图、分类、排序与筛选后强行停止并重开，核对恢复与横幅清空 | 用户确认通过 |
 
 测试结束后停止 socat，卸载 `.debug` 与测试包；正式包未触碰。
+
+## 切换书库重置图书馆位置（R03、R21、AC06，2026-11-17）
+
+修复从文件夹内切换书库后仍使用旧文件夹查询、导致新书库空白的问题。`LibraryViewModel` 按选择令牌管理导航会话，在查询目标书库前清空文件夹、文件夹内排序、当前与返回页码、选择及搜索会话（含输入与已加载历史）；无书库、无完整元数据的提前返回也经过该处理。全局网格／列表、分类、根层排序、文件夹名称方向及筛选继续沿用，同书库刷新和同步保持当前位置。R21 与 AC06 已补充这一行为。
+
+- 修复前执行 `./gradlew :app:testDebugUnitTest --tests 'io.github.chenxiex.calibrecloud.ui.LibraryViewModelTest.switching*' --console=plain`：新增 2 项测试均失败，分别稳定复现旧 `FolderKey(name=odd)` 与旧 `SearchSession` 未清空。
+- 回归覆盖目标库有／无同名文件夹、返回原书库、全局设置沿用、同书库重新导入后保留位置，以及移除当前库／切到无元数据库后再导入时不恢复旧导航；用真实查询服务和内存索引在 JVM 验证。
+- 修复后执行 `./gradlew :app:testDebugUnitTest --tests io.github.chenxiex.calibrecloud.ui.LibraryViewModelTest :app:lintDebug --console=plain`：该类 30 项测试全部通过，lint 无错误；`git diff --check` 通过。
+- 本轮未执行真机 UI 操作，旧的设备证据不计为本修复的实测结果。

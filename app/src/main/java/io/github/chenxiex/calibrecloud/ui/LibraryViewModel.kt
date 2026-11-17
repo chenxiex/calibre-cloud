@@ -139,6 +139,8 @@ class QueueLibraryCovers(
  * The library's view mode, categorization, root sort, folder direction and filters are restored from
  * [viewStore] before the first page loads and saved on every change (R21, Q82); search session
  * changes are not saved. A change made before the restore finished wins over the saved view.
+ * Changing the library selection ends navigation and search at the root's first page, while these
+ * global settings stay in effect. Refreshing the same selection keeps its current position.
  */
 class LibraryViewModel(
     private val selection: suspend () -> LibrarySelection?,
@@ -239,6 +241,8 @@ class LibraryViewModel(
     private var listening: Job? = null
     private var rootFirstVisible = 0
     private var libraryFirstVisible = 0
+    /** Selection owning navigation and search, even when it has no imported metadata yet. */
+    private var viewToken: UUID? = null
     private val requested = mutableSetOf<BookKey>()
     /** The batches of the shown page being followed, each showing its covers as they are published. */
     private val waiting = mutableMapOf<TaskId, Job>()
@@ -757,6 +761,21 @@ class LibraryViewModel(
     private suspend fun load(generation: Long) {
         restoring.join()
         val selected = selection()
+        if (generation != loadGeneration) return
+        val token = selected?.takeIf { it.location != null }?.token
+        if (viewToken != token) {
+            viewToken = token
+            finishSelection()
+            folder = null
+            folderSort = BookSort.Default
+            firstVisible = 0
+            rootFirstVisible = 0
+            libraryFirstVisible = 0
+            search = null
+            searchInput = ""
+            history = emptyList()
+            resetCovers(token)
+        }
         if (selected?.location == null) {
             if (generation != loadGeneration) return
             backend = null
