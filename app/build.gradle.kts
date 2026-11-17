@@ -90,8 +90,8 @@ android {
         applicationId = "io.github.chenxiex.calibrecloud"
         minSdk = 30
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.3.0"
+        versionCode = 7
+        versionName = "1.3.1"
         testInstrumentationRunner = "io.github.chenxiex.calibrecloud.AwakeTestRunner"
         testApplicationId = "io.github.chenxiex.calibrecloud.debug.test"
     }
