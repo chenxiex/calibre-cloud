@@ -251,6 +251,7 @@ internal object TaskCodec {
         StorageErrorKind.INSUFFICIENT_SPACE -> "insufficient_space"
         StorageErrorKind.CORRUPT_CONTENT -> "corrupt_content"
         StorageErrorKind.UNSUPPORTED_OPERATION -> "unsupported_operation"
+        StorageErrorKind.INVALID_SOURCE_RESPONSE -> "invalid_source_response"
         StorageErrorKind.LOCAL_IO -> "local_io"
     }
 

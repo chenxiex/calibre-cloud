@@ -190,7 +190,7 @@ class OneDriveSourceBackendTest {
         assertFalse(fixture.requests.any { it.url.host == "attacker.example" })
     }
 
-    @Test fun pathLookupRefusesFoldersRemoteItemsOtherDrivesAndMissingFiles() = runTest {
+    @Test fun pathLookupRefusesFoldersRemoteItemsAndMissingFiles() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
         fixture.files["folder"] = fixture.item("folder", "folder", "root", true)
@@ -200,8 +200,6 @@ class OneDriveSourceBackendTest {
             fixture.file("odd.epub", "odd", "x", extra = mapOf(extra to emptyMap<String, Any?>()))
             assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.lookup(location, RelativeSourcePath("odd.epub"))))
         }
-        fixture.files["odd.epub"] = fixture.item("odd", "odd.epub", "parent", false, drive = "other-drive")
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.lookup(location, RelativeSourcePath("odd.epub"))))
         // The shared facet of an owned item does not change its drive boundary.
         fixture.file("shared.epub", "shared", "bytes", extra = mapOf("shared" to mapOf("scope" to "users")))
         assertTrue(backend.lookup(location, RelativeSourcePath("shared.epub")) is OneDriveSourceResult.Available)
@@ -287,7 +285,7 @@ class OneDriveSourceBackendTest {
         assertFalse(fixture.requests.any { it.url.host == "unsafe.example" })
         fixture.requests.clear()
         fixture.files["cover.jpg"] = fixture.item("cover-image", "cover.jpg", "parent", false, drive = "other-drive")
-        assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180)))
+        assertEquals(StorageErrorKind.INVALID_SOURCE_RESPONSE, failure(backend.openCover(location, RelativeSourcePath("cover.jpg"), 120, 180)))
         assertFalse(fixture.requests.any { it.url.host == "thumbnail.example" })
     }
 
@@ -350,12 +348,12 @@ class OneDriveSourceBackendTest {
     @Test fun completeDirectoryLoadRefusesCrossParentAndCrossDriveFolders() = runTest {
         val fixture = Fixture()
         val backend = backend(fixture, StandardTestDispatcher(testScheduler))
-        for (child in listOf(
-            fixture.item("folder", "Wrong parent", "outside", true),
-            fixture.item("folder", "Wrong drive", "root", true, "other-drive"),
+        for ((child, expected) in listOf(
+            fixture.item("folder", "Wrong parent", "outside", true) to StorageErrorKind.UNSUPPORTED_OPERATION,
+            fixture.item("folder", "Wrong drive", "root", true, "other-drive") to StorageErrorKind.INVALID_SOURCE_RESPONSE,
         )) {
             fixture.childPages = { _, _ -> mapOf("value" to listOf(child)) }
-            assertEquals(StorageErrorKind.UNSUPPORTED_OPERATION, failure(backend.listAllDirectories(location)))
+            assertEquals(expected, failure(backend.listAllDirectories(location)))
         }
     }
 
@@ -447,6 +445,25 @@ class OneDriveSourceBackendTest {
         val limited = backend.lookup(location, database) as OneDriveSourceResult.Failed
         assertEquals(StorageErrorKind.THROTTLED, limited.error.kind)
         assertTrue(limited.retryDelayMillis!! in 110_000L..120_000L)
+    }
+
+    @Test fun snapshotResponseFailuresReportSourceResponseErrors() = runTest {
+        val cases: List<Pair<String, Fixture.() -> Unit>> = listOf(
+            "rejected request" to { onRequest = { response(it, 400, "service error") } },
+            "invalid JSON" to { onRequest = { response(it, 200, "invalid JSON") } },
+            "another drive" to { files["metadata.db"] = item("db", "metadata.db", "root", false, drive = "other-drive") },
+            "missing drive" to { files["metadata.db"] = files.getValue("metadata.db") +
+                ("parentReference" to mapOf("id" to "root")) },
+        )
+        val errors = cases.map { (name, configure) ->
+            val fixture = Fixture().apply(configure)
+            val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+            val result = backend.acquireSnapshot(location, UUID.randomUUID(), null) as OneDriveSourceResult.Failed
+            assertFalse(name, result.transient)
+            assertEquals(name, listOf("/v1.0/drives/drive/items/root:/metadata.db"), fixture.requests.map { it.url.encodedPath })
+            name to result.error.kind.name
+        }
+        assertEquals(cases.map { it.first to "INVALID_SOURCE_RESPONSE" }, errors)
     }
 
     @Test fun unchangedSnapshotIsOneRequestWithoutReading() = runTest {

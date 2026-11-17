@@ -146,6 +146,7 @@ internal fun oneDriveTaskStatusResource(taskState: TaskState?, rejected: Boolean
                 StorageErrorKind.AUTHORIZATION_EXPIRED -> R.string.onedrive_task_permission
                 StorageErrorKind.SOURCE_MISSING -> R.string.onedrive_task_missing
                 StorageErrorKind.UNSUPPORTED_OPERATION -> R.string.onedrive_task_unsupported
+                StorageErrorKind.INVALID_SOURCE_RESPONSE -> R.string.task_error_response
                 else -> R.string.onedrive_task_io
             }
             else -> R.string.onedrive_task_io

@@ -485,7 +485,7 @@ class OneDriveSourceBackend(
         if (value["remoteItem"] != null || value["deleted"] != null) unsupported("remote_deleted_item")
         if (value["package"] != null) unsupported("package_item")
         val parent = value["parentReference"] as? Map<*, *>
-        if (parent != null && parent["driveId"] != driveId) unsupported("parent_drive")
+        if (parent != null && !sameDrive(driveId, parent["driveId"])) invalidResponse("parent_drive")
         val folder = value["folder"] is Map<*, *>
         if (!folder && value["file"] !is Map<*, *>) unsupported("item_kind")
         return OneDriveItem(value.string("id"), value.string("name"), folder, parent?.get("id") as? String,
@@ -494,17 +494,27 @@ class OneDriveSourceBackend(
 
     private fun versionOf(item: OneDriveItem) = FileVersion(BackendKind.ONEDRIVE, item.cTag ?: unsupported())
 
+    /**
+     * Personal drives sometimes return the same 16-digit hexadecimal ID with different casing:
+     * https://github.com/OneDrive/onedrive-api-docs/issues/1902
+     * Accept only that representation difference. Other opaque IDs remain case-sensitive; stored
+     * locations, request IDs, item IDs and content tags are never normalized by this comparison.
+     */
+    private fun sameDrive(expected: String, actual: Any?): Boolean = actual == expected ||
+        actual is String && personalDriveId.matches(expected) && personalDriveId.matches(actual) &&
+        expected.equals(actual, ignoreCase = true)
+
     private suspend fun json(target: HttpUrl): Map<String, Any?> = graph(target).use { response ->
         checkResponse(response)
         decode(response)
     }
 
     private fun decode(response: Response): Map<String, Any?> {
-        val body = response.body ?: unsupported()
+        val body = response.body ?: invalidResponse("response_body")
         // Bound metadata responses; content streams are separately unbounded and never decoded here.
         val source = body.source()
-        if (source.request(2_000_001) && source.buffer.size > 2_000_000) unsupported()
-        return try { decoder.decode(source.readUtf8()) } catch (_: Exception) { unsupported() }
+        if (source.request(2_000_001) && source.buffer.size > 2_000_000) invalidResponse("response_size")
+        return try { decoder.decode(source.readUtf8()) } catch (_: Exception) { invalidResponse("response_json") }
     }
 
     /** A 401 refreshes the token once and sends the request again; Graph applied nothing for it. */
@@ -579,7 +589,7 @@ class OneDriveSourceBackend(
             409, 412 -> StorageErrorKind.VERSION_CONFLICT
             429 -> StorageErrorKind.THROTTLED
             in 500..599 -> StorageErrorKind.THROTTLED
-            else -> StorageErrorKind.UNSUPPORTED_OPERATION
+            else -> StorageErrorKind.INVALID_SOURCE_RESPONSE
         }
         val transient = code == 429 || code in 500..599
         throw OneDriveSourceException(kind, if (transient) retryDelay(response.header("Retry-After")) ?: 30_000 else null, transient, "http_status_$code")
@@ -622,11 +632,13 @@ class OneDriveSourceBackend(
 
     private class LocalFailure : IOException()
     private companion object {
+        val personalDriveId = Regex("[0-9A-Fa-f]{16}")
         /** Graph's simple upload limit; larger databases would need an upload session, which write-back does not use. */
         const val SIMPLE_UPLOAD_LIMIT = 250L * 1024 * 1024
         const val UPLOAD_RESPONSE_TIMEOUT_SECONDS = 120L
     }
     private fun unsupported(reason: String = "unsupported_shape"): Nothing = throw OneDriveSourceException(StorageErrorKind.UNSUPPORTED_OPERATION, reason = reason)
+    private fun invalidResponse(reason: String): Nothing = throw OneDriveSourceException(StorageErrorKind.INVALID_SOURCE_RESPONSE, reason = reason)
     private fun conflict(): Nothing = throw OneDriveSourceException(StorageErrorKind.VERSION_CONFLICT)
     private fun Map<String, Any?>.string(key: String, reason: String = "string_$key"): String = (get(key) as? String)?.takeIf { it.isNotBlank() && it.none(Char::isISOControl) } ?: unsupported(reason)
     @Suppress("UNCHECKED_CAST")

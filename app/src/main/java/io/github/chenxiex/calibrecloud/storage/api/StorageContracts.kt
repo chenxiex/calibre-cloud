@@ -12,13 +12,14 @@ data class DiagnosticId(val value: UUID)
 
 /**
  * THROTTLED covers server throttling and temporary server errors that ask the client to retry later.
+ * INVALID_SOURCE_RESPONSE: the service rejected a request or returned metadata that cannot be validated.
  * LEFTOVER_FILES: a read status commit found files under its temporary names that it cannot prove it
  * created, and left them for the user to handle.
  */
 enum class StorageErrorKind {
     NO_NETWORK, THROTTLED, LOGIN_REQUIRED, AUTHORIZATION_EXPIRED, SOURCE_MISSING,
     INCOMPATIBLE_DATABASE, VERSION_CONFLICT, INSUFFICIENT_SPACE,
-    CORRUPT_CONTENT, UNSUPPORTED_OPERATION, LOCAL_IO, LEFTOVER_FILES,
+    CORRUPT_CONTENT, UNSUPPORTED_OPERATION, INVALID_SOURCE_RESPONSE, LOCAL_IO, LEFTOVER_FILES,
 }
 
 data class StorageError(val kind: StorageErrorKind, val diagnosticId: DiagnosticId? = null)

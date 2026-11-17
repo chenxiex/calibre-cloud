@@ -305,6 +305,7 @@ internal fun taskErrorResource(error: TaskError): Int = when (error) {
         StorageErrorKind.INSUFFICIENT_SPACE -> R.string.task_error_space
         StorageErrorKind.CORRUPT_CONTENT -> R.string.task_error_corrupt
         StorageErrorKind.UNSUPPORTED_OPERATION -> R.string.task_error_unsupported
+        StorageErrorKind.INVALID_SOURCE_RESPONSE -> R.string.task_error_response
         StorageErrorKind.LOCAL_IO -> R.string.task_error_io
         StorageErrorKind.LEFTOVER_FILES -> R.string.task_error_leftover
     }
