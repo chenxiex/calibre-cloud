@@ -106,3 +106,22 @@ adb shell am instrument -w -r io.github.chenxiex.calibrecloud.debug.test/io.gith
 - 回归覆盖目标库有／无同名文件夹、返回原书库、全局设置沿用、同书库重新导入后保留位置，以及移除当前库／切到无元数据库后再导入时不恢复旧导航；用真实查询服务和内存索引在 JVM 验证。
 - 修复后执行 `./gradlew :app:testDebugUnitTest --tests io.github.chenxiex.calibrecloud.ui.LibraryViewModelTest :app:lintDebug --console=plain`：该类 30 项测试全部通过，lint 无错误；`git diff --check` 通过。
 - 本轮未执行真机 UI 操作，旧的设备证据不计为本修复的实测结果。
+
+
+## 下载进行中的本地移除（R12、R26、AC07，Q99，2026-11-18）
+
+本轮将移除下载改为本地事务提交后生效：撤销范围内旧任务、移除副本记录并持久记录待回收文件，不等待远程执行锁。任务执行使用可单独取消的子 Job；OneDrive 请求及返回的内容流连接 `Call.cancel()`。暂停、优先级让出及平台 worker 中断继续保留断点，显式取消／移除丢弃进度并跳过断点保存。执行器只提供资源关闭、执行注销之后的通用退出钩子，由应用容器注入缓存维护清理代码。
+
+COPIES journal 不再阻止新提交或派发，旧任务及文件代次单独回收；任务退出时重新读取最后 checkpoint，覆盖迟到更新与发布前重命名窗口。自动版本检查派生更新时在提交事务核对父任务仍有效且副本仍存在，避免移除之后重新下载。清理失败保留记录并通知，无普通源任务时后台 worker 仍重试；其它清理类型保持原串行策略。
+
+| 检查 | 实际执行与结果 |
+| --- | --- |
+| 修复前真机回归 | PA6，独立 debug／测试包，以 `AwakeTestRunner` 运行 `CacheMaintenanceTest#copyRemovalDoesNotWaitForUnrelatedExecutorAndPreventsOldPublication`；持有无关执行锁时移除在 10 秒测试上限失败，稳定复现等待。测试未访问源书库 |
+| JVM 接口回归 | `testDebugUnitTest` 定向运行 `OneDriveSourceBackendTest` 40 项和 `RunningTaskExecutionsTest` 4 项，全部通过；覆盖网络请求／普通流／Range 流取消与解绑、退出钩子顺序、普通失败、主动取消与平台驱动取消、收尾异常 |
+| 构建与静态检查 | 最终执行 `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug --console=plain` 通过；lint 为 0 错误、6 项既有警告（依赖新版本提示和已有导出 receiver 提示）；`git diff --check` 通过 |
+| 真实后台调度 | 最终包在 PA6 运行 `QueueWorkerCleanupPlatformTest` 与 `QueueWorkerPlatformTest`，2 项通过（2.22 秒，无跳过）；用自建 COPIES journal／符号链接注入本地删除失败，验证持久记录保留、独立平台重试链、两次即时唤醒成功、故障解除后补清；使用 WorkManager Flow 事件同步，无源任务或源访问 |
+| 修复后平台回归 | PA6 经 `adb am instrument`、`AwakeTestRunner` 定向运行 `CacheMaintenanceTest`、`FormatCopyTaskHandlerTest`、`TaskCancellationTest`、`DurableTaskQueueTest`、`ReadStatusWriteTaskHandlerTest`，106 项全部通过（79.17 秒）；全部使用独立应用状态库及本地 fixtures，无源访问 |
+
+本轮原始构建日志与测试结果存于被忽略的 `app/build/verification/download-removal/`。OneDrive 取消的网络证据来自可控 OkHttp fixture；不将其记作真实 Graph 下载中断验收。进程重启补清用平台数据库重开模拟，不冒充实际进程终止。真实 OneDrive 下载中移除与墨水屏响应体验仍需补验。
+
+收尾：卸载 `.debug.test` 与 `.debug` 均返回 `Success`，设备上只保留正式应用；本轮没有访问正式应用数据或源书库。平台 fixtures 与专用日志记录由测试清理，未修改任何源文件。

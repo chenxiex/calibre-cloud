@@ -17,6 +17,10 @@ import java.security.MessageDigest
 import java.net.URLDecoder
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import okhttp3.Call
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
@@ -58,6 +62,7 @@ class OneDriveSourceBackendTest {
         var directUrls = true
         var thumbnails = emptyList<Map<String, Any?>>()
         var onRequest: (Request) -> Response? = { null }
+        var onCall: (Call) -> Unit = {}
         var onContent: () -> Unit = {}
         /** Library files by decoded relative path; values are item JSON without content. */
         val files = mutableMapOf<String, Map<String, Any?>>()
@@ -86,6 +91,7 @@ class OneDriveSourceBackendTest {
         }
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
+            onCall(chain.call())
             requests.add(request)
             onRequest(request) ?: run {
                 val path = request.url.encodedPath
@@ -115,6 +121,48 @@ class OneDriveSourceBackendTest {
         }.build()
         val decoder = GraphJsonDecoder { decoded.getValue(it) }
         fun graph() = requests.filter { it.url.host == "graph.microsoft.com" }
+    }
+
+    @Test fun taskCancellationReachesActiveCallsUntilTheirResponseIsClosed() = runTest {
+        for (phase in listOf("request", "full-body", "range-body", "closed-body")) {
+            val fixture = Fixture()
+            val backend = backend(fixture, StandardTestDispatcher(testScheduler))
+            val file = (backend.lookup(location, database) as OneDriveSourceResult.Available).value
+            lateinit var task: Job
+            lateinit var call: Call
+            var cancellationObserved = false
+            fixture.onCall = { active ->
+                call = active
+                if (phase == "request") {
+                    task.cancel()
+                    cancellationObserved = active.isCanceled()
+                    throw IOException("request cancelled")
+                }
+            }
+            task = launch(start = CoroutineStart.LAZY) {
+                if (phase == "request") {
+                    backend.lookup(location, database)
+                } else {
+                    val stream = if (phase == "range-body") {
+                        fixture.onRequest = { request ->
+                            if (request.url.host == "download.example") fixture.response(request, 206, "base",
+                                mapOf("Content-Range" to "bytes 4-7/8")) else null
+                        }
+                        (backend.openRange(location, file, 4) as OneDriveSourceResult.Available).value!!
+                    } else {
+                        (backend.open(location, file) as OneDriveSourceResult.Available).value
+                    }
+                    stream.use {
+                        if (phase == "closed-body") stream.close()
+                        task.cancel()
+                        cancellationObserved = call.isCanceled()
+                    }
+                }
+            }
+            task.start()
+            task.join()
+            assertEquals(phase, phase != "closed-body", cancellationObserved)
+        }
     }
 
     @Test fun identityIsComparedLocallyWithoutRequests() = runTest {

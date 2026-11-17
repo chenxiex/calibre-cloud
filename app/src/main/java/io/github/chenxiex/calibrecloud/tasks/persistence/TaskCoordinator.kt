@@ -6,7 +6,10 @@ import io.github.chenxiex.calibrecloud.storage.api.StorageError
 import io.github.chenxiex.calibrecloud.storage.api.StorageErrorKind
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.withLock
+import java.io.IOException
 
 sealed interface StageOutcome {
     data class Advance(val stage: TaskStage) : StageOutcome
@@ -164,9 +167,11 @@ class TaskCoordinator(
     suspend fun drain() = queue.executionLock.withLock {
         queue.beforeDispatch()
         queue.list().filter { it.record.state is TaskState.Finished &&
-            (it.record.state as TaskState.Finished).result is TaskResult.Cancelled && it.checkpoint != null }.forEach { entry ->
-            handlers.singleOrNull { it.supports(entry.record.submission.request) }?.stopped(entry)
-            queue.update(entry.record.id) { it.copy(checkpoint = null) }
+            (it.record.state as TaskState.Finished).result is TaskResult.Cancelled && (it.checkpoint != null || it.recoveryRequired) }.forEach { entry ->
+            val handler = handlers.singleOrNull { it.supports(entry.record.submission.request) }
+            if (handler == null || cleanupCancelled(handler, entry)) {
+                queue.update(entry.record.id) { it.copy(checkpoint = null, recoveryRequired = false) }
+            }
         }
         queue.recover()
         val deferred = mutableSetOf<TaskId>()
@@ -174,7 +179,11 @@ class TaskCoordinator(
             val entry = queue.claim(now(), conditions, { request -> handlers.count { it.supports(request) } == 1 }, excluded = deferred) ?: break
             // A handler Wait is retried by a subsequent explicit wakeup, not busy-looped here. A task
             // awaiting its sync stays claimable: the queue holds it until that sync finishes.
-            if (!execute(entry)) deferred.add(entry.record.id)
+            val mayRunAgain = queue.executeTask(entry.record.id, onCancelled = {
+                stop(entry.record.id, handlers.single { it.supports(entry.record.submission.request) }, TaskControl.CANCEL)
+                false
+            }) { execute(entry) }
+            if (!mayRunAgain) deferred.add(entry.record.id)
         }
     }
 
@@ -186,6 +195,7 @@ class TaskCoordinator(
         val handler = handlers.single { it.supports(initial.record.submission.request) }
         val execution = TaskExecution(queue, initial.record.id)
         try {
+            execution.checkControl()
             var entry = initial
             if (entry.recoveryRequired) {
                 val decision = handler.recover(entry, execution)
@@ -295,20 +305,40 @@ class TaskCoordinator(
             }
             return true
         } catch (control: BoundaryControl) {
-            handler.stopped(requireNotNull(queue.get(initial.record.id)))
-            queue.update(initial.record.id) { entry ->
-                val state = if (control.command == TaskControl.PAUSE) TaskState.Paused(entry.stage)
-                    else TaskState.Finished(TaskResult.Cancelled)
-                entry.copy(control = null, recoveryRequired = true, record = entry.record.copy(state = state,
-                    controls = if (control.command == TaskControl.PAUSE) TaskControls(false, true, true, false) else DurableTaskQueue.noControls))
-            }
+            stop(initial.record.id, handler, control.command)
         } catch (cancelled: CancellationException) {
             // Running/checkpoint evidence remains durable for the next coordinator's recovery check.
             throw cancelled
         } catch (_: Exception) {
-            fail(initial.record.id, TaskError.Source(StorageError(StorageErrorKind.LOCAL_IO)))
+            // Closing an interrupted stream may itself throw IOException. A persisted cancellation
+            // wins over that incidental I/O error, including before interrupt() reaches the child.
+            currentCoroutineContext().ensureActive()
+            if (queue.boundaryControl(initial.record.id) == TaskControl.CANCEL) stop(initial.record.id, handler, TaskControl.CANCEL)
+            else fail(initial.record.id, TaskError.Source(StorageError(StorageErrorKind.LOCAL_IO)))
         }
         return false
+    }
+
+    private suspend fun stop(id: TaskId, handler: TaskHandler, command: TaskControl) {
+        val entry = requireNotNull(queue.get(id))
+        // Atomic cache publication can win before a later cleanup revokes this already completed task.
+        if (entry.record.state == TaskState.Finished(TaskResult.Completed)) return
+        val cleaned = if (command == TaskControl.CANCEL) cleanupCancelled(handler, entry)
+            else { handler.stopped(entry); true }
+        queue.update(id) { current ->
+            val paused = command == TaskControl.PAUSE
+            current.copy(control = null, recoveryRequired = paused || !cleaned,
+                record = current.record.copy(state = if (paused) TaskState.Paused(current.stage) else TaskState.Finished(TaskResult.Cancelled),
+                    controls = if (paused) TaskControls(false, true, true, false) else DurableTaskQueue.noControls))
+        }
+    }
+
+    private suspend fun cleanupCancelled(handler: TaskHandler, entry: QueueEntry): Boolean = try {
+        handler.stopped(entry)
+        true
+    } catch (_: IOException) {
+        android.util.Log.w("TaskCoordinator", "task=${entry.record.id.value} stage=cancel_cleanup reason=local_io")
+        false
     }
 
     private suspend fun fail(id: TaskId, error: TaskError) = queue.update(id) { entry ->

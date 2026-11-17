@@ -8,6 +8,9 @@ import io.github.chenxiex.calibrecloud.storage.api.*
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
 import org.json.JSONObject
@@ -93,7 +96,7 @@ class FormatCopyTaskHandler(
             execution.checkControl()
             if (state.current()?.identity != imported.identity) throw StaleCopyBinding()
         }
-        var retainTransfer = entry.checkpoint?.let { readEvidence(entry.record.id, it) } != null
+        val retention = TransferRetention(entry.checkpoint?.let { readEvidence(entry.record.id, it) } != null)
         try {
             check()
             if (entry.knownMissing(path)) throw SourceFailure(StorageErrorKind.SOURCE_MISSING)
@@ -102,7 +105,7 @@ class FormatCopyTaskHandler(
                 check()
                 if (previous!!.savedVersion != version) {
                     state.confirmSource(key, SourceAvailability.AVAILABLE)
-                    queue.submit(TaskSubmission(
+                    queue.submitCopyUpdate(entry.record.id, TaskSubmission(
                         TaskRequest.FormatCopy(FormatResource(key.book, key.format, SourceFileLocator.Relative(location.backend, path)), version),
                         TaskOrigin.DOWNLOADED_FORMAT_UPDATE))
                 } else state.confirmSource(key, SourceAvailability.AVAILABLE, stamp)
@@ -110,107 +113,7 @@ class FormatCopyTaskHandler(
             }
             request as TaskRequest.FormatCopy
             if (entry.stage == TaskStage.FORMAT_TRANSFER) {
-                val found = source.lookup(location, path, ::check)
-                val version = found.version
-                if (request.expectedVersion != null && request.expectedVersion != version)
-                    throw SourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
-                check()
-                state.collectUnreferenced(key.book.libraryId)
-                val size = found.size
-                // Display and space pre-check only: without an exact size, integrity rests on the content digest.
-                val expected = found.estimatedSize ?: format.sizeBytes
-                fun progress(done: Long) = TaskProgress(done, expected?.takeIf { it >= done })
-                var checkpoint = entry.checkpoint?.takeIf { it.version == version }
-                var evidence = checkpoint?.let { readEvidence(entry.record.id, it) }
-                if (evidence != null && (evidence.total != size || (size != null && evidence.offset > size))) evidence = null
-                if (evidence == null) {
-                    if (entry.checkpoint != null) execution.markTransferRestart()
-                    discardStaging(entry.record.id)
-                    checkpoint = RecoveryCheckpoint(UUID.randomUUID(), version)
-                }
-                val generation = checkpoint!!.generation
-                val directory = staging(entry.record.id)
-                check(directory.mkdirs() || directory.isDirectory)
-                val target = privateFile("book-staging/${entry.record.id.value}/$generation.part")
-                var transferred = evidence?.offset ?: 0L
-                var input = if (transferred > 0 && (size == null || transferred < size))
-                    found.openRange(transferred) else null
-                if (transferred > 0 && (size == null || transferred < size) && input == null) {
-                    execution.markTransferRestart()
-                    transferred = 0
-                    evidence = null
-                }
-                var durableOffset = transferred
-                try {
-                    requireSpace(if (expected == null) 0 else maxOf(0, expected - transferred))
-                    execution.checkpoint(checkpoint, progress(transferred))
-                    val digest = MessageDigest.getInstance("SHA-256")
-                    if (transferred > 0) {
-                        hashPrefix(target, transferred, digest, ::check)
-                        RandomAccessFile(target, "rw").use { it.setLength(transferred) }
-                    }
-                    var lastProgress = System.nanoTime()
-                    if (size == null || transferred < size || transferred == 0L) {
-                        if (input == null) input = found.open()
-                        val transferInput = input!!
-                        input = null
-                        transferInput.use { stream -> FileOutputStream(target, transferred > 0).use { output ->
-                            try {
-                                val buffer = ByteArray(64 * 1024)
-                                while (true) {
-                                    check()
-                                    val count = stream.read(buffer)
-                                    if (count < 0) break
-                                    if (count == 0) continue
-                                    requireSpace(count.toLong())
-                                    if (size != null && count > size - transferred)
-                                        throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
-                                    output.write(buffer, 0, count)
-                                    digest.update(buffer, 0, count)
-                                    transferred += count
-                                    if (System.nanoTime() - lastProgress >= 2_000_000_000L) {
-                                        output.fd.sync()
-                                        durableOffset = transferred
-                                        saveEvidence(entry.record.id, checkpoint, target, transferred, size, false)
-                                        execution.checkpoint(checkpoint, progress(transferred))
-                                        lastProgress = System.nanoTime()
-                                    }
-                                }
-                            } finally { output.fd.sync(); durableOffset = transferred }
-                        } }
-                    }
-                    if (transferred > 0) {
-                        saveEvidence(entry.record.id, checkpoint, target, transferred, size, false)
-                        retainTransfer = true
-                    }
-                    check()
-                    if (transferred <= 0 || (size != null && transferred != size))
-                        throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
-                    val sha256 = found.contentSha256
-                    if (sha256 != null && sha256 != digest.digest().joinToString("") { "%02x".format(it) }) {
-                        throw SourceFailure(StorageErrorKind.VERSION_CONFLICT)
-                    }
-                    validate(target, key.format, ::check)
-                    if (!source.unchanged(location, path, version, ::check)) {
-                        throw SourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
-                    }
-                    check()
-                    saveEvidence(entry.record.id, checkpoint, target, transferred, size, true)
-                    execution.checkpoint(checkpoint, progress(transferred))
-                    return@withContext StageOutcome.Advance(TaskStage.FORMAT_PUBLISH)
-                } finally {
-                    try { input?.close() } finally {
-                        // Control exceptions must not prevent durable prefix recording. The coordinator
-                        // subsequently distinguishes pause (retain) from cancel (delete).
-                        withContext(NonCancellable) {
-                            if (durableOffset > 0 && target.isFile && target.length() >= durableOffset) {
-                                saveEvidence(entry.record.id, checkpoint, target, durableOffset, size,
-                                    readEvidence(entry.record.id, checkpoint)?.complete == true)
-                                retainTransfer = true
-                            }
-                        }
-                    }
-                }
+                return@withContext transfer(entry, execution, source, location, path, key, format.sizeBytes, retention, ::check)
             }
             val checkpoint = entry.checkpoint ?: return@withContext fail(StorageErrorKind.CORRUPT_CONTENT)
             val version = checkpoint.version ?: return@withContext fail(StorageErrorKind.CORRUPT_CONTENT)
@@ -239,8 +142,9 @@ class FormatCopyTaskHandler(
                 discardStaging(entry.record.id)
             }
         } catch (failure: SourceFailure) {
+            execution.checkControl()
             if (failure.error.kind in setOf(StorageErrorKind.VERSION_CONFLICT, StorageErrorKind.CORRUPT_CONTENT,
-                    StorageErrorKind.SOURCE_MISSING)) retainTransfer = false
+                    StorageErrorKind.SOURCE_MISSING)) retention.keep = false
             if (failure.error.kind == StorageErrorKind.SOURCE_MISSING) {
                 when (val stale = staleSource(entry, source, path, queue, requestSync)) {
                     is StaleSource.Await -> return@withContext stale.outcome
@@ -255,17 +159,149 @@ class FormatCopyTaskHandler(
                 else -> StageOutcome.Fail(TaskError.Source(failure.error))
             }
         } catch (_: StaleCopyBinding) {
-            retainTransfer = false
+            retention.keep = false
             fail(StorageErrorKind.VERSION_CONFLICT)
         } catch (_: IOException) {
+            execution.checkControl()
             fail(if (availableBytes() < RESERVE_BYTES) StorageErrorKind.INSUFFICIENT_SPACE else StorageErrorKind.LOCAL_IO)
         } finally {
             // Partial files are private recovery evidence only; normal readers use published generations.
-            if (!retainTransfer) discardStaging(entry.record.id)
+            withContext(NonCancellable) {
+                if (queue.boundaryControl(entry.record.id) == TaskControl.CANCEL) retention.keep = false
+                if (!retention.keep) discardStaging(entry.record.id)
+            }
+        }
+    }
+
+    private class TransferRetention(var keep: Boolean)
+
+    /** Owns one transfer's streams and durable-prefix recovery, independently of publication. */
+    private suspend fun transfer(entry: QueueEntry, execution: TaskExecution, source: LibrarySource,
+        location: LibraryLocation, path: RelativeSourcePath, key: CopyKey, estimatedSize: Long?,
+        retention: TransferRetention, control: suspend () -> Unit): StageOutcome {
+        suspend fun checkRetention() {
+            if (queue.boundaryControl(entry.record.id) == TaskControl.CANCEL) execution.cancelHere()
+        }
+        val request = entry.record.submission.request as TaskRequest.FormatCopy
+        val found = source.lookup(location, path, control)
+        val version = found.version
+        if (request.expectedVersion != null && request.expectedVersion != version)
+            throw SourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
+        control()
+        state.collectUnreferenced(key.book.libraryId)
+        val size = found.size
+        // Display and space pre-check only: without an exact size, integrity rests on the content digest.
+        val expected = found.estimatedSize ?: estimatedSize
+        fun progress(done: Long) = TaskProgress(done, expected?.takeIf { it >= done })
+        var checkpoint = entry.checkpoint?.takeIf { it.version == version }
+        var evidence = checkpoint?.let { readEvidence(entry.record.id, it) }
+        if (evidence != null && (evidence.total != size || (size != null && evidence.offset > size))) evidence = null
+        if (evidence == null) {
+            if (entry.checkpoint != null) execution.markTransferRestart()
+            discardStaging(entry.record.id)
+            checkpoint = RecoveryCheckpoint(UUID.randomUUID(), version)
+        }
+        val generation = checkpoint!!.generation
+        val directory = staging(entry.record.id)
+        check(directory.mkdirs() || directory.isDirectory)
+        val target = privateFile("book-staging/${entry.record.id.value}/$generation.part")
+        var transferred = evidence?.offset ?: 0L
+        var input = if (transferred > 0 && (size == null || transferred < size))
+            found.openRange(transferred) else null
+        if (transferred > 0 && (size == null || transferred < size) && input == null) {
+            execution.markTransferRestart()
+            transferred = 0
+            evidence = null
+        }
+        var durableOffset = transferred
+        var contentValidated = evidence?.complete == true
+        try {
+            requireSpace(if (expected == null) 0 else maxOf(0, expected - transferred))
+            execution.checkpoint(checkpoint, progress(transferred))
+            val digest = MessageDigest.getInstance("SHA-256")
+            if (transferred > 0) {
+                hashPrefix(target, transferred, digest, control)
+                RandomAccessFile(target, "rw").use { it.setLength(transferred) }
+            }
+            var lastProgress = System.nanoTime()
+            if (size == null || transferred < size || transferred == 0L) {
+                if (input == null) input = found.open()
+                val transferInput = input!!
+                input = null
+                transferInput.use { stream -> FileOutputStream(target, transferred > 0).use { output ->
+                    try {
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            control()
+                            val count = stream.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) continue
+                            requireSpace(count.toLong())
+                            if (size != null && count > size - transferred)
+                                throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
+                            output.write(buffer, 0, count)
+                            digest.update(buffer, 0, count)
+                            transferred += count
+                            if (System.nanoTime() - lastProgress >= 2_000_000_000L) {
+                                output.fd.sync()
+                                durableOffset = transferred
+                                saveEvidence(entry.record.id, checkpoint, target, transferred, size, false, ::checkRetention)
+                                execution.checkpoint(checkpoint, progress(transferred))
+                                lastProgress = System.nanoTime()
+                            }
+                        }
+                    } finally {
+                        if (syncTransferOutput(entry.record.id, output)) durableOffset = transferred
+                    }
+                } }
+            }
+            if (transferred > 0) {
+                saveEvidence(entry.record.id, checkpoint, target, transferred, size, false, ::checkRetention)
+                retention.keep = true
+            }
+            control()
+            if (transferred <= 0 || (size != null && transferred != size))
+                throw SourceFailure(StorageError(StorageErrorKind.CORRUPT_CONTENT))
+            val sha256 = found.contentSha256
+            if (sha256 != null && sha256 != digest.digest().joinToString("") { "%02x".format(it) }) {
+                throw SourceFailure(StorageErrorKind.VERSION_CONFLICT)
+            }
+            validate(target, key.format, control)
+            if (!source.unchanged(location, path, version, control)) {
+                throw SourceFailure(StorageError(StorageErrorKind.VERSION_CONFLICT))
+            }
+            control()
+            contentValidated = true
+            saveEvidence(entry.record.id, checkpoint, target, transferred, size, true, ::checkRetention)
+            execution.checkpoint(checkpoint, progress(transferred))
+            return StageOutcome.Advance(TaskStage.FORMAT_PUBLISH)
+        } finally {
+            try { input?.close() } finally {
+                // Pause, yielding and an interrupted worker retain their durable prefix.
+                // Explicit cancellation/revocation discards it without hashing or writing evidence.
+                withContext(NonCancellable) {
+                    if (queue.boundaryControl(entry.record.id) == TaskControl.CANCEL) {
+                        retention.keep = false
+                    } else if (durableOffset > 0 && target.isFile && target.length() >= durableOffset) {
+                        saveEvidence(entry.record.id, checkpoint, target, durableOffset, size,
+                            contentValidated, ::checkRetention)
+                        retention.keep = true
+                    }
+                }
+            }
         }
     }
 
     private data class PrefixEvidence(val offset: Long, val total: Long?, val complete: Boolean)
+
+    /** Cancellation discards bytes; all resumable exits flush before recording their durable offset. */
+    private suspend fun syncTransferOutput(id: TaskId, output: FileOutputStream): Boolean = withContext(NonCancellable) {
+        if (queue.boundaryControl(id) == TaskControl.CANCEL) false
+        else {
+            output.fd.sync()
+            true
+        }
+    }
 
     private fun evidenceFile(id: TaskId, checkpoint: RecoveryCheckpoint) =
         privateFile("book-staging/${id.value}/${checkpoint.generation}.resume")
@@ -285,16 +321,19 @@ class FormatCopyTaskHandler(
             if (digest.digest().joinToString("") { "%02x".format(it) } != json.getString("sha256")) null
             else PrefixEvidence(offset, total, json.getBoolean("complete") && target.length() == offset && (total == null || offset == total))
         }
-    } catch (_: Exception) { null }
+    } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { null }
 
-    private suspend fun saveEvidence(id: TaskId, checkpoint: RecoveryCheckpoint, target: File, offset: Long, total: Long?, complete: Boolean) {
+    private suspend fun saveEvidence(id: TaskId, checkpoint: RecoveryCheckpoint, target: File, offset: Long, total: Long?, complete: Boolean,
+        control: suspend () -> Unit) {
         val digest = MessageDigest.getInstance("SHA-256")
-        hashPrefix(target, offset, digest) {}
+        hashPrefix(target, offset, digest, control)
         val json = JSONObject().put("offset", offset).put("total", total ?: JSONObject.NULL)
             .put("sha256", digest.digest().joinToString("") { "%02x".format(it) })
             .put("version", checkpoint.version!!.token).put("backend", checkpoint.version.backend.name).put("complete", complete)
         val destination = evidenceFile(id, checkpoint)
         val temporary = privateFile("book-staging/${id.value}/${checkpoint.generation}.resume.tmp")
+        control()
         FileOutputStream(temporary).use { output -> output.write(json.toString().toByteArray(Charsets.UTF_8)); output.fd.sync() }
         if (!temporary.renameTo(destination)) throw IOException()
         syncDirectory(destination.parentFile!!)
@@ -307,6 +346,7 @@ class FormatCopyTaskHandler(
             val buffer = ByteArray(64 * 1024)
             var remaining = length
             while (remaining > 0) {
+                currentCoroutineContext().ensureActive()
                 control()
                 val count = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
                 if (count <= 0) throw IOException()

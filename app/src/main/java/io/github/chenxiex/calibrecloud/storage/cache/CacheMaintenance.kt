@@ -48,8 +48,9 @@ data class CleanupPlan internal constructor(
  * Private cache maintenance, with no source dependency. Preview freezes book/UUID/format scope;
  * confirmation rechecks selection in the removal transaction. Null formats means all formats.
  * The transaction revokes existing producers and removes query pointers before deleting bytes.
- * A durable journal blocks matching new submissions until safe-boundary deletion finishes. The shared queue
- * lock prevents old producers writing files after deletion; revoked tasks cannot retry or publish.
+ * Copy removal retires published generations locally and interrupts old producers; their task-keyed
+ * staging is reclaimed after execution exits. Other cleanup kinds still use the shared execution lock.
+ * Durable journals survive process death; revoked tasks cannot retry or publish.
  * Interrupted deletion is retried before dispatch. Protected write evidence is never enumerated.
  * When no library is current, or the current one has no import yet, other-library cleanup includes all
  * persisted library bindings while retaining the library list and the library being added.
@@ -62,6 +63,7 @@ class CacheMaintenance(
     private val queue: DurableTaskQueue,
     private val filesDir: File,
     private val io: CoroutineDispatcher,
+    private val onCleanupFailure: suspend () -> Unit = {},
 ) : CopyMaintenance {
     private val maintenance = Mutex()
 
@@ -125,66 +127,163 @@ class CacheMaintenance(
         } finally { db.endTransaction() }
     }
 
-    suspend fun execute(plan: CleanupPlan): Boolean = withContext(io) { maintenance.withLock {
-        val db = database.writableDatabase
-        db.transaction {
-            val selected = state.current(db)
-            val current = selected?.identity?.id
-            if (selected?.token != plan.selectionToken || current != plan.currentLibrary) return@withLock false
-            if (plan.kind == CleanupKind.LIBRARY) {
-                val location = plan.location ?: return@withLock false
-                if (!listed(db, location) || bindingsAt(db, location) != plan.libraries ||
-                    (selected?.location == location) != plan.deletesCurrent) return@withLock false
-            } else if (plan.kind == CleanupKind.OTHER_LIBRARIES && current in plan.libraries) return@withLock false
-            else if (plan.kind != CleanupKind.OTHER_LIBRARIES && (current == null || plan.libraries != setOf(current))) return@withLock false
-            if (DurableTaskQueue.cacheCleanupPending(db)) return@withLock false
-            val tasks = affectedTasks(db, plan)
-            val paths = paths(db, plan, tasks)
-            val id = UUID.randomUUID().toString()
-            val journal = JSONObject().put("paths", JSONArray(paths.filterNot { it.startsWith("books/") })).put("libraries", JSONArray(plan.libraries.map { it.value.toString() }))
-                .put("tasks", JSONArray(tasks.map { it.value.toString() }))
-                .put("retire", JSONArray(retiredGenerations(db, plan, tasks)))
-                .put("kind", plan.kind.name).put("token", plan.selectionToken?.toString() ?: JSONObject.NULL)
-                .put("books", JSONArray(plan.books.map { "${it.libraryId.value}/${it.sourceId}/${it.sourceUuid}" }))
-                .put("formats", plan.formats?.let { JSONArray(it.map { format -> format.value }) } ?: JSONObject.NULL)
-            db.insertOrThrow("cache_cleanup", null, ContentValues().apply { put("cleanup_id", id); put("payload", journal.toString()) })
-            tasks.forEach { DurableTaskQueue.revoke(db, it) }
-            if (plan.kind != CleanupKind.COPIES) plan.libraries.forEach { library ->
-                val args = arrayOf(library.value.toString())
-                db.delete("metadata_books", "library_id = ?", args)
-                db.delete("metadata_imports", "library_id = ?", args)
-                db.delete("cover_cache", "library_id = ?", args)
-                db.update("downloaded_copies", ContentValues().apply { put("source_availability", "unconfirmed") }, "library_id = ?", args)
-            }
-            if (plan.kind == CleanupKind.LIBRARY) {
-                plan.libraries.forEach { library ->
+    suspend fun execute(plan: CleanupPlan): Boolean = withContext(io) {
+        var cleanupId: String? = null
+        var revoked = emptySet<TaskId>()
+        val accepted = maintenance.withLock {
+            val db = database.writableDatabase
+            db.transaction {
+                val selected = state.current(db)
+                val current = selected?.identity?.id
+                if (selected?.token != plan.selectionToken || current != plan.currentLibrary) return@withLock false
+                if (plan.kind == CleanupKind.LIBRARY) {
+                    val location = plan.location ?: return@withLock false
+                    if (!listed(db, location) || bindingsAt(db, location) != plan.libraries ||
+                        (selected?.location == location) != plan.deletesCurrent) return@withLock false
+                } else if (plan.kind == CleanupKind.OTHER_LIBRARIES && current in plan.libraries) return@withLock false
+                else if (plan.kind != CleanupKind.OTHER_LIBRARIES && (current == null || plan.libraries != setOf(current))) return@withLock false
+                if (if (plan.kind == CleanupKind.COPIES) DurableTaskQueue.blockingCleanupPending(db)
+                    else DurableTaskQueue.cacheCleanupPending(db)) return@withLock false
+                val tasks = affectedTasks(db, plan)
+                revoked = tasks
+                val paths = paths(db, plan, tasks)
+                val id = UUID.randomUUID().toString()
+                cleanupId = id
+                val journal = JSONObject().put("paths", JSONArray(paths.filterNot { it.startsWith("books/") })).put("libraries", JSONArray(plan.libraries.map { it.value.toString() }))
+                    .put("tasks", JSONArray(tasks.map { it.value.toString() }))
+                    .put("retire", JSONArray(retiredGenerations(db, plan, tasks)))
+                    .put("published", JSONArray(retiredGenerations(db, plan, emptySet())))
+                    .put("kind", plan.kind.name).put("token", plan.selectionToken?.toString() ?: JSONObject.NULL)
+                    .put("books", JSONArray(plan.books.map { "${it.libraryId.value}/${it.sourceId}/${it.sourceUuid}" }))
+                    .put("formats", plan.formats?.let { JSONArray(it.map { format -> format.value }) } ?: JSONObject.NULL)
+                db.insertOrThrow("cache_cleanup", null, ContentValues().apply { put("cleanup_id", id); put("payload", journal.toString()) })
+                tasks.forEach { DurableTaskQueue.revoke(db, it) }
+                if (plan.kind != CleanupKind.COPIES) plan.libraries.forEach { library ->
                     val args = arrayOf(library.value.toString())
-                    listOf("library_preferences", "search_history", "last_opened", "opened_copies").forEach { db.delete(it, "library_id = ?", args) }
+                    db.delete("metadata_books", "library_id = ?", args)
+                    db.delete("metadata_imports", "library_id = ?", args)
+                    db.delete("cover_cache", "library_id = ?", args)
+                    db.update("downloaded_copies", ContentValues().apply { put("source_availability", "unconfirmed") }, "library_id = ?", args)
                 }
-                val location = requireNotNull(plan.location)
-                db.delete("configured_libraries", "backend = ? AND location_key = ?", state.locationArgs(location))
-                if (plan.deletesCurrent) db.delete("current_selection", "singleton = 1", null)
+                if (plan.kind == CleanupKind.LIBRARY) {
+                    plan.libraries.forEach { library ->
+                        val args = arrayOf(library.value.toString())
+                        listOf("library_preferences", "search_history", "last_opened", "opened_copies").forEach { db.delete(it, "library_id = ?", args) }
+                    }
+                    val location = requireNotNull(plan.location)
+                    db.delete("configured_libraries", "backend = ? AND location_key = ?", state.locationArgs(location))
+                    if (plan.deletesCurrent) db.delete("current_selection", "singleton = 1", null)
+                }
+                if (plan.kind != CleanupKind.METADATA) {
+                    val keys = allCopyKeys(db, plan.libraries).filter { plan.kind != CleanupKind.COPIES ||
+                        (it.book in plan.books && (plan.formats == null || it.format in plan.formats)) }
+                    keys.forEach { db.delete("downloaded_copies", COPY_KEY, copyArgs(it)) }
+                }
             }
-            if (plan.kind != CleanupKind.METADATA) {
-                val keys = allCopyKeys(db, plan.libraries).filter { plan.kind != CleanupKind.COPIES ||
-                    (it.book in plan.books && (plan.formats == null || it.format in plan.formats)) }
-                keys.forEach { db.delete("downloaded_copies", COPY_KEY, copyArgs(it)) }
-            }
+            queue.invalidateObservers()
+            if (plan.kind == CleanupKind.COPIES) {
+                revoked.forEach(queue::interrupt)
+                recoverCopiesLocked(cleanupId)
+            } else true
         }
-        queue.invalidateObservers()
+        // Wake even when local deletion failed: the journal is durable and needs a retry without
+        // another source task. Never hold maintenance while waiting for the remote executor.
+        if (cleanupId != null && plan.kind == CleanupKind.COPIES) queue.onWake()
+        if (!accepted || plan.kind == CleanupKind.COPIES) return@withContext accepted
         try {
             queue.executionLock.withLock { recoverLocked() }
             true
         } catch (_: java.io.IOException) { false }
+    }
+
+    /** Application wiring supplies this to the executor's generic exit hook, after its resources close. */
+    internal suspend fun taskExited(task: TaskId): Unit = withContext(io) { maintenance.withLock {
+        recoverCopiesLocked(task = task)
+        Unit
     } }
 
-    /** Caller owns queue.executionLock. Recovery does not consult current selection or a backend. */
-    internal suspend fun recoverLocked(): Unit = withContext(io) {
+    /** Includes journals with no remaining source tasks, so the platform worker also retries local I/O. */
+    internal suspend fun cleanupPending(): Boolean = withContext(io) {
+        DurableTaskQueue.cacheCleanupPending(database.readableDatabase)
+    }
+
+    /**
+     * COPIES journals name only revoked task IDs and immutable generations. The runtime registry
+     * distinguishes a stopped executor from the already-cancelled persistent record. Registration
+     * precedes its first revocation check, so a task registered after this check cannot start I/O.
+     */
+    private suspend fun recoverCopiesLocked(only: String? = null, task: TaskId? = null): Boolean {
         val db = database.writableDatabase
+        val journals = db.rawQuery("SELECT cleanup_id,payload FROM cache_cleanup", null).use {
+            buildList { while (it.moveToNext()) {
+                val id = it.getString(0)
+                val payload = JSONObject(it.getString(1))
+                if (payload.optString("kind") == CleanupKind.COPIES.name && (only == null || only == id)) add(id to payload)
+            } }
+        }
+        var successful = true
+        for ((id, payload) in journals) {
+            val tasks = payload.getJSONArray("tasks").taskIds()
+            if (task != null && task !in tasks) continue
+            try {
+                // Published generations are no longer writable; retire them even while an old
+                // download is unwinding. Its prospective generation must wait for actual exit.
+                state.retireCopies((payload.optJSONArray("published") ?: JSONArray()).copyLocations())
+                if (tasks.any(queue::isExecuting)) continue
+                val paths = payload.getJSONArray("paths")
+                for (index in 0 until paths.length()) delete(privateFile(paths.getString(index)))
+                // A checkpoint may have advanced just before revocation. Read it again after exit
+                // before clearing evidence, also covering a crash in rename-before-publication.
+                val generations = payload.getJSONArray("retire").copyLocations() +
+                    taskGenerations(db, tasks).map { generationLocation(it) }
+                state.retireCopies(generations.toSet())
+                completeJournal(db, id, tasks)
+            } catch (_: java.io.IOException) {
+                successful = false
+                onCleanupFailure()
+            }
+        }
+        queue.invalidateObservers()
+        return successful
+    }
+
+    private fun JSONArray.taskIds(): Set<TaskId> = (0 until length()).mapTo(mutableSetOf()) {
+        TaskId(UUID.fromString(getString(it)))
+    }
+
+    private fun generationLocation(value: String): CompleteCopyLocation {
+        val parts = value.split('/')
+        return CompleteCopyLocation(LibraryId(UUID.fromString(parts[0])), UUID.fromString(parts[1]))
+    }
+
+    private fun JSONArray.copyLocations(): Set<CompleteCopyLocation> =
+        (0 until length()).mapTo(mutableSetOf()) { generationLocation(getString(it)) }
+
+    private fun completeJournal(db: SQLiteDatabase, id: String, tasks: Set<TaskId>) {
+        db.transaction {
+            tasks.forEach { task ->
+                DurableTaskQueue.revoke(db, task)
+                db.update("queued_tasks", ContentValues().apply {
+                    putNull("checkpoint"); putNull("checkpoint_backend"); putNull("checkpoint_version"); putNull("control"); put("recovery_required", 0)
+                }, "task_id = ?", arrayOf(task.value.toString()))
+            }
+            db.delete("cache_cleanup", "cleanup_id = ?", arrayOf(id))
+        }
+    }
+
+    /** Caller owns queue.executionLock. Recovery does not consult current selection or a backend. */
+    internal suspend fun recoverLocked(): Unit = withContext(io) { maintenance.withLock { recoverAllLocked() } }
+
+    private suspend fun recoverAllLocked() {
+        val db = database.writableDatabase
+        recoverCopiesLocked()
         journalAbandonedInputs(db)
         journalPrunedTasks(db)
         val journals = db.rawQuery("SELECT cleanup_id,payload FROM cache_cleanup", null).use {
-            buildList { while (it.moveToNext()) add(it.getString(0) to JSONObject(it.getString(1))) }
+            buildList { while (it.moveToNext()) {
+                val payload = JSONObject(it.getString(1))
+                if (payload.optString("kind") != CleanupKind.COPIES.name) add(it.getString(0) to payload)
+            } }
         }
         journals.forEach { (id, payload) ->
             val paths = payload.getJSONArray("paths")
@@ -201,25 +300,13 @@ class CacheMaintenance(
                     }
                 })
             }
-            val tasks = payload.getJSONArray("tasks")
-            db.beginTransaction()
-            try {
-                for (index in 0 until tasks.length()) {
-                    val task = TaskId(UUID.fromString(tasks.getString(index)))
-                    DurableTaskQueue.revoke(db, task)
-                    db.update("queued_tasks", ContentValues().apply {
-                        putNull("checkpoint"); putNull("checkpoint_backend"); putNull("checkpoint_version"); putNull("control")
-                    }, "task_id = ?", arrayOf(task.value.toString()))
-                }
-                db.delete("cache_cleanup", "cleanup_id = ?", arrayOf(id))
-                db.setTransactionSuccessful()
-            } finally { db.endTransaction() }
+            completeJournal(db, id, payload.getJSONArray("tasks").taskIds())
         }
         if (journals.isNotEmpty()) {
             queue.invalidateObservers()
             journalAbandonedInputs(db)
             journalPrunedTasks(db)
-            if (DurableTaskQueue.cacheCleanupPending(db)) recoverLocked()
+            if (DurableTaskQueue.blockingCleanupPending(db)) recoverAllLocked()
         }
     }
 
@@ -340,6 +427,10 @@ class CacheMaintenance(
                 if (it.moveToFirst()) add("${key.book.libraryId.value}/${UUID.fromString(it.getString(0))}")
             }
         }
+        addAll(taskGenerations(db, tasks))
+    }
+
+    private fun taskGenerations(db: SQLiteDatabase, tasks: Set<TaskId>): List<String> = buildList {
         tasks.forEach { task -> db.rawQuery("SELECT record,checkpoint FROM queued_tasks WHERE task_id = ?", arrayOf(task.value.toString())).use {
             if (it.moveToFirst() && !it.isNull(1)) {
                 val request = TaskCodec.decode(it.getString(0)).submission.request as? TaskRequest.FormatCopy

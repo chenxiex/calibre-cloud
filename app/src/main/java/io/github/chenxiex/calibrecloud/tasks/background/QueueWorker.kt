@@ -39,7 +39,7 @@ class QueueWorker(context: Context, parameters: WorkerParameters) : CoroutineWor
                 it.record.state !is TaskState.Finished && it.record.state !is TaskState.Paused &&
                     dependencies.taskQueue.isActive(it.record)
             }
-            if (!pending) return@withContext Result.success()
+            if (!pending) return@withContext finishLocalRecovery(dependencies)
             setForeground(getForegroundInfo())
             dependencies.backgroundTasks.recordPlatformWaiting(false)
             coroutineScope {
@@ -84,7 +84,8 @@ class QueueWorker(context: Context, parameters: WorkerParameters) : CoroutineWor
                     else if (BuildConfig.DEBUG) android.util.Log.d("QueueWorker", message)
                 }
             }
-            if (dependencies.backgroundTasks.scheduleWaiting(inputData.getBoolean("retry_wake", false))) Result.retry() else Result.success()
+            val retryNetwork = dependencies.backgroundTasks.scheduleWaiting(inputData.getBoolean("retry_wake", false))
+            if (retryNetwork) Result.retry() else finishLocalRecovery(dependencies)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -97,6 +98,14 @@ class QueueWorker(context: Context, parameters: WorkerParameters) : CoroutineWor
                 Result.success()
             }
         }
+    }
+
+    /** Keep failed local reclamation off the immediate wakeup chain, so new user work can start. */
+    private suspend fun finishLocalRecovery(dependencies: io.github.chenxiex.calibrecloud.ApplicationDependencies): Result {
+        if (!dependencies.maintenance.cleanupPending()) return Result.success()
+        if (inputData.getBoolean("retry_wake", false)) return Result.retry()
+        dependencies.backgroundTasks.retryPlatform()
+        return Result.success()
     }
 
     override suspend fun getForegroundInfo(): ForegroundInfo {

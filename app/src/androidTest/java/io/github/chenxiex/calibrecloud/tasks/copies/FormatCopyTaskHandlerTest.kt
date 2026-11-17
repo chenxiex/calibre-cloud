@@ -29,6 +29,7 @@ import org.json.JSONObject
 import io.github.chenxiex.calibrecloud.tasks.api.*
 import io.github.chenxiex.calibrecloud.tasks.persistence.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -433,6 +434,32 @@ class FormatCopyTaskHandlerTest {
         assertArrayEquals(first.bytes, readBytes())
         assertTrue(replacement.closes.get() > 0)
         assertTrue(File(context.filesDir, "book-staging/${task.value}").listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun cancellationDiscardsProgressWithoutWritingResumeEvidence() = runBlocking<Unit> {
+        val source = Source(epub("discard partial progress")).apply { blockAfterChunk = true }
+        val task = submit()
+        val handler = FormatCopyTaskHandler(state, metadata, queue, source.sources, context.filesDir,
+            Dispatchers.IO, { Long.MAX_VALUE })
+        val entry = queue.update(task) { it.copy(record = it.record.copy(
+            state = TaskState.Running(it.stage), controls = handler.controls(it.stage))) }
+        // Invoke the handler directly so a separate executor Job cancellation cannot hide a failed
+        // checkpoint write. A directory at the evidence destination makes such a write fail visibly.
+        val result = async(Dispatchers.Default) {
+            runCatching { handler.execute(entry, TaskExecution(queue, task)) }
+        }
+        try {
+            assertTrue(source.started.await(10, TimeUnit.SECONDS))
+            val checkpoint = requireNotNull(queue.get(task)!!.checkpoint)
+            assertTrue(File(context.filesDir, "book-staging/${task.value}/${checkpoint.generation}.resume.tmp").mkdir())
+            assertTrue(queue.control(task, TaskControl.CANCEL))
+        } finally { source.release.countDown() }
+        assertTrue("Cancellation must propagate instead of becoming a checkpoint I/O failure",
+            withTimeout(10_000) { result.await() }.isFailure)
+        assertEquals(1, source.closes.get())
+        assertFalse(File(context.filesDir, "book-staging/${task.value}").exists())
+        assertNull(state.find(key()))
     }
 
     @Test

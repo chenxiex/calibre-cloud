@@ -33,9 +33,14 @@ class ApplicationDependencies(context: Context) {
             File(applicationContext.filesDir, "metadata"), Dispatchers.IO)
     }
     val maintenance: io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance by lazy { io.github.chenxiex.calibrecloud.storage.cache.CacheMaintenance(database, state, taskQueue,
-        applicationContext.filesDir, Dispatchers.IO) }
+        applicationContext.filesDir, Dispatchers.IO, onCleanupFailure = {
+            android.util.Log.w("CacheMaintenance", "stage=copy_cleanup reason=local_io")
+            io.github.chenxiex.calibrecloud.ui.BatchNotifications.post(applicationContext,
+                io.github.chenxiex.calibrecloud.ui.BatchNotice.RemovalFailed)
+        }) }
     val taskQueue: DurableTaskQueue by lazy { DurableTaskQueue(database, Dispatchers.IO).apply {
         beforeDispatch = { maintenance.recoverLocked() }
+        onTaskExited = { maintenance.taskExited(it) }
         onWake = { backgroundTasks.wake() }
     } }
     val localBackend by lazy {

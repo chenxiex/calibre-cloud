@@ -24,6 +24,8 @@ import io.github.chenxiex.calibrecloud.ui.LibraryContent
 import io.github.chenxiex.calibrecloud.ui.LibraryCovers
 import io.github.chenxiex.calibrecloud.ui.LibraryViewModel
 import io.github.chenxiex.calibrecloud.ui.QueueLibraryBatch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.withContext
@@ -335,21 +337,16 @@ class CacheMaintenanceTest {
     }
 
     @Test
-    fun cleanupWaitsForExecutorBoundaryThenPreventsOldPublication() = runBlocking<Unit> {
+    fun copyRemovalDoesNotWaitForUnrelatedExecutorAndPreventsOldPublication() = runBlocking<Unit> {
         val copy = publish(book, "EPUB")
         val task = pendingCopy(copy.key)
         val plan = requireNotNull(maintenance.previewCopies(setOf(book)))
         queue.executionLock.lock()
-        val started = CompletableDeferred<Unit>()
-        val cleanup = async(Dispatchers.Default) { started.complete(Unit); maintenance.execute(plan) }
         try {
-            started.await()
-            withTimeout(10_000) { while (queue.get(task)!!.control != TaskControl.CANCEL) delay(10) }
-            assertTrue(copyFile(copy).isFile)
+            assertTrue(withTimeout(10_000) { maintenance.execute(plan) })
+            assertFalse(copyFile(copy).exists())
             assertNull(state.find(copy.key))
-            assertFalse(cleanup.isCompleted)
         } finally { queue.executionLock.unlock() }
-        assertTrue(withTimeout(10_000) { cleanup.await() })
         assertCancelled(task)
         val stale = copy.copy(location = CompleteCopyLocation(book.libraryId, UUID.randomUUID()))
         copyFile(stale).apply { parentFile!!.mkdirs(); writeText("EPUB bytes") }
@@ -395,6 +392,19 @@ class CacheMaintenanceTest {
             assertFalse(maintenance.execute(plan))
             assertEquals(1L, count("cache_cleanup"))
             assertNull(state.find(copy.key))
+            assertTrue(maintenance.cleanupPending())
+            // A failed local journal must neither reject a fresh request nor stop dispatch.
+            val check = submit(TaskRequest.FormatCheck(copy.key), TaskOrigin.USER_DOWNLOAD)
+            queue.beforeDispatch = maintenance::recoverLocked
+            val checker = object : TaskHandler {
+                override fun supports(request: TaskRequest) = request is TaskRequest.FormatCheck
+                override fun controls(stage: TaskStage) = TaskControls(true, true, false, false)
+                override suspend fun recover(entry: QueueEntry, execution: TaskExecution) = RecoveryDecision(entry.stage, entry.checkpoint)
+                override suspend fun execute(entry: QueueEntry, execution: TaskExecution) = StageOutcome.Complete()
+            }
+            TaskCoordinator(queue, listOf(checker)).drain()
+            assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(check)!!.record.state)
+            assertEquals(1L, count("cache_cleanup"))
             val heldCopy = File(heldBooks, "${book.libraryId.value}/${copy.location.fileGeneration}.book")
             assertEquals("EPUB bytes", heldCopy.readText())
         } finally {
@@ -430,55 +440,94 @@ class CacheMaintenanceTest {
     }
 
     @Test
-    fun runningProducerStopsAtBoundaryAndExplicitNewRequestCanPublishAfterCleanup() = runBlocking<Unit> {
+    fun removedCopyCannotBeRecreatedByALateAutomaticUpdateSubmission() = runBlocking<Unit> {
+        val copy = publish(book, "EPUB")
+        val check = submit(TaskRequest.FormatCheck(copy.key), TaskOrigin.DOWNLOADED_FORMAT_UPDATE)
+        assertEquals(check, queue.claim(0, { emptySet() }, { true })!!.record.id)
+        val update = TaskSubmission(TaskRequest.FormatCopy(FormatResource(book, copy.key.format,
+            SourceFileLocator.Relative(BackendKind.LOCAL, RelativeSourcePath("author/book/book.epub")))),
+            TaskOrigin.DOWNLOADED_FORMAT_UPDATE)
+        val child = (queue.submitCopyUpdate(check, update) as SubmissionResult.Created).taskId
+        assertTrue(maintenance.execute(requireNotNull(maintenance.previewCopies(setOf(book)))))
+        assertCancelled(check)
+        assertCancelled(child)
+        assertTrue(queue.submitCopyUpdate(check, update) is SubmissionResult.Rejected)
+        assertEquals(2, queue.list().size)
+        assertNull(state.find(copy.key))
+    }
+
+    @Test
+    fun removalReturnsDuringCancellationAndExitHookOnlyReclaimsOldTaskFiles() = runBlocking<Unit> {
         val copy = publish(book, "EPUB")
         val request = TaskRequest.FormatCopy(FormatResource(book, copy.key.format,
             SourceFileLocator.Relative(BackendKind.LOCAL, RelativeSourcePath("author/book/book.epub"))))
         val arrived = CompletableDeferred<Unit>()
+        val closing = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        var published = false
-        var stopCalls = 0
+        val closed = CompletableDeferred<Unit>()
+        val checkpoint = RecoveryCheckpoint(UUID.randomUUID(), copy.savedVersion)
+        val futureFile = File(files, "books/${book.libraryId.value}/${checkpoint.generation}.book")
+        var old: TaskId? = null
+        var fresh: TaskId? = null
+        var freshStaging: File? = null
         val handler = object : TaskHandler {
             override fun supports(request: TaskRequest) = request is TaskRequest.FormatCopy
             override fun controls(stage: TaskStage) = TaskControls(true, true, false, false)
             override suspend fun recover(entry: QueueEntry, execution: TaskExecution) = RecoveryDecision(entry.stage, entry.checkpoint)
             override suspend fun execute(entry: QueueEntry, execution: TaskExecution): StageOutcome {
-                if (entry.stage == TaskStage.FORMAT_TRANSFER) {
+                if (entry.record.id == old) {
+                    execution.checkpoint(checkpoint)
+                    val partial = File(staging(entry.record.id), "${checkpoint.generation}.part")
+                        .apply { parentFile!!.mkdirs(); writeText("old partial") }
                     arrived.complete(Unit)
-                    release.await()
-                    execution.checkControl()
-                    return StageOutcome.Advance(TaskStage.FORMAT_PUBLISH)
+                    try { awaitCancellation() }
+                    finally { withContext(NonCancellable) {
+                        closing.complete(Unit)
+                        release.await()
+                        // Exercise late task-owned writes and the rename-before-publication window.
+                        File(staging(entry.record.id), "late.resume").writeText("old evidence")
+                        assertTrue(partial.renameTo(futureFile))
+                        closed.complete(Unit)
+                    } }
                 }
-                execution.checkControl()
+                assertEquals(fresh, entry.record.id)
+                assertEquals("fresh partial", requireNotNull(freshStaging).readText())
+                if (entry.stage == TaskStage.FORMAT_TRANSFER) return StageOutcome.Advance(TaskStage.FORMAT_PUBLISH)
                 val next = copy.copy(location = CompleteCopyLocation(book.libraryId, UUID.randomUUID()))
                 copyFile(next).apply { parentFile!!.mkdirs(); writeText("EPUB bytes") }
-                published = state.publishComplete(next, entry.record.id.value)
-                return StageOutcome.Complete(cachePublished = published)
+                assertTrue(state.publishComplete(next, entry.record.id.value))
+                return StageOutcome.Complete(cachePublished = true)
             }
-            override suspend fun stopped(entry: QueueEntry) { stopCalls++ }
         }
         val driver = TaskCoordinator(queue, listOf(handler))
-        val old = (driver.submit(TaskSubmission(request, TaskOrigin.USER_DOWNLOAD)) as SubmissionResult.Created).taskId
+        old = (driver.submit(TaskSubmission(request, TaskOrigin.USER_DOWNLOAD)) as SubmissionResult.Created).taskId
         val plan = requireNotNull(maintenance.previewCopies(setOf(book)))
         val drain = async(Dispatchers.Default) { driver.drain() }
-        withTimeout(10_000) { arrived.await() }
-        val cleanup = async(Dispatchers.Default) { maintenance.execute(plan) }
         try {
-            withTimeout(10_000) { while (count("cache_cleanup") == 0L) delay(10) }
-            assertFalse(cleanup.isCompleted)
+            withTimeout(10_000) { arrived.await() }
+            assertTrue(withTimeout(10_000) { maintenance.execute(plan) })
+            withTimeout(10_000) { closing.await() }
+            assertFalse(drain.isCompleted)
+            assertNull(state.find(copy.key))
+            assertFalse(copyFile(copy).exists())
+            assertTrue(staging(requireNotNull(old)).isDirectory)
+            assertEquals(1L, count("cache_cleanup"))
+            val stale = copy.copy(location = CompleteCopyLocation(book.libraryId, UUID.randomUUID()))
+            copyFile(stale).apply { parentFile!!.mkdirs(); writeText("EPUB bytes") }
+            assertFalse(state.publishComplete(stale, requireNotNull(old).value))
+            copyFile(stale).delete()
+            fresh = (driver.submit(TaskSubmission(request, TaskOrigin.USER_DOWNLOAD)) as SubmissionResult.Created).taskId
+            freshStaging = File(staging(requireNotNull(fresh)), "new.part").apply { parentFile!!.mkdirs(); writeText("fresh partial") }
         } finally { release.complete(Unit) }
         withTimeout(10_000) { drain.await() }
-        assertTrue(withTimeout(10_000) { cleanup.await() })
-        assertFalse(published)
-        assertEquals(1, stopCalls)
-        assertCancelled(old)
-        assertNull(state.find(copy.key))
-        val fresh = driver.submit(TaskSubmission(request, TaskOrigin.USER_DOWNLOAD)) as SubmissionResult.Created
-        assertNotEquals(old, fresh.taskId)
-        driver.drain()
-        assertTrue(published)
+        assertTrue(closed.isCompleted)
+        assertCancelled(requireNotNull(old))
+        assertFalse(staging(requireNotNull(old)).exists())
+        assertFalse(futureFile.exists())
+        assertEquals(0L, count("cache_cleanup"))
+        assertEquals("fresh partial", requireNotNull(freshStaging).readText())
         assertNotNull(state.find(copy.key))
-        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(fresh.taskId)!!.record.state)
+        assertEquals(TaskState.Finished(TaskResult.Completed), queue.get(requireNotNull(fresh))!!.record.state)
     }
 
     @Test
@@ -692,6 +741,7 @@ class CacheMaintenanceTest {
         metadata = MetadataRepository(database, state, File(files, "metadata"), Dispatchers.IO)
         queue = DurableTaskQueue(database, Dispatchers.IO)
         maintenance = CacheMaintenance(database, state, queue, files, Dispatchers.IO)
+        queue.onTaskExited = maintenance::taskExited
     }
 
     /** A library added through the list, made current and imported. */

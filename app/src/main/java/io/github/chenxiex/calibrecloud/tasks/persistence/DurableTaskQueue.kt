@@ -53,6 +53,15 @@ enum class TaskControl(val code: String) { PAUSE("pause"), CANCEL("cancel"), RES
 class DurableTaskQueue(private val database: ApplicationStateDatabase, private val io: CoroutineDispatcher) : TaskQueue {
     internal val executionLock = Mutex()
     internal var beforeDispatch: suspend () -> Unit = {}
+    /** Called only after a task's execution and resource cleanup have ended, with no active registration. */
+    internal var onTaskExited: suspend (TaskId) -> Unit = {}
+    private val executions = RunningTaskExecutions()
+
+    internal fun isExecuting(id: TaskId): Boolean = executions.isExecuting(id)
+    /** Persist the cancellation/revocation first. This signal does not replace the durable publication gate. */
+    internal fun interrupt(id: TaskId) = executions.interrupt(id)
+    internal suspend fun <T> executeTask(id: TaskId, onCancelled: suspend () -> T, action: suspend () -> T): T =
+        executions.run(id, onCancelled, { onTaskExited(id) }, action)
     /** Installed by the process container; called after durable submission/control, never inside a transaction. */
     var onWake: suspend () -> Unit = {}
     private val revision = MutableStateFlow(0L)
@@ -75,13 +84,29 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
 
     suspend fun list(): List<QueueEntry> = withContext(io) { entries(database.readableDatabase).sortedWith { a, b -> compareSchedulingPositions(a.record.scheduling, b.record.scheduling) } }
 
-    override suspend fun submit(submission: TaskSubmission): SubmissionResult = withContext(io) {
+    override suspend fun submit(submission: TaskSubmission): SubmissionResult = submit(submission, producer = null)
+
+    /** A version check may enqueue replacement only while it still owns a retained downloaded copy. */
+    internal suspend fun submitCopyUpdate(producer: TaskId, submission: TaskSubmission): SubmissionResult = submit(submission, producer)
+
+    private suspend fun submit(submission: TaskSubmission, producer: TaskId?): SubmissionResult = withContext(io) {
         val changed = mutableListOf<TaskRecord>()
         val result = transaction {
             if (cleanupBlocks(this, submission.request)) return@transaction rejected()
             val all = entries(this)
             val byId = all.associateBy { it.record.id }
             val request = submission.request
+            if (producer != null) {
+                val owner = byId[producer] ?: return@transaction rejected()
+                val check = owner.record.submission.request as? TaskRequest.FormatCheck ?: return@transaction rejected()
+                val copy = request as? TaskRequest.FormatCopy ?: return@transaction rejected()
+                if (owner.record.state !is TaskState.Running || owner.control != null || isRevoked(this, producer) ||
+                    copy.resource.book != check.key.book || copy.resource.format != check.key.format) return@transaction rejected()
+                val key = check.key
+                val retained = rawQuery("SELECT 1 FROM downloaded_copies WHERE library_id = ? AND source_id = ? AND source_uuid = ? AND format = ?",
+                    arrayOf(key.book.libraryId.value.toString(), key.book.sourceId.toString(), key.book.sourceUuid.toString(), key.format.value)).use { it.moveToFirst() }
+                if (!retained) return@transaction rejected()
+            }
             if (request.libraryId != null) {
                 val backend = rawQuery("SELECT backend FROM library_bindings WHERE library_id = ?", arrayOf(request.libraryId!!.value.toString())).use {
                     if (it.moveToFirst()) it.getString(0) else null
@@ -277,6 +302,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
     internal suspend fun claim(now: Long, conditions: (TaskRecord) -> Set<WaitingReason>, supported: (TaskRequest) -> Boolean, excluded: Set<TaskId> = emptySet()): QueueEntry? = withContext(io) {
         val changed = mutableListOf<TaskRecord>()
         val claimed = transaction {
+            if (blockingCleanupPending(this)) return@transaction null
             val all = entries(this)
             if (all.any { it.record.state is TaskState.Running }) return@transaction null
             execSQL("DELETE FROM source_throttle WHERE until <= ?", arrayOf<Any>(now))
@@ -288,7 +314,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             val eligible = mutableListOf<QueueEntry>()
             all.forEach { entry ->
                 val record = entry.record
-                if (isRevoked(this, record.id) || cacheCleanupPending(this) || record.state is TaskState.Finished || record.state is TaskState.Paused || record.id in excluded) return@forEach
+                if (isRevoked(this, record.id) || record.state is TaskState.Finished || record.state is TaskState.Paused || record.id in excluded) return@forEach
                 val reasons = conditions(record).toMutableSet()
                 if (!active(this, record)) {
                     reasons.add(WaitingReason.INACTIVE_LIBRARY)
@@ -358,6 +384,7 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         changed?.let { publish(it) }
         if (accepted) {
             requests.incrementAndGet()
+            if (command == TaskControl.CANCEL) interrupt(id)
             onWake()
         }
         accepted
@@ -423,7 +450,8 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
             .drop(keep)
             .filter { entry ->
                 val record = entry.record
-                !holds(db, record.submission.request.owner) && record.id !in prerequisites && entry.checkpoint == null
+                !holds(db, record.submission.request.owner) && record.id !in prerequisites && entry.checkpoint == null &&
+                    !(record.state == TaskState.Finished(TaskResult.Cancelled) && entry.recoveryRequired)
             }.map { it.record.id }
         pruned.forEach { id ->
             val args = arrayOf(id.value.toString())
@@ -442,7 +470,13 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
         action: (QueueEntry) -> QueueEntry): QueueEntry = withContext(io) {
         val updated = transaction {
             val old = requireNotNull(entry(this, id))
-            action(old).also { changed ->
+            val proposed = action(old)
+            // A producer may report progress after revocation but before its interruption arrives.
+            // Retain its last checkpoint for reclamation without resurrecting a Running row that
+            // would block subsequent claims or advertise a cancelled request as executable.
+            val changed = if (isRevoked(this, id)) proposed.copy(record = proposed.record.copy(
+                state = old.record.state, controls = noControls)) else proposed
+            changed.also {
                 require(changed.record.id == old.record.id && changed.record.submission == old.record.submission)
                 require(changed.record.scheduling == old.record.scheduling && changed.record.promotion == old.record.promotion)
                 save(this, changed)
@@ -584,7 +618,12 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
 
     companion object {
         internal fun cacheCleanupPending(db: SQLiteDatabase): Boolean = db.rawQuery("SELECT 1 FROM cache_cleanup LIMIT 1", null).use { it.moveToFirst() }
-        /** New requests outside the frozen cleanup scope remain accepted. Dispatch waits for deletion. */
+        /** Scoped copy retirement names only revoked old producers and cannot block new work. */
+        internal fun blockingCleanupPending(db: SQLiteDatabase): Boolean = db.rawQuery("SELECT payload FROM cache_cleanup", null).use { rows ->
+            while (rows.moveToNext()) if (org.json.JSONObject(rows.getString(0)).optString("kind") != "COPIES") return@use true
+            false
+        }
+        /** Broader cleanup keeps its original submission gate; scoped copy retirement allows fresh tasks. */
         private fun cleanupBlocks(db: SQLiteDatabase, request: TaskRequest): Boolean = db.rawQuery("SELECT payload FROM cache_cleanup", null).use { rows ->
             while (rows.moveToNext()) {
                 val journal = org.json.JSONObject(rows.getString(0))
@@ -592,23 +631,12 @@ class DurableTaskQueue(private val database: ApplicationStateDatabase, private v
                 val inLibrary = (0 until libraries.length()).any { libraries.getString(it) == request.libraryId?.value?.toString() }
                 val candidate = request as? TaskRequest.CandidateConfiguration
                 val kind = journal.optString("kind", "OTHER_LIBRARIES")
+                if (kind == "COPIES") continue
                 val inCandidate = kind == "METADATA" && candidate != null && candidate.context.selectionToken.toString() == journal.optString("token")
                 if (!inLibrary && !inCandidate) continue
                 if (kind == "METADATA" && request is TaskRequest.ReadStatusWrite) continue
                 if (kind == "METADATA") {
                     if (request is TaskRequest.CoverLoad || candidate?.operation == TaskRequest.CandidateConfiguration.LIBRARY_SYNC) return@use true
-                } else if (kind == "COPIES") {
-                    val key = when (request) {
-                        is TaskRequest.FormatCopy -> io.github.chenxiex.calibrecloud.model.CopyKey(request.resource.book, request.resource.format)
-                        is TaskRequest.FormatCheck -> request.key
-                        else -> null
-                    } ?: continue
-                    val books = journal.getJSONArray("books")
-                    val book = "${key.book.libraryId.value}/${key.book.sourceId}/${key.book.sourceUuid}"
-                    if ((0 until books.length()).none { books.getString(it) == book }) continue
-                    if (journal.isNull("formats")) return@use true
-                    val formats = journal.getJSONArray("formats")
-                    if ((0 until formats.length()).any { formats.getString(it) == key.format.value }) return@use true
                 } else return@use true
             }
             false

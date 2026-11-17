@@ -18,6 +18,8 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.InternalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -28,6 +30,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.Response
+import okhttp3.ResponseBody
+import okio.ForwardingSource
+import okio.buffer
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import java.util.concurrent.TimeUnit
 
 sealed interface OneDriveSourceResult<out T> {
@@ -171,7 +178,7 @@ class OneDriveSourceBackend(
         if (thumbnail != null) {
             val stream = try {
                 currentCoroutineContext().ensureActive()
-                val response = followContentRedirects(contentClient.newCall(Request.Builder().url(thumbnail.url).build()).execute())
+                val response = followContentRedirects(execute(contentClient, Request.Builder().url(thumbnail.url).build()))
                 responseStream(response)
             } catch (failure: OneDriveSourceException) {
                 if (failure.kind != StorageErrorKind.SOURCE_MISSING) throw failure
@@ -524,11 +531,57 @@ class OneDriveSourceBackend(
             currentCoroutineContext().ensureActive()
             val token = tokenProvider(attempt == 1)?.takeIf { it.isNotBlank() }
                 ?: throw OneDriveSourceException(StorageErrorKind.LOGIN_REQUIRED)
-            val response = client.newCall(Request.Builder().url(target).apply(configure).header("Authorization", "Bearer $token").build()).execute()
+            val response = execute(client, Request.Builder().url(target).apply(configure).header("Authorization", "Bearer $token").build())
             if (response.code != 401 || attempt == 1) return response
             response.close()
         }
         throw OneDriveSourceException(StorageErrorKind.LOGIN_REQUIRED)
+    }
+
+    /** The caller owns returned streams beyond the short I/O-dispatch operation that opened them. */
+    private class RequestOwner(val job: Job?) : AbstractCoroutineContextElement(Key) {
+        companion object Key : CoroutineContext.Key<RequestOwner>
+    }
+
+    /**
+     * Cancellation interrupts both waiting for headers and reading the body. The handler must run
+     * when cancellation starts: a completion-only handler would wait for the blocked read to exit.
+     * Closing the response detaches it, so later task cancellation cannot affect a completed call.
+     */
+    @OptIn(InternalCoroutinesApi::class)
+    private suspend fun execute(client: OkHttpClient, request: Request): Response {
+        val call = client.newCall(request)
+        val owner = currentCoroutineContext()[RequestOwner]?.job
+        val registration = owner?.invokeOnCompletion(onCancelling = true, invokeImmediately = true) { cause ->
+            if (cause != null) call.cancel()
+        }
+        val response = try {
+            call.execute()
+        } catch (failure: Throwable) {
+            registration?.dispose()
+            throw failure
+        }
+        try {
+            currentCoroutineContext().ensureActive()
+            val body = response.body
+            if (body == null) {
+                registration?.dispose()
+                return response
+            }
+            return response.newBuilder().body(object : ResponseBody() {
+                private val input = object : ForwardingSource(body.source()) {
+                    override fun close() {
+                        try { super.close() } finally { registration?.dispose() }
+                    }
+                }.buffer()
+                override fun contentType() = body.contentType()
+                override fun contentLength() = body.contentLength()
+                override fun source() = input
+            }).build()
+        } catch (failure: Throwable) {
+            try { response.close() } finally { registration?.dispose() }
+            throw failure
+        }
     }
 
     private fun responseStream(response: Response): InputStream {
@@ -550,7 +603,7 @@ class OneDriveSourceBackend(
     private suspend fun contentResponse(location: LibraryLocation.OneDrive, file: OneDriveSourceFile, offset: Long? = null): Response {
         val direct = file.downloadUrl ?: return followContentRedirects(graph(url("drives", location.driveId, "items", file.itemId, "content")), offset)
         currentCoroutineContext().ensureActive()
-        return followContentRedirects(contentClient.newCall(contentRequest(direct, offset)).execute(), offset)
+        return followContentRedirects(execute(contentClient, contentRequest(direct, offset)), offset)
     }
 
     private fun contentRequest(target: HttpUrl, offset: Long?) = Request.Builder().url(target).apply {
@@ -570,7 +623,7 @@ class OneDriveSourceBackend(
                 if (!target.isHttps || target.username.isNotEmpty() || target.password.isNotEmpty()) unsupported()
                 response.close()
                 currentCoroutineContext().ensureActive()
-                response = contentClient.newCall(contentRequest(target, offset)).execute()
+                response = execute(contentClient, contentRequest(target, offset))
             }
             return response
         } catch (error: Throwable) {
@@ -644,20 +697,27 @@ class OneDriveSourceBackend(
     @Suppress("UNCHECKED_CAST")
     private fun Map<String, Any?>.obj(key: String): Map<String, Any?> = get(key) as? Map<String, Any?> ?: unsupported("object_$key")
 
-    private suspend fun <T> operation(block: suspend () -> T): OneDriveSourceResult<T> = withContext(ioDispatcher) {
-        try {
-            OneDriveSourceResult.Available(block())
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: OneDriveSourceException) {
-            diagnostic(error.reason)
-            OneDriveSourceResult.Failed(StorageError(error.kind), error.retryDelayMillis, error.transient)
-        } catch (_: LocalFailure) {
-            OneDriveSourceResult.Failed(StorageError(StorageErrorKind.LOCAL_IO))
-        } catch (_: IOException) {
-            OneDriveSourceResult.Failed(StorageError(StorageErrorKind.NO_NETWORK), 30_000, true)
-        } catch (_: SecurityException) {
-            OneDriveSourceResult.Failed(StorageError(StorageErrorKind.AUTHORIZATION_EXPIRED))
+    private suspend fun <T> operation(block: suspend () -> T): OneDriveSourceResult<T> {
+        val owner = currentCoroutineContext()[RequestOwner] ?: RequestOwner(currentCoroutineContext()[Job])
+        return withContext(ioDispatcher + owner) {
+            try {
+                OneDriveSourceResult.Available(block())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: OneDriveSourceException) {
+                currentCoroutineContext().ensureActive()
+                diagnostic(error.reason)
+                OneDriveSourceResult.Failed(StorageError(error.kind), error.retryDelayMillis, error.transient)
+            } catch (_: LocalFailure) {
+                currentCoroutineContext().ensureActive()
+                OneDriveSourceResult.Failed(StorageError(StorageErrorKind.LOCAL_IO))
+            } catch (_: IOException) {
+                currentCoroutineContext().ensureActive()
+                OneDriveSourceResult.Failed(StorageError(StorageErrorKind.NO_NETWORK), 30_000, true)
+            } catch (_: SecurityException) {
+                currentCoroutineContext().ensureActive()
+                OneDriveSourceResult.Failed(StorageError(StorageErrorKind.AUTHORIZATION_EXPIRED))
+            }
         }
     }
 }
